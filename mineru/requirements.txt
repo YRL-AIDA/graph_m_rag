@@ -1,0 +1,9 @@
+mineru
+mineru-vl-utils[transformers]
+mineru-vl-utils[vllm]
+modelscope
+doclayout-yolo
+ultralytics
+fastapi
+uvicorn[standard]
+pydantic

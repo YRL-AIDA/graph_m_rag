@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graph_m_rag"
+version = "0.1.0"
+description = "A RAG system with graph-based retrieval"
+authors = [
+    {name = "Author", email = "author@example.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+dependencies = [
+    "fastapi>=0.104.1",
+    "uvicorn>=0.24.0",
+    "qdrant-client>=1.9.0",
+    "pydantic>=2.5.0,<3.0.0",
+    "minio>=7.2.0",
+    "python-multipart>=0.0.6",
+    "Pillow>=9.0.0",
+    "modelscope>=1.9.0",
+    "mineru>=1.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+    "isort>=5.0.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["graph_m_rag", "graph_m_rag.*"]

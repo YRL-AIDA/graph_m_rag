@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Union, Tuple
+import tempfile
+import json
+from dataclasses import dataclass
+from functools import lru_cache
+
+try:
+    from mineru.cli.common import convert_pdf_bytes_to_bytes_by_pypdfium2, prepare_env, read_fn
+    from mineru.data.data_reader_writer import FileBasedDataWriter
+    from mineru.backend.pipeline.pipeline_analyze import doc_analyze as pipeline_doc_analyze
+    from mineru.backend.pipeline.pipeline_middle_json_mkcontent import union_make as pipeline_union_make
+    from mineru.backend.pipeline.model_json_to_middle_json import result_to_middle_json as pipeline_result_to_middle_json
+    from mineru.backend.vlm.vlm_analyze import doc_analyze as vlm_doc_analyze
+    from mineru.backend.vlm.vlm_middle_json_mkcontent import union_make as vlm_union_make
+    from mineru.utils.enum_class import MakeMode
+except ImportError:
+    print("Warning: MinerU modules not found. Some functionality may be unavailable.")
+    # Define placeholder functions/classes if imports fail
+    def convert_pdf_bytes_to_bytes_by_pypdfium2(*args, **kwargs):
+        raise NotImplementedError("MinerU not installed")
+    
+    def prepare_env(*args, **kwargs):
+        raise NotImplementedError("MinerU not installed")
+    
+    class FileBasedDataWriter:
+        def __init__(self, *args, **kwargs):
+            raise NotImplementedError("MinerU not installed")
+    
+    def pipeline_doc_analyze(*args, **kwargs):
+        raise NotImplementedError("MinerU not installed")
+    
+    def pipeline_union_make(*args, **kwargs):
+        raise NotImplementedError("MinerU not installed")
+    
+    def pipeline_result_to_middle_json(*args, **kwargs):
+        raise NotImplementedError("MinerU not installed")
+    
+    def vlm_doc_analyze(*args, **kwargs):
+        raise NotImplementedError("MinerU not installed")
+    
+    def vlm_union_make(*args, **kwargs):
+        raise NotImplementedError("MinerU not installed")
+    
+    class MakeMode:
+        MM_MD = "md"
+        CONTENT_LIST = "content_list"
+
+try:
+    from modelscope import AutoProcessor, Qwen2VLForConditionalGeneration
+    from PIL import Image
+    import io
+    
+    # Attempt to import mineru_vl_utils, but don't fail if it's not available
+    try:
+        from mineru_vl_utils import MinerUClient
+    except ImportError:
+        print("Warning: mineru_vl_utils not found. VLM functionality may be limited.")
+        MinerUClient = None
+except ImportError:
+    print("Warning: Required dependencies (modelscope, PIL) not found.")
+    AutoProcessor = None
+    Qwen2VLForConditionalGeneration = None
+    Image = None
+    io = None
+    MinerUClient = None
+
+@dataclass
+class ProcessingConfig:
+    backend: str = "pipeline"
+    method: str = "auto"
+    lang: str = "ru"
+    formula_enable: bool = True
+    table_enable: bool = True
+    start_page_id: int = 0
+    end_page_id: Optional[int] = None
+    server_url: Optional[str] = None
+
+class MinerUWrapper:
+
+    _instance = None
+    _vlm_client = None
+    _pipeline_initialized = False
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(MinerUWrapper, cls).__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        if not hasattr(self, '_initialized'):
+            self._initialized = True
+            self._init_models()
+    
+    def _init_models(self):
+        print("Инициализация MinerU моделей...")
+        
+        cache_dir = os.getenv("MODELSCOPE_CACHE", "/app/models")
+        os.environ['MODELSCOPE_CACHE'] = cache_dir
+        
+        print(f"Используется кеш моделей: {cache_dir}")
+        
+        pdf_model_path = Path(cache_dir) / "OpenDataLab" / "PDF-Extract-Kit-1.0"
+        vlm_model_path = Path(cache_dir) / "OpenDataLab" / "MinerU2.5-2509-1.2B"
+        
+        if not pdf_model_path.exists():
+            print(f"Внимание: PDF модель не найдена в кеше: {pdf_model_path}")
+        
+        if not vlm_model_path.exists():
+            print(f"Внимание: VLM модель не найдена в кеше: {vlm_model_path}")
+        
+        print("Модели готовы к использованию")
+    
+    @lru_cache(maxsize=1)
+    def get_vlm_client(self):
+        if self._vlm_client is None:
+            print("Creating VLM client...")
+            if MinerUClient is None or AutoProcessor is None or Qwen2VLForConditionalGeneration is None:
+                raise RuntimeError("Required dependencies for VLM client are not available")
+            try:
+                cache_dir = os.getenv("MODELSCOPE_CACHE", "/app/models")
+                path_model = Path(cache_dir) / "OpenDataLab" / "MinerU2.5-2509-1.2B"
+                model = Qwen2VLForConditionalGeneration.from_pretrained(
+                    path_model,
+                    dtype="auto",
+                    device_map="auto"
+                )
+                processor = AutoProcessor.from_pretrained(
+                    path_model,
+                    use_fast=True
+                )
+                self._vlm_client = MinerUClient(
+                    backend="transformers",
+                    model=model,
+                    processor=processor
+                )
+                print("VLM client created successfully")
+            except Exception as e:
+                print(f"Error creating VLM client: {e}")
+                raise
+        return self._vlm_client
+    
+    def process_image(self, image_bytes: bytes) -> Dict[str, Any]:
+        if Image is None or io is None or MinerUClient is None:
+            return {
+                "success": False,
+                "error": "Required dependencies for image processing are not available",
+                "format": "vlm"
+            }
+        
+        try:
+            client = self.get_vlm_client()
+            
+            image = Image.open(io.BytesIO(image_bytes))
+            
+            extracted_blocks = client.two_step_extract(image)
+            
+            return {
+                "success": True,
+                "results": {
+                    "image_info": extracted_blocks
+                },
+                "format": "vlm"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "format": "vlm"
+            }
+    
+    def process_pdf(
+        self,
+        pdf_bytes: bytes,
+        config: ProcessingConfig,
+        output_dir: Optional[str] = None
+    ) -> Dict[str, Any]:
+        if (convert_pdf_bytes_to_bytes_by_pypdfium2 is None or 
+            prepare_env is None or 
+            FileBasedDataWriter is None or 
+            pipeline_doc_analyze is None or 
+            pipeline_union_make is None or 
+            pipeline_result_to_middle_json is None or 
+            vlm_doc_analyze is None or 
+            vlm_union_make is None):
+            return {
+                "success": False,
+                "error": "Required dependencies for PDF processing are not available",
+                "format": config.backend
+            }
+        
+        try:
+            if output_dir is None:
+                temp_dir = tempfile.mkdtemp(prefix="mineru_")
+                output_dir = temp_dir
+            
+            pdf_file_names = ["document"]
+            pdf_bytes_list = [pdf_bytes]
+            p_lang_list = [config.lang]
+            
+            if config.backend == "pipeline":
+                pdf_bytes_list[0] = convert_pdf_bytes_to_bytes_by_pypdfium2(
+                    pdf_bytes, config.start_page_id, config.end_page_id
+                )
+                
+                infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled_list = pipeline_doc_analyze(
+                    pdf_bytes_list,
+                    p_lang_list,
+                    parse_method=config.method,
+                    formula_enable=config.formula_enable,
+                    table_enable=config.table_enable
+                )
+                
+                idx = 0
+                model_list = infer_results[idx]
+                pdf_file_name = pdf_file_names[idx]
+                local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, config.method)
+                image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
+                
+                images_list = all_image_lists[idx]
+                pdf_doc = all_pdf_docs[idx]
+                _lang = lang_list[idx]
+                _ocr_enable = ocr_enabled_list[idx]
+                
+                middle_json = pipeline_result_to_middle_json(
+                    model_list, images_list, pdf_doc, image_writer,
+                    _lang, _ocr_enable, config.formula_enable
+                )
+                
+                image_dir = str(Path(local_image_dir).name)
+                md_content = pipeline_union_make(
+                    middle_json["pdf_info"],
+                    MakeMode.MM_MD,
+                    image_dir
+                )
+                
+                content_list = pipeline_union_make(
+                    middle_json["pdf_info"],
+                    MakeMode.CONTENT_LIST,
+                    image_dir
+                )
+                
+                format_type = "pipeline"
+                
+            else:
+                pdf_bytes_list[0] = convert_pdf_bytes_to_bytes_by_pypdfium2(
+                    pdf_bytes, config.start_page_id, config.end_page_id
+                )
+                
+                pdf_file_name = pdf_file_names[0]
+                local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, "vlm")
+                image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
+                
+                middle_json, infer_result = vlm_doc_analyze(
+                    pdf_bytes_list[0],
+                    image_writer=image_writer,
+                    backend=config.backend.replace("vlm-", ""),
+                    server_url=config.server_url
+                )
+                
+                image_dir = str(Path(local_image_dir).name)
+                md_content = vlm_union_make(
+                    middle_json["pdf_info"],
+                    MakeMode.MM_MD,
+                    image_dir
+                )
+                
+                content_list = vlm_union_make(
+                    middle_json["pdf_info"],
+                    MakeMode.CONTENT_LIST,
+                    image_dir
+                )
+                
+                model_list = infer_result
+                format_type = "vlm"
+            
+            results = {
+                "pdf_info": middle_json.get("pdf_info", {}),
+                "middle_json": middle_json,
+                "model_output": model_list,
+                "markdown": md_content,
+                "content_list": content_list,
+                "output_dir": output_dir,
+                "files": {
+                    "middle_json": str(Path(local_md_dir) / "document_middle.json"),
+                    "markdown": str(Path(local_md_dir) / "document.md"),
+                    "content_list": str(Path(local_md_dir) / "document_content_list.json"),
+                    "images_dir": local_image_dir,
+                }
+            }
+            
+            with open(results["files"]["middle_json"], "w") as f:
+                json.dump(middle_json, f, ensure_ascii=False, indent=2)
+            
+            with open(results["files"]["markdown"], "w") as f:
+                f.write(md_content)
+            
+            with open(results["files"]["content_list"], "w") as f:
+                json.dump(content_list, f, ensure_ascii=False, indent=2)
+            
+            return {
+                "success": True,
+                "format": format_type,
+                "results": results
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "format": config.backend
+            }
+
+# Update the global instance creation to handle potential errors during initialization
+try:
+    mineru_wrapper = MinerUWrapper()
+except Exception as e:
+    print(f"Warning: Failed to initialize MinerU wrapper: {e}")
+    mineru_wrapper = None

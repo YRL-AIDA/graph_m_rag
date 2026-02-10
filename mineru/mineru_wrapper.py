@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Union, Tuple
 import tempfile
 import json
+import base64
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -104,10 +105,16 @@ class MinerUWrapper:
             
             extracted_blocks = client.two_step_extract(image)
             
+            # Convert the original image to base64
+            img_buffer = io.BytesIO()
+            image.save(img_buffer, format=image.format if image.format else 'PNG')
+            img_base64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+            
             return {
                 "success": True,
                 "results": {
-                    "image_info": extracted_blocks
+                    "image_info": extracted_blocks,
+                    "image_base64": img_base64
                 },
                 "format": "vlm"
             }
@@ -209,6 +216,17 @@ class MinerUWrapper:
                 model_list = infer_result
                 format_type = "vlm"
             
+            # Convert images to base64
+            images_base64 = {}
+            images_dir_path = Path(local_image_dir)
+            if images_dir_path.exists():
+                for img_file in images_dir_path.glob("*"):
+                    if img_file.is_file() and img_file.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp']:
+                        with open(img_file, "rb") as f:
+                            img_data = f.read()
+                            img_base64 = base64.b64encode(img_data).decode('utf-8')
+                            images_base64[img_file.name] = img_base64
+            
             results = {
                 "pdf_info": middle_json.get("pdf_info", {}),
                 "middle_json": middle_json,
@@ -221,7 +239,8 @@ class MinerUWrapper:
                     "markdown": str(Path(local_md_dir) / "document.md"),
                     "content_list": str(Path(local_md_dir) / "document_content_list.json"),
                     "images_dir": local_image_dir,
-                }
+                },
+                "images_base64": images_base64
             }
             
             with open(results["files"]["middle_json"], "w") as f:

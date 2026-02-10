@@ -195,7 +195,7 @@ async def get_status(task_id: str):
         results = task["results"]
         download_links = {}
         
-        if results.get("format") == "pipeline" and "results" in results:
+        if results.get("format") in ["pipeline", "vlm"] and "results" in results:
             base_url = os.getenv("BASE_URL", "http://localhost:8000")
             files = results["results"]["files"]
             
@@ -206,14 +206,23 @@ async def get_status(task_id: str):
                     rel_path = Path(file_path).relative_to(results["results"]["output_dir"])
                     download_links[key] = f"{base_url}/download/{task_id}/{rel_path}"
         
+        # Add images_base64 to the response if available
+        response_results = {
+            "download_links": download_links,
+            "format": results.get("format"),
+            "summary": results.get("results", {})#.get("pdf_info", {})
+        }
+        
+        if "images_base64" in results.get("results", {}):
+            response_results["images_base64"] = results["results"]["images_base64"]
+        
+        if results.get("format") == "vlm" and "image_base64" in results.get("results", {}):
+            response_results["image_base64"] = results["results"]["image_base64"]
+        
         return StatusResponse(
             task_id=task_id,
             status="completed",
-            results={
-                "download_links": download_links,
-                "format": results.get("format"),
-                "summary": results.get("results", {})#.get("pdf_info", {})
-            }
+            results=response_results
         )
     
     return StatusResponse(

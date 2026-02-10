@@ -2,7 +2,7 @@ import requests
 
 
 path_doc = "test/document3.png"
-path_doc = "test/document.pdf"
+path_doc = "test/document2.pdf"
 
 with open(path_doc, "rb") as f:
     response = requests.post(

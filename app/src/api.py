@@ -13,14 +13,12 @@ import aiofiles
 import os
 from pathlib import Path
 
-from app.src.services.minio_service import MinioService
-from app.src.services.mineru_service import MinerUService
-from app.src.services.rag_service import RAGService
-from app.src.services.pdf_processor import PDFProcessorService
-from app.config.settings import settings
+from app.src.s3_client import S3Client
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
+
+s3client = S3Client(logger)
 
 # Создание FastAPI приложения
 app = FastAPI(
@@ -39,12 +37,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Инициализация сервисов
-minio_service = MinioService()
-mineru_service = MinerUService()
-rag_service = RAGService()
-pdf_processor = PDFProcessorService()
 
 
 # Модели Pydantic для запросов и ответов
@@ -148,7 +140,7 @@ async def health_check():
 
     # Проверка MinIO
     try:
-        minio_service.client.list_buckets()
+        s3client.list_buckets()
         services_status["minio"] = "healthy"
     except Exception as e:
         services_status["minio"] = f"unhealthy: {str(e)}"

@@ -14,8 +14,11 @@ import shutil
 import uuid
 from pathlib import Path
 import json
+import uvicorn
 
-from mineru_wrapper import mineru_wrapper, ProcessingConfig
+from manager import MinerUManager, ProcessingConfig
+
+manager = MinerUManager()
 
 os.environ['MODELSCOPE_CACHE'] = '/home/sunveil/Documents/projects/laba/graph-m-rag/src/mineru/models'
 app = FastAPI(
@@ -161,9 +164,9 @@ async def process_task(
 ):
     try:
         if file_ext == '.pdf':
-            result = mineru_wrapper.process_pdf(file_bytes, config, temp_dir)
+            result = manager.process_pdf(file_bytes, config, temp_dir)
         else:
-            result = mineru_wrapper.process_image(file_bytes)
+            result = manager.process_image(file_bytes)
 
         if result["success"]:
             tasks[task_id].update({
@@ -288,14 +291,15 @@ async def cleanup_task(task_id: str):
 
     return {"status": "cleaned", "task_id": task_id}
 
-
-if __name__ == "__main__":
-    import uvicorn
-
+def run_api(
+        host: str = "0.0.0.0",
+        port: int = 8000,
+        reload: bool = False,
+        log_level: str = "info") -> None:
     uvicorn.run(
-        "api:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False,
-        workers=1
+        app,
+        host=host,
+        port=port,
+        reload=reload,
+        log_level=log_level
     )

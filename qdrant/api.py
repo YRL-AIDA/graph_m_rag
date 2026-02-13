@@ -1,9 +1,12 @@
 from fastapi import FastAPI, Depends, HTTPException
 from qdrant_client import QdrantClient, models
 from contextlib import asynccontextmanager
+from config.settings import settings
 import os
+import uvicorn
 
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+
+QDRANT_URL = f"{settings.host}:{settings.port}"
 COLLECTION_NAME = "my_collection"
 
 class QdrantClientSingleton:
@@ -72,7 +75,15 @@ async def upsert_points(points: list[dict], client: QdrantClient = Depends(get_q
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+def run_api(
+        host: str = "0.0.0.0",
+        port: int = 8000,
+        reload: bool = False,
+        log_level: str = "info") -> None:
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        reload=reload,
+        log_level=log_level
+    )

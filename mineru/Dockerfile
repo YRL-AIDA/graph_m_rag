@@ -12,7 +12,7 @@ RUN pip install doclayout_yolo ultralytics ftfy shapely pyclipper omegaconf
 ENV MODELSCOPE_CACHE=/app/models
 RUN python pre_download.py
 
-COPY mineru_wrapper.py api.py cache_models.py ./
+COPY manager.py api.py cache_models.py ./
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1

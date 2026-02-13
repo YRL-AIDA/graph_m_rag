@@ -37,14 +37,14 @@ class ProcessingConfig:
     server_url: Optional[str] = None
 
 
-class MinerUWrapper:
+class MinerUManager:
     _instance = None
     _vlm_client = None
     _pipeline_initialized = False
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super(MinerUWrapper, cls).__new__(cls)
+            cls._instance = super(MinerUManager, cls).__new__(cls)
         return cls._instance
 
     def __init__(self):
@@ -266,6 +266,3 @@ class MinerUWrapper:
                 "error": str(e),
                 "format": config.backend
             }
-
-
-mineru_wrapper = MinerUWrapper()

@@ -1,12 +1,12 @@
 import requests
-
+from config.settings import settings
 
 path_doc = "test/document3.png"
 path_doc = "test/document2.pdf"
 
 with open(path_doc, "rb") as f:
     response = requests.post(
-        "http://localhost:8000/process",
+        f"{settings.mineru.host}:{settings.mineru.port}/process",
         files={"file": f},
         params={"backend": "pipeline", "lang": "ru"}
     )

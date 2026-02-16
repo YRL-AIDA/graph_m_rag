@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import BinaryIO, List, Tuple
+from typing import BinaryIO, List, Tuple, Any
 
 import boto3
 from boto3_type_annotations.s3 import ObjectSummary
@@ -30,7 +30,7 @@ class S3Client:
 
         return [s3_object for s3_object in bucket.objects.all()]
 
-    def list_buckets(self) -> List[str]:
+    def list_buckets(self) -> List[str, Any]:
         return self.client.list_buckets()
 
     def upload(self, bucket_name: str, object_name: str, file: BinaryIO) -> None:

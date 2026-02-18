@@ -15,7 +15,7 @@ class MinerUClient:
     Handles PDF processing and content extraction.
     """
 
-    def __init__(self, base_url: str = "http://mineru:8000"):
+    def __init__(self, base_url: str = "http://localhost:8001"):
         """
         Initialize the MinerU client
 

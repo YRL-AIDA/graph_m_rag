@@ -31,7 +31,7 @@ class S3Client:
         return [s3_object for s3_object in bucket.objects.all()]
 
     def list_buckets(self):
-        return self.client.list_buckets()
+        return self.client.buckets.all()
 
     def upload(self, bucket_name: str, object_name: str, file: BinaryIO) -> None:
         self.logger.info(f"S3Client upload file to bucket {bucket_name} with object_name {object_name}")

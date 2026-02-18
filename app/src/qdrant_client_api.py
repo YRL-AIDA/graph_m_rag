@@ -1,0 +1,252 @@
+import logging
+from typing import List, Optional, Dict, Any
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
+from qdrant_client.http.models import Distance, VectorParams, PointStruct
+from pydantic_settings import SettingsConfigDict, BaseSettings
+
+
+logger = logging.getLogger(__name__)
+
+
+class QdrantSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    QDRANT_HOST: str = "localhost"
+    QDRANT_PORT: int = 6333
+    QDRANT_API_KEY: Optional[str] = "12345"
+    QDRANT_GRPC_PORT: int = 6334
+    QDRANT_COLLECTION_NAME: str = "documents"
+
+
+class QdrantClientWrapper:
+    def __init__(self, settings: QdrantSettings):
+        self.settings = settings
+        if settings.QDRANT_API_KEY:
+            self.client = QdrantClient(
+                host=settings.QDRANT_HOST,
+                port=settings.QDRANT_PORT,
+                api_key=settings.QDRANT_API_KEY,
+                grpc_port=settings.QDRANT_GRPC_PORT,
+                prefer_grpc=True
+            )
+        else:
+            self.client = QdrantClient(
+                host=settings.QDRANT_HOST,
+                port=settings.QDRANT_PORT
+            )
+        self.collection_name = settings.QDRANT_COLLECTION_NAME
+
+    def create_collection(
+        self,
+        vector_size: int,
+        distance: Distance = Distance.COSINE
+    ) -> bool:
+        """
+        Создает коллекцию в Qdrant с указанными параметрами
+        """
+        try:
+            # Проверяем, существует ли уже коллекция
+            if self.client.collection_exists(self.collection_name):
+                logger.info(f"Collection {self.collection_name} already exists")
+                return True
+
+            # Создаем новую коллекцию
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(size=vector_size, distance=distance),
+            )
+
+            logger.info(f"Collection {self.collection_name} created successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error creating collection: {e}")
+            return False
+
+    def delete_collection(self) -> bool:
+        """
+        Удаляет коллекцию из Qdrant
+        """
+        try:
+            if self.client.collection_exists(self.collection_name):
+                self.client.delete_collection(self.collection_name)
+                logger.info(f"Collection {self.collection_name} deleted successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting collection: {e}")
+            return False
+
+    def upload_points(self, points: List[PointStruct]) -> bool:
+        """
+        Загружает точки (векторы) в коллекцию
+        """
+        try:
+            self.client.upload_points(
+                collection_name=self.collection_name,
+                points=points
+            )
+            logger.info(f"Uploaded {len(points)} points to collection {self.collection_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Error uploading points: {e}")
+            return False
+
+    def search(
+        self,
+        query_vector: List[float],
+        limit: int = 10,
+        filter_condition: Optional[models.Filter] = None
+    ) -> List[models.ScoredPoint]:
+        """
+        Выполняет поиск по вектору в коллекции
+        """
+        try:
+            results = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                limit=limit,
+                query_filter=filter_condition
+            )
+            return results
+        except Exception as e:
+            logger.error(f"Error during search: {e}")
+            return []
+
+    def batch_search(
+        self,
+        query_vectors: List[List[float]],
+        limit: int = 10,
+        filter_condition: Optional[models.Filter] = None
+    ) -> List[List[models.ScoredPoint]]:
+        """
+        Выполняет пакетный поиск по нескольким векторам
+        """
+        try:
+            searches = [
+                models.SearchRequest(
+                    vector=query_vector,
+                    limit=limit,
+                    filter=filter_condition
+                )
+                for query_vector in query_vectors
+            ]
+
+            results = self.client.search_batch(
+                collection_name=self.collection_name,
+                requests=searches
+            )
+            return results
+        except Exception as e:
+            logger.error(f"Error during batch search: {e}")
+            return []
+
+    def count(self) -> int:
+        """
+        Возвращает количество точек в коллекции
+        """
+        try:
+            collection_info = self.client.get_collection(self.collection_name)
+            return collection_info.points_count
+        except Exception as e:
+            logger.error(f"Error getting collection count: {e}")
+            return 0
+
+    def get_point(self, point_id: str) -> Optional[models.Record]:
+        """
+        Получает точку по ID
+        """
+        try:
+            records = self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=[point_id]
+            )
+            return records[0] if records else None
+        except Exception as e:
+            logger.error(f"Error retrieving point {point_id}: {e}")
+            return None
+
+    def delete_points(self, point_ids: List[str]) -> bool:
+        """
+        Удаляет точки по ID
+        """
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.PointIdsList(
+                    points=point_ids
+                )
+            )
+            logger.info(f"Deleted {len(point_ids)} points from collection {self.collection_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting points: {e}")
+            return False
+
+    def update_point(self, point_id: str, payload: Dict[str, Any]) -> bool:
+        """
+        Обновляет payload точки
+        """
+        try:
+            self.client.set_payload(
+                collection_name=self.collection_name,
+                payload=payload,
+                points=[point_id]
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error updating point {point_id}: {e}")
+            return False
+
+    def close(self):
+        """
+        Закрывает соединение с Qdrant
+        """
+        if hasattr(self.client, 'close'):
+            self.client.close()
+
+
+def get_qdrant_client() -> QdrantClientWrapper:
+    """
+    Фабрика для создания клиента Qdrant
+    """
+    settings = QdrantSettings()
+    return QdrantClientWrapper(settings)
+
+
+# Пример использования
+if __name__ == "__main__":
+    # Инициализация клиента
+    qdrant_client = get_qdrant_client()
+
+    # Создание коллекции
+    success = qdrant_client.create_collection(vector_size=1536)  # Пример для OpenAI embeddings
+
+    if success:
+        print("Collection created successfully!")
+
+        # Пример добавления точек
+        points = [
+            PointStruct(
+                id=1,
+                vector=[0.1, 0.2, 0.3, 0.4] * 384,  # Пример вектора
+                payload={"text": "Пример документа", "metadata": {"source": "example.txt"}}
+            ),
+            PointStruct(
+                id=2,
+                vector=[0.4, 0.3, 0.2, 0.1] * 384,  # Пример вектора
+                payload={"text": "Еще один документ", "metadata": {"source": "example2.txt"}}
+            )
+        ]
+
+        qdrant_client.upload_points(points)
+
+        # Пример поиска
+        query_vector = [0.15, 0.25, 0.35, 0.45] * 384
+        results = qdrant_client.search(query_vector, limit=5)
+
+        print(f"Found {len(results)} results:")
+        for result in results:
+            print(f"ID: {result.id}, Score: {result.score}, Payload: {result.payload}")
+
+    # Закрытие соединения
+    qdrant_client.close()

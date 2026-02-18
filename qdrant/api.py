@@ -11,7 +11,10 @@ COLLECTION_NAME = "my_collection"
 
 class QdrantClientSingleton:
     def __init__(self):
-        self.client = QdrantClient(url=QDRANT_URL)
+        if settings.api_key:
+            self.client = QdrantClient(url=QDRANT_URL, api_key=settings.api_key)
+        else:
+            self.client = QdrantClient(url=QDRANT_URL)
 
 qdrant_singleton = QdrantClientSingleton()
 

@@ -1,5 +1,6 @@
 import logging
 from typing import List, Optional, Dict, Any
+
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
@@ -26,7 +27,7 @@ class QdrantClientWrapper:
             self.client = QdrantClient(
                 host=settings.QDRANT_HOST,
                 port=settings.QDRANT_PORT,
-                api_key=settings.QDRANT_API_KEY,
+                #api_key=settings.QDRANT_API_KEY,
                 grpc_port=settings.QDRANT_GRPC_PORT,
                 prefer_grpc=True
             )
@@ -101,9 +102,9 @@ class QdrantClientWrapper:
         Выполняет поиск по вектору в коллекции
         """
         try:
-            results = self.client.search(
+            results = self.client.query_points(
                 collection_name=self.collection_name,
-                query_vector=query_vector,
+                query=query_vector,
                 limit=limit,
                 query_filter=filter_condition
             )
@@ -244,8 +245,8 @@ if __name__ == "__main__":
         query_vector = [0.15, 0.25, 0.35, 0.45] * 384
         results = qdrant_client.search(query_vector, limit=5)
 
-        print(f"Found {len(results)} results:")
-        for result in results:
+        print(f"Found {len(results.points)} results:")
+        for result in results.points:
             print(f"ID: {result.id}, Score: {result.score}, Payload: {result.payload}")
 
     # Закрытие соединения

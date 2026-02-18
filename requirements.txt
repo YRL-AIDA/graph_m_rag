@@ -3,7 +3,7 @@ uvicorn[standard]==0.24.0
 pydantic==2.12.5
 pydantic-settings==2.2.1
 minio==7.2.1
-qdrant-client==1.6.4
+qdrant-client==1.16.2
 neo4j==5.14.0
 #langchain==0.0.350
 requests==2.32.5

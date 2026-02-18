@@ -8,14 +8,14 @@ from boto3_type_annotations.s3 import ObjectSummary
 
 class S3Client:
     def __init__(self, logger: logging.Logger) -> None:
-        endpoint = os.environ.get("S3_URL", "http://localhost:9000")
+        endpoint = os.environ.get("S3_URL", "http://localhost:9001")
         access_key = os.environ.get("S3_ACCESS_KEY", "minio")
         secret_key = os.environ.get("S3_SECRET_KEY", "minio123")
-        verify = os.environ.get("S3_VERIFY_TLS", "false").lower() == "true"
+        verify = "false" #os.environ.get("S3_VERIFY_TLS", "false").lower() == "true"
 
         self.logger = logger
         self.client = boto3.resource("s3", endpoint_url=endpoint, aws_access_key_id=access_key, aws_secret_access_key=secret_key, verify=verify)
-        logger.info(f'S3Client endpoint is "{endpoint}", verify is "{verify}"')
+        #logger.info(f'S3Client endpoint is "{endpoint}", verify is "{verify}"')
 
     def check_bucket(self, bucket_name: str) -> None:
         bucket = self.client.Bucket(bucket_name)
@@ -30,7 +30,7 @@ class S3Client:
 
         return [s3_object for s3_object in bucket.objects.all()]
 
-    def list_buckets(self) -> List[str, Any]:
+    def list_buckets(self):
         return self.client.list_buckets()
 
     def upload(self, bucket_name: str, object_name: str, file: BinaryIO) -> None:

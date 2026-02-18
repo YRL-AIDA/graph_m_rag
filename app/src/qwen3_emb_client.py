@@ -14,7 +14,7 @@ class RemoteLLMClient:
 
     def __init__(
         self,
-        base_url: str = "http://192.168.19.127:10014/embed",
+        base_url: str = "http://192.168.19.127:10114/embedding/embed",
         api_key: str = "EMPTY",
         model_name: str = "Qwen/Qwen3-VL-30B-A3B-Thinking",
         **default_kwargs
@@ -152,7 +152,7 @@ if __name__ == "__main__":
     try:
         answers = client.multimodal(
             text="Что изображено на картинке?",
-            image_paths=["/путь/к/фото.jpg"]
+            image_paths=["./../data/turismObjectsRewewByLLM.png"]
         )
         print("Описание:", answers[0])
     except RuntimeError as e:
@@ -167,3 +167,70 @@ if __name__ == "__main__":
 
     response = client.send(msg1)
     print("Ответ ассистента:", response[0])
+
+
+"""
+Qwen3 Embedding Client for generating embeddings
+"""
+
+from typing import List, Union
+import requests
+from openai import OpenAI
+
+
+class Qwen3EmbClient:
+    """
+    Client for generating embeddings using Qwen3 embedding model.
+    Provides methods to generate embeddings for text content.
+    """
+
+    def __init__(self, base_url: str = "http://192.168.19.127:10014/embed", api_key: str = "EMPTY"):
+        """
+        Initialize the embedding client
+
+        Args:
+            base_url: Base URL for the embedding service
+            api_key: API key for authentication (default is EMPTY for local servers)
+        """
+        self.base_url = base_url.rstrip('/')
+        self.api_key = api_key
+        self.client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+
+    def get_embedding(self, text: str) -> List[float]:
+        """
+        Generate embedding for the given text
+
+        Args:
+            text: Input text to generate embedding for
+
+        Returns:
+            List of floats representing the embedding vector
+        """
+        try:
+            response = self.client.embeddings.create(
+                input=text,
+                model="BAAI/bge-m3"  # Using a suitable embedding model
+            )
+
+            # Return the embedding vector
+            return response.data[0].embedding
+        except Exception as e:
+            print(f"Error generating embedding: {e}")
+            # Return a dummy embedding in case of error
+            return []
+
+    def get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for multiple texts
+
+        Args:
+            texts: List of input texts to generate embeddings for
+
+        Returns:
+            List of embedding vectors (each vector is a list of floats)
+        """
+        embeddings = []
+        for text in texts:
+            embedding = self.get_embedding(text)
+            embeddings.append(embedding)
+        return embeddings

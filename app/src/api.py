@@ -20,18 +20,20 @@ import os
 import base64
 from pathlib import Path
 
+from app.src.qwen3_emb_client import EmbeddingClient
 from app.src.s3_client import S3Client
 from app.src.mineru_client import MinerUClient
-from app.src.qwen3_emb_client import Qwen3EmbClient
+from app.config import settings
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+setting = set
 
 # Initialize clients
 s3_client = S3Client(logger)
 mineru_client = MinerUClient()
-emb_client = Qwen3EmbClient()
+emb_client = EmbeddingClient(base_url="http://192.168.19.127:10114/embedding")
 
 # Create FastAPI application
 app = FastAPI(
@@ -215,8 +217,8 @@ async def health_check():
     # Check embedding service
     try:
         # Test embedding generation
-        test_embedding = emb_client.get_embedding("test")
-        if test_embedding and len(test_embedding) > 0:
+        test_embedding = emb_client.get_text_embedding("test")
+        if test_embedding and len(test_embedding.embedding) > 0:
             services_status["embedding"] = "healthy"
         else:
             services_status["embedding"] = "unhealthy: invalid response"

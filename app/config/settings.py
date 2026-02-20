@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     s3_url: str = "http://localhost:9000"
     s3_access_key: str = "minio"
     s3_secret_key: str = "minio123"
-    s3_verify_tls: str =
+    s3_verify_tls: str = ""
 
     timeout: int = 30
     max_file_size: int = 50 * 1024 * 1024

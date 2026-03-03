@@ -8,7 +8,7 @@ from minio.error import S3Error
 
 class MinioClient:
     def __init__(self, logger: logging.Logger = None) -> None:
-        endpoint = os.environ.get("S3_URL", "http://localhost:9001")
+        endpoint = os.environ.get("S3_URL", "http://localhost:9000")
         # Remove http:// or https:// prefix for Minio client
         if endpoint.startswith("http://"):
             endpoint = endpoint[7:]

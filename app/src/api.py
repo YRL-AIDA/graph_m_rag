@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 
 from app.src.qwen3_emb_client import EmbeddingClient
-from app.src.s3_client import S3Client
+from app.src.minio_client import MinioClient
 from app.src.mineru_client import MinerUClient
 from app.config import settings
 
@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize clients
-s3_client = S3Client(logger)
+minio_client = MinioClient(logger)
 mineru_client = MinerUClient()
 emb_client = EmbeddingClient(base_url="http://192.168.19.127:10114/embedding")
 
@@ -140,10 +140,10 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     "created_at": datetime.now().isoformat()
                 }
 
-                # Convert to JSON and upload to S3
+                # Convert to JSON and upload to MinIO
                 embedding_json = json.dumps(embedding_data, ensure_ascii=False)
-                s3_client.put_object(
-                    bucket_name=s3_client.bucket_name,
+                minio_client.put_object(
+                    bucket_name=minio_client.bucket_name,
                     object_name=embedding_key,
                     data=embedding_json.encode('utf-8'),
                     content_type='application/json'
@@ -203,9 +203,9 @@ async def health_check():
     """Health check endpoint"""
     services_status = {}
 
-    # Check S3 connectivity
+    # Check MinIO connectivity
     try:
-        s3_client.list_buckets()
+        minio_client.list_buckets()
         services_status["s3"] = "healthy"
     except Exception as e:
         logger.error(f"S3 health check failed: {e}")
@@ -279,10 +279,10 @@ def upload_pdf(file: UploadFile = File(...)):
         with open(temp_file_path, 'wb') as temp_file:
             temp_file.write(content)
 
-        # Upload original PDF to S3
+        # Upload original PDF to MinIO
         pdf_s3_key = f"pdfs/{file_hash}/{file.filename}"
-        s3_client.upload(
-            bucket_name=s3_client.bucket_name,
+        minio_client.upload(
+            bucket_name=minio_client.bucket_name,
             object_name=pdf_s3_key,
             data=content,
             content_type="application/pdf"
@@ -299,8 +299,8 @@ def upload_pdf(file: UploadFile = File(...)):
         mineru_result_serializable = convert_to_serializable(mineru_result)
         result_json = json.dumps(mineru_result_serializable, ensure_ascii=False, indent=2)
 
-        s3_client.put_object(
-            bucket_name=s3_client.bucket_name,
+        minio_client.put_object(
+            bucket_name=minio_client.bucket_name,
             object_name=mineru_result_key,
             data=result_json.encode('utf-8'),
             content_type="application/json"

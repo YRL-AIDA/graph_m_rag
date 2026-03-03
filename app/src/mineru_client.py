@@ -71,7 +71,7 @@ class MinerUClient:
         # Make the request to the MinerU service
         try:
             response = self.session.post(
-                f"{self.base_url}/analyze",
+                f"{self.base_url}/process",
                 json=payload,
                 timeout=300  # 5 minute timeout for potentially large PDFs
             )

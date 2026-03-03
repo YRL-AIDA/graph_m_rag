@@ -15,7 +15,7 @@ class MinerUClient:
     Handles PDF processing and content extraction.
     """
 
-    def __init__(self, base_url: str = "http://localhost:8001"):
+    def __init__(self, base_url: str = "http://localhost:8000"):
         """
         Initialize the MinerU client
 
@@ -24,56 +24,62 @@ class MinerUClient:
         """
         self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
-        self.session.headers.update({
-            'Content-Type': 'application/json'
-        })
 
-    def _read_and_encode_file(self, file_path: str) -> str:
-        """
-        Read a file and encode it as base64
-
-        Args:
-            file_path: Path to the file to read
-
-        Returns:
-            Base64 encoded string of the file content
-        """
-        with open(file_path, 'rb') as f:
-            file_content = f.read()
-        return base64.b64encode(file_content).decode('utf-8')
-
-    def analyze_pdf(
+    def process_document(
         self,
         file_path: str,
-        include_original: bool = True,
-        include_previews: bool = True
+        backend: str = "pipeline",
+        method: str = "auto",
+        lang: str = "ru",
+        formula_enable: bool = True,
+        table_enable: bool = True,
+        start_page: int = 0,
+        end_page: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Analyze a PDF file using MinerU service
+        Process a document using MinerU service
 
         Args:
-            file_path: Path to the PDF file
-            include_original: Whether to include original content in the response
-            include_previews: Whether to include previews in the response
+            file_path: Path to the document file (PDF, PNG, JPG, JPEG, TIFF, BMP)
+            backend: Processing backend - 'pipeline' or 'vlm'
+            method: Processing method - 'auto', 'txt', 'ocr'
+            lang: Document language
+            formula_enable: Enable formula processing
+            table_enable: Enable table processing
+            start_page: Starting page (0-indexed)
+            end_page: Ending page (None for all pages after start)
 
         Returns:
-            Dictionary containing the analysis result
+            Dictionary containing the processing result
         """
-        file_path = str(Path(file_path).resolve())
+        file_path = Path(file_path)
 
-        # Prepare the request payload
-        payload = {
-            "file_path": file_path,
-            "include_original": include_original,
-            "include_previews": include_previews
+        if not file_path.exists():
+            raise FileNotFoundError(f"File does not exist: {file_path}")
+
+        # Prepare the request with file upload
+        with open(file_path, 'rb') as f:
+            files = {"file": (file_path.name, f, "application/pdf")}
+
+        params = {
+            "backend": backend,
+            "method": method,
+            "lang": lang,
+            "formula_enable": formula_enable,
+            "table_enable": table_enable,
+            "start_page": start_page
         }
+
+        if end_page is not None:
+            params["end_page"] = end_page
 
         # Make the request to the MinerU service
         try:
             response = self.session.post(
                 f"{self.base_url}/process",
-                json=payload,
-                timeout=300  # 5 minute timeout for potentially large PDFs
+                files=files,
+                params=params,
+                timeout=300  # 5 minute timeout for potentially large documents
             )
 
             if response.status_code != 200:
@@ -88,39 +94,142 @@ class MinerUClient:
         except requests.exceptions.RequestException as e:
             raise Exception(f"Error making request to MinerU service: {str(e)}")
 
-    def analyze_pdf_content(
+    def process_document_content(
         self,
         file_content: bytes,
-        include_original: bool = True,
-        include_previews: bool = True
+        filename: str,
+        backend: str = "pipeline",
+        method: str = "auto",
+        lang: str = "ru",
+        formula_enable: bool = True,
+        table_enable: bool = True,
+        start_page: int = 0,
+        end_page: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Analyze PDF content directly using MinerU service
+        Process document content directly using MinerU service
 
         Args:
-            file_content: Raw PDF file content as bytes
-            include_original: Whether to include original content in the response
-            include_previews: Whether to include previews in the response
+            file_content: Raw document file content as bytes
+            filename: Name of the file (with extension)
+            backend: Processing backend - 'pipeline' or 'vlm'
+            method: Processing method - 'auto', 'txt', 'ocr'
+            lang: Document language
+            formula_enable: Enable formula processing
+            table_enable: Enable table processing
+            start_page: Starting page (0-indexed)
+            end_page: Ending page (None for all pages after start)
 
         Returns:
-            Dictionary containing the analysis result
+            Dictionary containing the processing result
         """
-        # Encode the file content as base64
-        base64_content = base64.b64encode(file_content).decode('utf-8')
+        # Prepare the request with file upload
+        files = {"file": (filename, file_content)}
 
-        # Prepare the request payload
-        payload = {
-            "file_content": base64_content,
-            "include_original": include_original,
-            "include_previews": include_previews
+        params = {
+            "backend": backend,
+            "method": method,
+            "lang": lang,
+            "formula_enable": formula_enable,
+            "table_enable": table_enable,
+            "start_page": start_page
         }
+
+        if end_page is not None:
+            params["end_page"] = end_page
 
         # Make the request to the MinerU service
         try:
             response = self.session.post(
-                f"{self.base_url}/analyze",
-                json=payload,
-                timeout=300  # 5 minute timeout for potentially large PDFs
+                f"{self.base_url}/process",
+                files=files,
+                params=params,
+                timeout=300  # 5 minute timeout for potentially large documents
+            )
+
+            if response.status_code != 200:
+                raise Exception(f"MinerU service returned status {response.status_code}: {response.text}")
+
+            return response.json()
+
+        except requests.exceptions.ConnectionError:
+            raise Exception("Could not connect to MinerU service")
+        except requests.exceptions.Timeout:
+            raise Exception("Request to MinerU service timed out")
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Error making request to MinerU service: {str(e)}")
+
+    def get_processing_status(self, task_id: str) -> Dict[str, Any]:
+        """
+        Get the processing status for a specific task
+
+        Args:
+            task_id: ID of the processing task
+
+        Returns:
+            Dictionary containing the task status and results if completed
+        """
+        try:
+            response = self.session.get(
+                f"{self.base_url}/status/{task_id}",
+                timeout=30
+            )
+
+            if response.status_code != 200:
+                raise Exception(f"MinerU service returned status {response.status_code}: {response.text}")
+
+            return response.json()
+
+        except requests.exceptions.ConnectionError:
+            raise Exception("Could not connect to MinerU service")
+        except requests.exceptions.Timeout:
+            raise Exception("Request to MinerU service timed out")
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Error making request to MinerU service: {str(e)}")
+
+    def download_file(self, task_id: str, file_path: str, save_path: str) -> None:
+        """
+        Download a processed file
+
+        Args:
+            task_id: ID of the processing task
+            file_path: Path to the file relative to the output directory
+            save_path: Local path to save the downloaded file
+        """
+        try:
+            response = self.session.get(
+                f"{self.base_url}/download/{task_id}/{file_path}",
+                timeout=60
+            )
+
+            if response.status_code != 200:
+                raise Exception(f"MinerU service returned status {response.status_code}: {response.text}")
+
+            # Save the downloaded content
+            with open(save_path, 'wb') as f:
+                f.write(response.content)
+
+        except requests.exceptions.ConnectionError:
+            raise Exception("Could not connect to MinerU service")
+        except requests.exceptions.Timeout:
+            raise Exception("Request to MinerU service timed out")
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Error making request to MinerU service: {str(e)}")
+
+    def cleanup_task(self, task_id: str) -> Dict[str, Any]:
+        """
+        Clean up resources associated with a task
+
+        Args:
+            task_id: ID of the processing task
+
+        Returns:
+            Dictionary containing the cleanup status
+        """
+        try:
+            response = self.session.delete(
+                f"{self.base_url}/cleanup/{task_id}",
+                timeout=30
             )
 
             if response.status_code != 200:
@@ -160,7 +269,7 @@ class MinerUClient:
         """
         try:
             response = self.session.get(
-                f"{self.base_url}/info",
+                f"{self.base_url}",
                 timeout=10
             )
 

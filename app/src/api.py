@@ -91,7 +91,37 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
     Compute embeddings for each element in the MinerU result
 
     Args:
-        elements: List of elements from MinerU result
+        elements: List of elements from MinerU result in the format:
+            [
+              {
+                "type": "text",
+                "text": "Text content",
+                "text_level": 1,
+                "bbox": [x1, y1, x2, y2],
+                "page_idx": 0
+              },
+              {
+                "type": "image",
+                "img_path": "path/to/image.jpg",
+                "image_caption": [...],
+                "image_footnote": [...],
+                "bbox": [x1, y1, x2, y2],
+                "page_idx": 0
+              },
+              {
+                "type": "table",
+                "img_path": "path/to/table.jpg",
+                "table_caption": [...],
+                "table_footnote": [...],
+                "table_body": "<table>...</table>",
+                "bbox": [x1, y1, x2, y2],
+                "page_idx": 0
+              },
+              {
+                "type": "discarded",
+                ...
+              }
+            ]
         file_hash: Hash of the original PDF file
 
     Returns:
@@ -99,43 +129,83 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
     """
     processed_count = 0
 
-    # Process elements recursively to extract text content
-    def extract_texts_from_element(element):
-        texts = []
-        if isinstance(element, dict):
-            for key, value in element.items():
-                if isinstance(value, str) and len(value.strip()) > 0:
-                    # Add key as context for the value
-                    texts.append(f"{key}: {value}")
-                elif isinstance(value, (list, dict)):
-                    texts.extend(extract_texts_from_element(value))
-        elif isinstance(element, list):
-            for item in element:
-                texts.extend(extract_texts_from_element(item))
-        return texts
+    # Process each element according to its type
+    for i, element in enumerate(elements):
+        if not isinstance(element, dict):
+            logger.warning(f"Element {i} is not a dictionary, skipping")
+            continue
 
-    # Collect all text elements from the MinerU result
-    all_texts = []
+        element_type = element.get("type")
 
-    if isinstance(elements, list):
-        for element in elements:
-            all_texts.extend(extract_texts_from_element(element))
-    elif isinstance(elements, dict):
-        all_texts.extend(extract_texts_from_element(elements))
+        # Skip discarded elements
+        if element_type == "discarded":
+            logger.info(f"Skipping discarded element {i}")
+            continue
 
-    # Compute embeddings for each text
-    for i, text in enumerate(all_texts):
-        if text.strip():  # Only process non-empty texts
+        # Prepare text content based on element type
+        text_content = ""
+
+        if element_type == "text":
+            text = element.get("text", "")
+            text_level = element.get("text_level")
+
+            # Format text with level information if available
+            if text_level is not None:
+                text_content = f"Text (level {text_level}): {text}"
+            else:
+                text_content = f"Text: {text}"
+
+        elif element_type == "image":
+            # Combine image path and captions if available
+            img_path = element.get("img_path", "")
+            image_captions = element.get("image_caption", [])
+            image_footnotes = element.get("image_footnote", [])
+
+            caption_text = " ".join(image_captions) if image_captions else ""
+            footnote_text = " ".join(image_footnotes) if image_footnotes else ""
+
+            text_content = f"Image: {img_path}"
+            if caption_text:
+                text_content += f" | Caption: {caption_text}"
+            if footnote_text:
+                text_content += f" | Footnote: {footnote_text}"
+
+        elif element_type == "table":
+            # Combine table information
+            img_path = element.get("img_path", "")
+            table_captions = element.get("table_caption", [])
+            table_footnotes = element.get("table_footnote", [])
+            table_body = element.get("table_body", "")
+
+            caption_text = " ".join(table_captions) if table_captions else ""
+            footnote_text = " ".join(table_footnotes) if table_footnotes else ""
+
+            text_content = f"Table: {img_path}"
+            if caption_text:
+                text_content += f" | Caption: {caption_text}"
+            if footnote_text:
+                text_content += f" | Footnote: {footnote_text}"
+            if table_body:
+                text_content += f" | Body: {table_body}"
+
+        else:
+            # For unknown types, try to extract any available text content
+            text_content = json.dumps(element, ensure_ascii=False)
+
+        # Only process elements with non-empty text content
+        if text_content.strip():
             try:
                 # Generate embedding using the embedding client
-                embedding = emb_client.get_text_embedding(text)
+                embedding = emb_client.get_text_embedding(text_content)
 
                 # Save embedding to S3 with a specific naming convention
                 embedding_key = f"embeddings/{file_hash}/element_{i}.json"
                 embedding_data = {
-                    "text": text,
+                    "original_element": element,
+                    "text": text_content,
                     "embedding": embedding.embedding,
                     "element_index": i,
+                    "element_type": element_type,
                     "file_hash": file_hash,
                     "created_at": datetime.now().isoformat()
                 }
@@ -150,10 +220,10 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 )
 
                 processed_count += 1
-                logger.info(f"Computed embedding for element {i} of {len(all_texts)}")
+                logger.info(f"Computed embedding for element {i} (type: {element_type})")
 
             except Exception as e:
-                logger.error(f"Failed to compute embedding for element {i}: {e}")
+                logger.error(f"Failed to compute embedding for element {i} (type: {element_type}): {e}")
                 continue
 
     return processed_count

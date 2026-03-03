@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     host: str = "http://localhost"
-    port: str = "8000"
+    port: str = "8001"
     timeout: int = 30
     max_file_size: int = 50 * 1024 * 1024
     cache_ttl: int = 3600

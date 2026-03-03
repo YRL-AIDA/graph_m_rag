@@ -15,7 +15,7 @@ class MinerUClient:
     Handles PDF processing and content extraction.
     """
 
-    def __init__(self, base_url: str = "http://localhost:8000"):
+    def __init__(self, base_url: str = "http://localhost:8001"):
         """
         Initialize the MinerU client
 
@@ -59,40 +59,39 @@ class MinerUClient:
 
         # Prepare the request with file upload
         with open(file_path, 'rb') as f:
-            files = {"file": (file_path.name, f, "application/pdf")}
+            files = {"file": f}
 
-        params = {
-            "backend": backend,
-            "method": method,
-            "lang": lang,
-            "formula_enable": formula_enable,
-            "table_enable": table_enable,
-            "start_page": start_page
-        }
+            params = {
+                "backend": backend,
+                "method": method,
+                "lang": lang,
+                "formula_enable": formula_enable,
+                "table_enable": table_enable,
+                "start_page": start_page
+            }
 
-        if end_page is not None:
-            params["end_page"] = end_page
+            if end_page is not None:
+                params["end_page"] = end_page
 
-        # Make the request to the MinerU service
-        try:
-            response = self.session.post(
-                f"{self.base_url}/process",
-                files=files,
-                params=params,
-                timeout=300  # 5 minute timeout for potentially large documents
-            )
+            # Make the request to the MinerU service
+            try:
+                response = requests.post(
+                    f"{self.base_url}/process",
+                    files=files,
+                    params=params
+                )
 
-            if response.status_code != 200:
-                raise Exception(f"MinerU service returned status {response.status_code}: {response.text}")
+                if response.status_code != 200:
+                    raise Exception(f"MinerU service returned status {response.status_code}: {response.text}")
 
-            return response.json()
+                return response.json()
 
-        except requests.exceptions.ConnectionError:
-            raise Exception("Could not connect to MinerU service")
-        except requests.exceptions.Timeout:
-            raise Exception("Request to MinerU service timed out")
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"Error making request to MinerU service: {str(e)}")
+            except requests.exceptions.ConnectionError:
+                raise Exception("Could not connect to MinerU service")
+            except requests.exceptions.Timeout:
+                raise Exception("Request to MinerU service timed out")
+            except requests.exceptions.RequestException as e:
+                raise Exception(f"Error making request to MinerU service: {str(e)}")
 
     def process_document_content(
         self,

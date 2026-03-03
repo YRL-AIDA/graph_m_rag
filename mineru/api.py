@@ -141,7 +141,7 @@ async def process_document(
         temp_dir
     )
 
-    base_url = os.getenv("BASE_URL", "http://localhost:8000")
+    base_url = os.getenv("BASE_URL", "http://localhost:8001")
     download_links = {
         "status": f"{base_url}/status/{task_id}",
         "api_docs": f"{base_url}/docs"
@@ -206,7 +206,7 @@ async def get_status(task_id: str):
         download_links = {}
 
         if results.get("format") in ["pipeline", "vlm"] and "results" in results:
-            base_url = os.getenv("BASE_URL", "http://localhost:8000")
+            base_url = os.getenv("BASE_URL", "http://localhost:8001")
             files = results["results"]["files"]
 
             for key, file_path in files.items():

@@ -171,10 +171,13 @@ def process_with_mineru(file_path: str) -> Dict[str, Any]:
     """
     try:
         # Process the file using the MinerU client
-        result = mineru_client.analyze_pdf(
+        result = mineru_client.process_document(
             file_path=file_path,
-            include_original=True,
-            include_previews=True
+            backend="pipeline",
+            method="auto",
+            lang="ru",
+            formula_enable=True,
+            table_enable=True
         )
         return result
     except Exception as e:

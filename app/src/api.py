@@ -316,18 +316,7 @@ def upload_pdf(file: UploadFile = File(...)):
 
         # Extract elements from MinerU result - structure may vary depending on MinerU output
         elements = []
-        if "structured_data" in mineru_result:
-            elements.append(mineru_result["structured_data"])
-        elif "pages" in mineru_result:
-            elements.extend(mineru_result["pages"])
-        elif "blocks" in mineru_result:
-            elements.extend(mineru_result["blocks"])
-        elif "elements" in mineru_result:
-            elements.extend(mineru_result["elements"])
-        else:
-            # If no specific structure found, treat the entire result as elements
-            elements.append(mineru_result)
-
+        elements.extend(mineru_result["results"]["result"]["results"]["content_list"])
         # Compute embeddings synchronously
         embeddings_count = compute_embeddings_for_elements(elements, file_hash)
         logger.info(f"Completed synchronous embedding computation: {embeddings_count} elements processed")

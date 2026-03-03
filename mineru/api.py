@@ -3,7 +3,7 @@
 FastAPI сервер для MinerU API.
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -56,7 +56,7 @@ tasks = {}
 
 
 @app.get("/")
-async def root():
+def root():
     """Корневой эндпоинт."""
     return {
         "service": "MinerU API",
@@ -71,12 +71,12 @@ async def root():
 
 
 @app.get("/health")
-async def health_check():
+def health_check():
     return {"status": "healthy", "service": "MinerU API"}
 
 
 @app.post("/process", response_model=ProcessResponse)
-async def process_document(
+def process_document(
         file: UploadFile = File(...),
         backend: str = Query("pipeline", description="Бэкенд обработки: pipeline или vlm"),
         method: str = Query("auto", description="Метод обработки: auto, txt, ocr"),
@@ -84,8 +84,7 @@ async def process_document(
         formula_enable: bool = Query(True, description="Включить обработку формул"),
         table_enable: bool = Query(True, description="Включить обработку таблиц"),
         start_page: int = Query(0, description="Начальная страница (0-indexed)"),
-        end_page: Optional[int] = Query(None, description="Конечная страница"),
-        background_tasks: BackgroundTasks = BackgroundTasks()
+        end_page: Optional[int] = Query(None, description="Конечная страница")
 ):
     task_id = str(uuid.uuid4())
 
@@ -125,43 +124,6 @@ async def process_document(
         shutil.rmtree(temp_dir)
         raise HTTPException(status_code=500, detail=f"Ошибка чтения файла: {str(e)}")
 
-    tasks[task_id] = {
-        "status": "processing",
-        "temp_dir": temp_dir,
-        "results": None,
-        "error": None
-    }
-
-    background_tasks.add_task(
-        process_task,
-        task_id,
-        file_bytes,
-        file_ext,
-        config,
-        temp_dir
-    )
-
-    base_url = os.getenv("BASE_URL", "http://localhost:8001")
-    download_links = {
-        "status": f"{base_url}/status/{task_id}",
-        "api_docs": f"{base_url}/docs"
-    }
-
-    return ProcessResponse(
-        task_id=task_id,
-        status="processing",
-        message="Документ принят в обработку",
-        download_links=download_links
-    )
-
-
-async def process_task(
-        task_id: str,
-        file_bytes: bytes,
-        file_ext: str,
-        config: ProcessingConfig,
-        temp_dir: str
-):
     try:
         if file_ext == '.pdf':
             result = manager.process_pdf(file_bytes, config, temp_dir)
@@ -169,33 +131,55 @@ async def process_task(
             result = manager.process_image(file_bytes)
 
         if result["success"]:
-            tasks[task_id].update({
-                "status": "completed",
-                "results": result,
-                "error": None
-            })
+            status = "completed"
+            results = result
+            error = None
         else:
-            tasks[task_id].update({
-                "status": "failed",
-                "results": result,
-                "error": result.get("error", "Unknown error")
-            })
+            status = "failed"
+            results = result
+            error = result.get("error", "Unknown error")
+
+        tasks[task_id] = {
+            "status": status,
+            "temp_dir": temp_dir,
+            "results": results,
+            "error": error
+        }
 
     except Exception as e:
-        tasks[task_id].update({
+        tasks[task_id] = {
             "status": "failed",
+            "temp_dir": temp_dir,
             "results": None,
             "error": str(e)
-        })
+        }
 
         try:
             shutil.rmtree(temp_dir)
         except:
             pass
 
+    base_url = os.getenv("BASE_URL", "http://localhost:8001")
+
+    download_links = {
+        "status": f"{base_url}/status/{task_id}",
+        "api_docs": f"{base_url}/docs"
+    }
+
+    return ProcessResponse(
+        task_id=task_id,
+        status=status,
+        message="Документ обработан" if status == "completed" else "Ошибка при обработке документа",
+        download_links=download_links,
+        results={"result": results} if results else None
+    )
+
+
+# Удаляем асинхронную функцию process_task, так как теперь используется синхронная обработка
+
 
 @app.get("/status/{task_id}", response_model=StatusResponse)
-async def get_status(task_id: str):
+def get_status(task_id: str):
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Задача не найдена")
 
@@ -243,7 +227,7 @@ async def get_status(task_id: str):
 
 
 @app.get("/download/{task_id}/{file_path:path}")
-async def download_file(task_id: str, file_path: str):
+def download_file(task_id: str, file_path: str):
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Задача не найдена")
 
@@ -274,7 +258,7 @@ async def download_file(task_id: str, file_path: str):
 
 
 @app.delete("/cleanup/{task_id}")
-async def cleanup_task(task_id: str):
+def cleanup_task(task_id: str):
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Задача не найдена")
 
@@ -296,6 +280,11 @@ def run_api(
         port: int = 8000,
         reload: bool = False,
         log_level: str = "info") -> None:
+    import asyncio
+    # Устанавливаем политику цикла для Windows при необходимости
+    if os.name == "nt":  # Windows
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
     uvicorn.run(
         app,
         host=host,

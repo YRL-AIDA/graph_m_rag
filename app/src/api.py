@@ -287,7 +287,7 @@ async def upload_pdf(
 
         # Upload original PDF to S3
         pdf_s3_key = f"pdfs/{file_hash}/{file.filename}"
-        s3_client.put_object(
+        s3_client.upload(
             bucket_name=s3_client.bucket_name,
             object_name=pdf_s3_key,
             data=content,

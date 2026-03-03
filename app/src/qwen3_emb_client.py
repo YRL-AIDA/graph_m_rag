@@ -33,6 +33,54 @@ class EmbeddingClient:
         except Exception as e:
             raise ValueError(f"Invalid response format: {e}") from e
 
+    def get_image_embedding(self, image_path: str) -> EmbedResponse:
+        """
+        Get embedding for an image file.
+
+        Args:
+            image_path: Path to the image file.
+
+        Returns:
+            EmbedResponse containing the message_id and embedding vector.
+        """
+        # Read the image file and convert to base64
+        import base64
+        with open(image_path, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+
+        message = Message(type="image", image=image_path, image_data=encoded_string)
+        request_payload = EmbedRequest(messages=[message]).model_dump()
+        url = f"{self.base_url}/embed"
+        response = requests.post(url, json=request_payload, timeout=self.timeout)
+        response.raise_for_status()
+        try:
+            return EmbedResponse.model_validate(response.json())
+        except Exception as e:
+            raise ValueError(f"Invalid response format: {e}") from e
+
+    def get_image_embedding_base64(self, image_base64: str) -> EmbedResponse:
+
+        message = Message(type="image", image=image_base64)
+        request_payload = EmbedRequest(messages=[message]).model_dump()  # or .dict() for older Pydantic
+        url = f"{self.base_url}/embed"  # adjust the endpoint path as needed
+        response = requests.post(url, json=request_payload, timeout=self.timeout)
+        response.raise_for_status()  # raise exception for HTTP errors
+        try:
+            return EmbedResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
+        except Exception as e:
+            raise ValueError(f"Invalid response format: {e}") from e
+
+    def get_image_embedding_url(self, image_url: str) -> EmbedResponse:
+
+        message = Message(type="image", image_url=image_url)
+        request_payload = EmbedRequest(messages=[message]).model_dump()  # or .dict() for older Pydantic
+        url = f"{self.base_url}/embed"  # adjust the endpoint path as needed
+        response = requests.post(url, json=request_payload, timeout=self.timeout)
+        response.raise_for_status()  # raise exception for HTTP errors
+        try:
+            return EmbedResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
+        except Exception as e:
+            raise ValueError(f"Invalid response format: {e}") from e
 
     def get_embeddings(self, messages: List[Message]) -> EmbedResponse:
         """
@@ -74,7 +122,7 @@ if __name__ == "__main__":
     client = EmbeddingClient(base_url="http://192.168.19.127:10114/embedding")
 
     try:
-        result = client.get_embedding(messages)
+        result = client.get_embeddings(messages)
         print(f"Message ID: {result.message_id}")
         print(f"Embedding (first 5 values): {result.embedding[:5]}...")
     except Exception as e:

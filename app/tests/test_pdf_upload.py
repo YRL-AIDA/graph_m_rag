@@ -15,29 +15,26 @@ def test_upload_pdf_endpoint():
 
     with open(test_pdf_path, "rb") as pdf_file:
         files = {"file": ("sample.pdf", pdf_file, "application/pdf")}
-        data = {
-            "backend": "pipeline",
-            "method": "auto",
-            "lang": "ru",
-            "formula_enable": "true",
-            "table_enable": "true"
-        }
 
-        response = requests.post(url, files=files, data=data)
+        response = requests.post(url, files=files)
 
     # Проверяем статус ответа
     assert response.status_code == 200
 
     # Проверяем структуру ответа
     response_data = response.json()
-    assert "task_id" in response_data
     assert "status" in response_data
     assert "message" in response_data
-    assert response_data["status"] == "processing"
-    assert response_data["message"] == "Документ принят в обработку"
+    assert "file_hash" in response_data
+    assert "s3_path" in response_data
+    assert "mineru_result_path" in response_data
+    assert "embeddings_computed" in response_data
+    assert "processing_time" in response_data
+    assert response_data["status"] == "success"
+    assert "processed with MinerU" in response_data["message"]
 
     print("Тест загрузки PDF успешно пройден!")
-    print(f"Task ID: {response_data['task_id']}")
+    print(f"Response: {response_data}")
 
 
 if __name__ == "__main__":

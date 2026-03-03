@@ -11,13 +11,11 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import aiofiles
 import os
-import base64
 from pathlib import Path
 
 from app.src.qwen3_emb_client import EmbeddingClient
@@ -28,7 +26,6 @@ from app.config import settings
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-setting = set
 
 # Initialize clients
 s3_client = S3Client(logger)
@@ -89,7 +86,7 @@ def convert_to_serializable(obj):
         return obj
 
 
-async def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int:
+def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int:
     """
     Compute embeddings for each element in the MinerU result
 
@@ -131,13 +128,13 @@ async def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) 
         if text.strip():  # Only process non-empty texts
             try:
                 # Generate embedding using the embedding client
-                embedding = emb_client.get_embedding(text)
+                embedding = emb_client.get_text_embedding(text)
 
                 # Save embedding to S3 with a specific naming convention
                 embedding_key = f"embeddings/{file_hash}/element_{i}.json"
                 embedding_data = {
                     "text": text,
-                    "embedding": embedding,
+                    "embedding": embedding.embedding,
                     "element_index": i,
                     "file_hash": file_hash,
                     "created_at": datetime.now().isoformat()
@@ -162,7 +159,7 @@ async def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) 
     return processed_count
 
 
-async def process_with_mineru(file_path: str) -> Dict[str, Any]:
+def process_with_mineru(file_path: str) -> Dict[str, Any]:
     """
     Process PDF file with MinerU service
 
@@ -246,10 +243,7 @@ async def health_check():
 
 
 @app.post("/upload-pdf", response_model=PDFUploadResponse)
-async def upload_pdf(
-    file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None
-):
+def upload_pdf(file: UploadFile = File(...)):
     """
     Upload PDF document to S3, process with MinerU, and compute embeddings
 
@@ -272,18 +266,18 @@ async def upload_pdf(
 
     try:
         # Read file content
-        content = await file.read()
+        content = file.file.read()
 
         # Calculate file hash
-        file_hash = await calculate_file_hash(content)
+        file_hash = hashlib.md5(content).hexdigest()
 
         # Create temporary file
         temp_dir = Path("/tmp/pdf_processing")
         temp_dir.mkdir(exist_ok=True)
         temp_file_path = str(temp_dir / f"{file_hash}_{file.filename}")
 
-        async with aiofiles.open(temp_file_path, 'wb') as temp_file:
-            await temp_file.write(content)
+        with open(temp_file_path, 'wb') as temp_file:
+            temp_file.write(content)
 
         # Upload original PDF to S3
         pdf_s3_key = f"pdfs/{file_hash}/{file.filename}"
@@ -298,7 +292,7 @@ async def upload_pdf(
 
         # Process with MinerU
         logger.info(f"Processing PDF {file_hash} with MinerU service")
-        mineru_result = await process_with_mineru(temp_file_path)
+        mineru_result = process_with_mineru(temp_file_path)
 
         # Store MinerU result in S3
         mineru_result_key = f"mineru_results/{file_hash}/result.json"
@@ -331,14 +325,9 @@ async def upload_pdf(
             # If no specific structure found, treat the entire result as elements
             elements.append(mineru_result)
 
-        # Compute embeddings in background to avoid blocking the response
-        if background_tasks:
-            background_tasks.add_task(compute_embeddings_for_elements, elements, file_hash)
-            logger.info("Scheduled embedding computation as background task")
-        else:
-            # If no background tasks available, compute synchronously (not ideal for large files)
-            embeddings_count = await compute_embeddings_for_elements(elements, file_hash)
-            logger.info(f"Completed synchronous embedding computation: {embeddings_count} elements processed")
+        # Compute embeddings synchronously
+        embeddings_count = compute_embeddings_for_elements(elements, file_hash)
+        logger.info(f"Completed synchronous embedding computation: {embeddings_count} elements processed")
 
         processing_time = time.time() - start_time
 
@@ -348,7 +337,7 @@ async def upload_pdf(
             file_hash=file_hash,
             s3_path=pdf_s3_key,
             mineru_result_path=mineru_result_key,
-            embeddings_computed=len(elements),  # Approximate count, actual count computed in background
+            embeddings_computed=embeddings_count,  # Actual count computed
             processing_time=processing_time
         )
 

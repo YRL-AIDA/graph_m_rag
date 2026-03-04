@@ -1,4 +1,5 @@
 import logging
+import uuid
 from typing import List, Optional, Dict, Any
 
 from qdrant_client import QdrantClient
@@ -204,6 +205,63 @@ class QdrantClientWrapper:
         """
         if hasattr(self.client, 'close'):
             self.client.close()
+
+    def save_embeddings(self, embeddings: List[List[float]], texts: List[str],
+                        metadata_list: Optional[List[Dict[str, Any]]] = None) -> bool:
+        """
+        Сохраняет эмбеддинги в векторную базу данных Qdrant
+
+        Args:
+            embeddings: Список векторов эмбеддингов
+            texts: Список текстов, соответствующих эмбеддингам
+            metadata_list: Опциональный список метаданных для каждого эмбеддинга
+
+        Returns:
+            bool: True если успешно сохранено, иначе False
+        """
+        try:
+            if len(embeddings) != len(texts):
+                raise ValueError("Количество эмбеддингов должно совпадать с количеством текстов")
+
+            if metadata_list and len(metadata_list) != len(embeddings):
+                raise ValueError("Количество метаданных должно совпадать с количеством эмбеддингов")
+
+            points = []
+            for i, (embedding, text) in enumerate(zip(embeddings, texts)):
+                # Генерируем уникальный ID для каждой точки
+                point_id = str(uuid.uuid4())
+
+                # Подготовляем payload
+                payload = {
+                    "text": text,
+                    "timestamp": str(uuid.uuid4())  # можно заменить на реальную дату/время
+                }
+
+                # Добавляем метаданные, если они есть
+                if metadata_list:
+                    payload.update(metadata_list[i])
+
+                # Создаем структуру точки
+                point = PointStruct(
+                    id=point_id,
+                    vector=embedding,
+                    payload=payload
+                )
+
+                points.append(point)
+
+            # Загружаем точки в коллекцию
+            success = self.upload_points(points)
+            if success:
+                logger.info(f"Successfully saved {len(embeddings)} embeddings to collection {self.collection_name}")
+                return True
+            else:
+                logger.error("Failed to upload embeddings to Qdrant")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error saving embeddings to Qdrant: {e}")
+            return False
 
 
 def get_qdrant_client() -> QdrantClientWrapper:

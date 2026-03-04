@@ -278,7 +278,7 @@ if __name__ == "__main__":
     qdrant_client = get_qdrant_client()
 
     # Создание коллекции
-    success = qdrant_client.create_collection(vector_size=1536)  # Пример для OpenAI embeddings
+    success = qdrant_client.create_collection(vector_size=2048)  # Пример для OpenAI embeddings
 
     if success:
         print("Collection created successfully!")

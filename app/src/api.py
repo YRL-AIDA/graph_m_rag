@@ -18,6 +18,7 @@ from pydantic import BaseModel
 import os
 from pathlib import Path
 
+from app.src.qdrant_client_api import get_qdrant_client
 from app.src.qwen3_emb_client import EmbeddingClient
 from app.src.minio_client import MinioClient
 from app.src.mineru_client import MinerUClient
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 minio_client = MinioClient(logger)
 mineru_client = MinerUClient()
 emb_client = EmbeddingClient(base_url="http://192.168.19.127:10114/embedding")
+qdrant_client = get_qdrant_client()
 
 # Create FastAPI application
 app = FastAPI(
@@ -128,6 +130,10 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
         Number of elements processed
     """
     processed_count = 0
+    # Prepare lists for batch saving to Qdrant
+    embeddings_list = []
+    texts_list = []
+    metadata_list = []
 
     # Process each element according to its type
     for i, element in enumerate(elements):
@@ -198,6 +204,19 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 # Generate embedding using the embedding client
                 embedding = emb_client.get_text_embedding(text_content)
 
+                # Prepare data for Qdrant
+                embeddings_list.append(embedding.embedding)
+                texts_list.append(text_content)
+
+                metadata = {
+                    "element_index": i,
+                    "element_type": element_type,
+                    "file_hash": file_hash,
+                    "created_at": datetime.now().isoformat(),
+                    "original_element": element
+                }
+                metadata_list.append(metadata)
+
                 # Save embedding to S3 with a specific naming convention
                 embedding_key = f"embeddings/{file_hash}/element_{i}.json"
                 embedding_data = {
@@ -225,6 +244,24 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
             except Exception as e:
                 logger.error(f"Failed to compute embedding for element {i} (type: {element_type}): {e}")
                 continue
+    try:
+        # Create collection if it doesn't exist (using the size of the first embedding)
+        if embeddings_list and len(embeddings_list) > 0:
+            qdrant_client.create_collection(vector_size=len(embeddings_list[0]))
+
+            # Save embeddings to Qdrant
+            success = qdrant_client.save_embeddings(
+                embeddings=embeddings_list,
+                texts=texts_list,
+                metadata_list=metadata_list
+            )
+
+            if success:
+                logger.info(f"Saved {len(embeddings_list)} embeddings to Qdrant collection")
+            else:
+                logger.error("Failed to save embeddings to Qdrant")
+    except Exception as e:
+        logger.error(f"Error saving embeddings to Qdrant: {e}")
 
     return processed_count
 

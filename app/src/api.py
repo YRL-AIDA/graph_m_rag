@@ -3,7 +3,9 @@ Main API application for PDF processing.
 Handles PDF upload to S3, processing with MinerU service,
 and computing embeddings for each element in the result.
 """
+import base64
 import hashlib
+import io
 import json
 import logging
 import time
@@ -382,17 +384,6 @@ def upload_pdf(file: UploadFile = File(...)):
         file_hash = hashlib.md5(content).hexdigest()
         object_name = f"{file_hash}"
 
-        if minio_client.object_exists(object_name=object_name):
-            # Retrieve the pre-processed result from MinIO
-            stored_result_bytes = minio_client.get_object(object_name=object_name)
-            stored_result = json.loads(stored_result_bytes.decode('utf-8'))
-
-            status = "completed"
-            results = stored_result
-            error = None
-            logger.info(f"Retrieve the pre-processed result from MinIO")
-            return results
-
         # Create temporary file
         temp_dir = Path("/tmp/pdf_processing")
         temp_dir.mkdir(exist_ok=True)
@@ -427,6 +418,21 @@ def upload_pdf(file: UploadFile = File(...)):
             data=result_json.encode('utf-8'),
             content_type="application/json"
         )
+
+        images = mineru_result["results"]["result"]["results"]["images_base64"]
+
+        for key, image_base64 in images.items():
+
+            image_key = f"images/{key}"
+            image_data = base64.b64decode(image_base64)
+            image_buffer = io.BytesIO(image_data)
+
+            minio_client.put_object(
+                bucket_name=minio_client.bucket_name,
+                object_name=image_key,
+                data=image_buffer,
+                content_type="image/jpeg"
+            )
 
         logger.info(f"Stored MinerU result to S3: {mineru_result_key}")
 

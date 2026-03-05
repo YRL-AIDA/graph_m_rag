@@ -166,17 +166,73 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
         elif element_type == "image":
             # Combine image path and captions if available
             img_path = element.get("img_path", "")
-            image_captions = element.get("image_caption", [])
-            image_footnotes = element.get("image_footnote", [])
+            # Download image from MinIO
+            try:
+                image_data = minio_client.get_object(
+                    bucket_name=minio_client.bucket_name,
+                    object_name=img_path
+                )
 
-            caption_text = " ".join(image_captions) if image_captions else ""
-            footnote_text = " ".join(image_footnotes) if image_footnotes else ""
+                # Get image as bytes
+                image_base64 = base64.b64encode(image_data)
 
-            text_content = f"Image: {img_path}"
-            if caption_text:
-                text_content += f" | Caption: {caption_text}"
-            if footnote_text:
-                text_content += f" | Footnote: {footnote_text}"
+                # Compute embedding for the image
+                embedding = emb_client.get_image_embedding_base64(image_base64)
+
+                # Prepare data for Qdrant
+                embeddings_list.append(embedding.embedding)
+                texts_list.append(f"Image: {img_path}")  # Text representation for Qdrant
+
+                metadata = {
+                    "element_index": i,
+                    "element_type": element_type,
+                    "file_hash": file_hash,
+                    "created_at": datetime.now().isoformat(),
+                    "original_element": element,
+                    "img_path": img_path
+                }
+                metadata_list.append(metadata)
+
+                # Save embedding to S3 with a specific naming convention
+                embedding_key = f"embeddings/{file_hash}/element_{i}.json"
+                embedding_data = {
+                    "original_element": element,
+                    "img_path": img_path,
+                    "embedding": embedding.embedding,
+                    "element_index": i,
+                    "element_type": element_type,
+                    "file_hash": file_hash,
+                    "created_at": datetime.now().isoformat()
+                }
+
+                # Convert to JSON and upload to MinIO
+                embedding_json = json.dumps(embedding_data, ensure_ascii=False)
+                minio_client.put_object(
+                    bucket_name=minio_client.bucket_name,
+                    object_name=embedding_key,
+                    data=embedding_json.encode('utf-8'),
+                    content_type='application/json'
+                )
+
+                processed_count += 1
+                logger.info(f"Computed embedding for image element {i} (type: {element_type}, path: {img_path})")
+
+                # Skip the rest of the processing since we've already handled the image
+                continue
+            except Exception as e:
+                logger.error(f"Failed to download or process image {img_path} for element {i}: {e}")
+                # If image processing fails, fall back to text-based approach
+                image_captions = element.get("image_caption", [])
+                image_footnotes = element.get("image_footnote", [])
+
+                caption_text = " ".join(image_captions) if image_captions else ""
+                footnote_text = " ".join(image_footnotes) if image_footnotes else ""
+
+                text_content = f"Image: {img_path}"
+                if caption_text:
+                    text_content += f" | Caption: {caption_text}"
+                if footnote_text:
+                    text_content += f" | Footnote: {footnote_text}"
 
         elif element_type == "table":
             # Combine table information
@@ -422,7 +478,6 @@ def upload_pdf(file: UploadFile = File(...)):
         images = mineru_result["results"]["result"]["results"]["images_base64"]
 
         for key, image_base64 in images.items():
-
             image_key = f"images/{key}"
             image_data = base64.b64decode(image_base64)
             image_buffer = io.BytesIO(image_data)

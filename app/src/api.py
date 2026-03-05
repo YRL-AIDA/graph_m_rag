@@ -380,6 +380,18 @@ def upload_pdf(file: UploadFile = File(...)):
 
         # Calculate file hash
         file_hash = hashlib.md5(content).hexdigest()
+        object_name = f"{file_hash}"
+
+        if minio_client.object_exists(object_name=object_name):
+            # Retrieve the pre-processed result from MinIO
+            stored_result_bytes = minio_client.get_object(object_name=object_name)
+            stored_result = json.loads(stored_result_bytes.decode('utf-8'))
+
+            status = "completed"
+            results = stored_result
+            error = None
+            logger.info(f"Retrieve the pre-processed result from MinIO")
+            return results
 
         # Create temporary file
         temp_dir = Path("/tmp/pdf_processing")

@@ -45,8 +45,7 @@ def test_upload_pdf_directory():
         assert "mineru_result_path" in response_data
         assert "embeddings_computed" in response_data
         assert "processing_time" in response_data
-        assert response_data["status"] == "success"
-        assert "processed with MinerU" in response_data["message"]
+        assert response_data["status"] == "success" or response_data["status"] == "already_processed"
 
         print(f"Файл {pdf_file_path.name} успешно загружен!")
         print(f"Response: {response_data}")

@@ -440,6 +440,21 @@ def upload_pdf(file: UploadFile = File(...)):
         file_hash = hashlib.md5(content).hexdigest()
         object_name = f"{file_hash}"
 
+        pdf_s3_key = f"pdfs/{file_hash}/{file.filename}"
+        if minio_client.object_exists(bucket_name=minio_client.bucket_name, object_name=pdf_s3_key):
+            logger.info(f"PDF with hash {file_hash} already exists in MinIO, skipping processing")
+            processing_time = time.time() - start_time
+
+            return PDFUploadResponse(
+                status="already_processed",
+                message="PDF file was already processed previously",
+                file_hash=file_hash,
+                s3_path=pdf_s3_key,
+                mineru_result_path=f"mineru_results/{file_hash}/result.json",
+                embeddings_computed=0,
+                processing_time=processing_time
+            )
+
         # Create temporary file
         temp_dir = Path("/tmp/pdf_processing")
         temp_dir.mkdir(exist_ok=True)

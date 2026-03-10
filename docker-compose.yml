@@ -43,7 +43,12 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
-
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all # Request all available GPUs
   qdrant:
     image: qdrant/qdrant:latest
     container_name: rag-qdrant

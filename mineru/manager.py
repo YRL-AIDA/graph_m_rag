@@ -10,6 +10,7 @@ import base64
 from dataclasses import dataclass
 from functools import lru_cache
 
+import torch
 from mineru.cli.common import convert_pdf_bytes_to_bytes_by_pypdfium2, prepare_env, read_fn
 from mineru.data.data_reader_writer import FileBasedDataWriter
 from mineru.backend.pipeline.pipeline_analyze import doc_analyze as pipeline_doc_analyze
@@ -92,7 +93,8 @@ class MinerUManager:
                     model=model,
                     processor=processor
                 )
-                print("VLM клиент создан успешно")
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                print("VLM клиент создан успешно на " + device)
             except Exception as e:
                 print(f"Ошибка создания VLM клиента: {e}")
                 raise

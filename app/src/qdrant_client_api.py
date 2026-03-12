@@ -5,39 +5,26 @@ from typing import List, Optional, Dict, Any
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
-from pydantic_settings import SettingsConfigDict, BaseSettings
-
+from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
-class QdrantSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-    QDRANT_HOST: str = "localhost"
-    QDRANT_PORT: int = 6333
-    QDRANT_API_KEY: Optional[str] = "12345"
-    QDRANT_GRPC_PORT: int = 6334
-    QDRANT_COLLECTION_NAME: str = "documents"
-
-
 class QdrantClientWrapper:
-    def __init__(self, settings: QdrantSettings):
-        self.settings = settings
-        if settings.QDRANT_API_KEY:
+    def __init__(self):
+        if settings.qdrant.QDRANT_API_KEY:
             self.client = QdrantClient(
-                host=settings.QDRANT_HOST,
-                port=settings.QDRANT_PORT,
-                #api_key=settings.QDRANT_API_KEY,
-                grpc_port=settings.QDRANT_GRPC_PORT,
+                host=settings.qdrant.QDRANT_HOST,
+                port=settings.qdrant.QDRANT_PORT,
+                grpc_port=settings.qdrant.QDRANT_GRPC_PORT,
                 prefer_grpc=True
             )
         else:
             self.client = QdrantClient(
-                host=settings.QDRANT_HOST,
-                port=settings.QDRANT_PORT
+                host=settings.qdrant.QDRANT_HOST,
+                port=settings.qdrant.QDRANT_PORT
             )
-        self.collection_name = settings.QDRANT_COLLECTION_NAME
+        self.collection_name = settings.qdrant.QDRANT_COLLECTION_NAME
 
     def create_collection(
         self,
@@ -268,8 +255,7 @@ def get_qdrant_client() -> QdrantClientWrapper:
     """
     Фабрика для создания клиента Qdrant
     """
-    settings = QdrantSettings()
-    return QdrantClientWrapper(settings)
+    return QdrantClientWrapper()
 
 
 # Пример использования

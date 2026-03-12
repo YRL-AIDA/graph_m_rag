@@ -4,20 +4,14 @@ from typing import BinaryIO, List, Any, Union
 import io
 from minio import Minio
 from minio.error import S3Error
-
+from app.config.settings import settings
 
 class MinioClient:
     def __init__(self, logger: logging.Logger = None) -> None:
-        endpoint = os.environ.get("S3_URL", "http://localhost:9000")
-        # Remove http:// or https:// prefix for Minio client
-        if endpoint.startswith("http://"):
-            endpoint = endpoint[7:]
-        elif endpoint.startswith("https://"):
-            endpoint = endpoint[8:]
-
-        access_key = os.environ.get("S3_ACCESS_KEY", "minio")
-        secret_key = os.environ.get("S3_SECRET_KEY", "minio123")
-        secure = os.environ.get("S3_VERIFY_TLS", "false").lower() == "true"
+        endpoint = settings.s3_endpoint_clean
+        access_key = settings.s3.S3_ACCESS_KEY
+        secret_key = settings.s3.S3_SECRET_KEY
+        secure = settings.s3_secure
 
         self.logger = logger or logging.getLogger(__name__)
         self.client = Minio(

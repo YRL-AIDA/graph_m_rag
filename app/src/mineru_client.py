@@ -3,8 +3,6 @@ MinerU Client for PDF processing
 """
 
 import requests
-import base64
-import json
 from typing import Dict, Any, Optional
 from pathlib import Path
 

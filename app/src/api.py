@@ -24,7 +24,7 @@ from app.src.qdrant_client_api import get_qdrant_client
 from app.src.qwen3_emb_client import EmbeddingClient
 from app.src.minio_client import MinioClient
 from app.src.mineru_client import MinerUClient
-from app.config import settings
+from app.config.settings import settings
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 
 # Initialize clients
 minio_client = MinioClient(logger)
-mineru_client = MinerUClient()
-emb_client = EmbeddingClient(base_url="http://192.168.19.127:10114/embedding")
+mineru_client = MinerUClient(base_url=f"{settings.mineru.MINERU_HOST}:{settings.mineru.MINERU_PORT}")
+emb_client = EmbeddingClient(base_url=settings.embedding.EMBEDDING_BASE_URL)
 qdrant_client = get_qdrant_client()
 
 # Create FastAPI application

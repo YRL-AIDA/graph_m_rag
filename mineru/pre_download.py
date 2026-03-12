@@ -7,7 +7,6 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-os.environ['MODELSCOPE_CACHE'] = '/home/sunveil/Documents/projects/laba/graph-m-rag/src/mineru/models'
 
 def download_models():
 

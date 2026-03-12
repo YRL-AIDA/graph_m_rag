@@ -20,7 +20,6 @@ from manager import MinerUManager, ProcessingConfig
 
 manager = MinerUManager()
 
-os.environ['MODELSCOPE_CACHE'] = '/home/sunveil/Documents/projects/laba/graph-m-rag/src/mineru/models'
 app = FastAPI(
     title="MinerU API",
     description="API для обработки PDF и изображений с использованием MinerU",
@@ -37,11 +36,8 @@ app.add_middleware(
 
 
 class ProcessResponse(BaseModel):
-    """Модель ответа на обработку документа."""
-    task_id: str
     status: str
     message: str
-    download_links: Optional[Dict[str, str]] = None
     results: Optional[Dict[str, Any]] = None
 
 
@@ -139,141 +135,19 @@ def process_document(
             results = result
             error = result.get("error", "Unknown error")
 
-        tasks[task_id] = {
-            "status": status,
-            "temp_dir": temp_dir,
-            "results": results,
-            "error": error
-        }
-
     except Exception as e:
-        tasks[task_id] = {
-            "status": "failed",
-            "temp_dir": temp_dir,
-            "results": None,
-            "error": str(e)
-        }
-
-        try:
-            shutil.rmtree(temp_dir)
-        except:
-            pass
-
-    base_url = os.getenv("BASE_URL", "http://localhost:8001")
-
-    download_links = {
-        "status": f"{base_url}/status/{task_id}",
-        "api_docs": f"{base_url}/docs"
-    }
-
-    return ProcessResponse(
-        task_id=task_id,
-        status=status,
-        message="Документ обработан" if status == "completed" else "Ошибка при обработке документа",
-        download_links=download_links,
-        results={"result": results} if results else None
-    )
-
-
-# Удаляем асинхронную функцию process_task, так как теперь используется синхронная обработка
-
-
-@app.get("/status/{task_id}", response_model=StatusResponse)
-def get_status(task_id: str):
-    if task_id not in tasks:
-        raise HTTPException(status_code=404, detail="Задача не найдена")
-
-    task = tasks[task_id]
-
-    if task["status"] == "completed":
-        results = task["results"]
-        download_links = {}
-
-        if results.get("format") in ["pipeline", "vlm"] and "results" in results:
-            base_url = os.getenv("BASE_URL", "http://localhost:8001")
-            files = results["results"]["files"]
-
-            for key, file_path in files.items():
-                if key == "images_dir":
-                    download_links[key] = f"{base_url}/download/{task_id}/images.zip"
-                elif Path(file_path).exists():
-                    rel_path = Path(file_path).relative_to(results["results"]["output_dir"])
-                    download_links[key] = f"{base_url}/download/{task_id}/{rel_path}"
-
-        # Add images_base64 to the response if available
-        response_results = {
-            "download_links": download_links,
-            "format": results.get("format"),
-            "summary": results.get("results", {})  # .get("pdf_info", {})
-        }
-
-        if "images_base64" in results.get("results", {}):
-            response_results["images_base64"] = results["results"]["images_base64"]
-
-        if results.get("format") == "vlm" and "image_base64" in results.get("results", {}):
-            response_results["image_base64"] = results["results"]["image_base64"]
-
-        return StatusResponse(
-            task_id=task_id,
-            status="completed",
-            results=response_results
-        )
-
-    return StatusResponse(
-        task_id=task_id,
-        status=task["status"],
-        error=task.get("error")
-    )
-
-
-@app.get("/download/{task_id}/{file_path:path}")
-def download_file(task_id: str, file_path: str):
-    if task_id not in tasks:
-        raise HTTPException(status_code=404, detail="Задача не найдена")
-
-    task = tasks[task_id]
-    if task["status"] != "completed":
-        raise HTTPException(status_code=400, detail="Задача еще не завершена")
-
-    results = task["results"]
-    if not results or "results" not in results:
-        raise HTTPException(status_code=404, detail="Результаты не найдены")
-
-    output_dir = results["results"]["output_dir"]
-    full_path = Path(output_dir) / file_path
-
-    if not full_path.exists():
-        raise HTTPException(status_code=404, detail="Файл не найден")
+        raise HTTPException(status_code=500, detail=f"Ошибка чтения файла: {str(e)}")
 
     try:
-        full_path.resolve().relative_to(Path(output_dir).resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Доступ запрещен")
+        shutil.rmtree(temp_dir)
+    except:
+        pass
 
-    return FileResponse(
-        path=full_path,
-        filename=full_path.name,
-        media_type="application/octet-stream"
+    return ProcessResponse(
+        status=status,
+        message="Документ обработан" if status == "completed" else "Ошибка при обработке документа",
+        results={"result": results} if results else None
     )
-
-
-@app.delete("/cleanup/{task_id}")
-def cleanup_task(task_id: str):
-    if task_id not in tasks:
-        raise HTTPException(status_code=404, detail="Задача не найдена")
-
-    task = tasks[task_id]
-    temp_dir = task.get("temp_dir")
-
-    if temp_dir and Path(temp_dir).exists():
-        try:
-            shutil.rmtree(temp_dir)
-        except:
-            pass
-
-    del tasks[task_id]
-
-    return {"status": "cleaned", "task_id": task_id}
 
 def run_api(
         host: str = "0.0.0.0",

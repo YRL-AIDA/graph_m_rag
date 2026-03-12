@@ -51,20 +51,15 @@ class MinioClient:
             self.logger.error(f"Error listing buckets: {e}")
             raise
 
-    def list_objects(self, bucket_name: str = None) -> List:
-        """List objects in a bucket"""
+    def list_objects(self, bucket_name: str = None, prefix: str = None) -> List:
+        """List objects in a bucket with optional prefix filter"""
         if bucket_name is None:
             bucket_name = self.bucket_name
 
         try:
             objects = []
-            for obj in self.client.list_objects(bucket_name, recursive=True):
-                objects.append({
-                    'Key': obj.object_name,
-                    'LastModified': obj.last_modified,
-                    'Size': obj.size,
-                    'ETag': obj.etag
-                })
+            for obj in self.client.list_objects(bucket_name, prefix=prefix, recursive=True):
+                objects.append(obj.object_name)
             return objects
         except S3Error as e:
             self.logger.error(f"Error listing objects in bucket {bucket_name}: {e}")

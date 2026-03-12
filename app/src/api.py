@@ -436,24 +436,40 @@ def upload_pdf(file: UploadFile = File(...)):
         # Read file content
         content = file.file.read()
 
-        # Calculate file hash
+        # Calculate file hash based on content only (not filename)
         file_hash = hashlib.md5(content).hexdigest()
-        object_name = f"{file_hash}"
 
-        pdf_s3_key = f"pdfs/{file_hash}/{file.filename}"
-        if minio_client.object_exists(bucket_name=minio_client.bucket_name, object_name=pdf_s3_key):
+        # Check if PDF with this hash already exists (regardless of filename)
+        # Use hash-based prefix to detect duplicates by content
+        existing_pdf_prefix = f"pdfs/{file_hash}_"
+        existing_pdfs = minio_client.list_objects(
+            bucket_name=minio_client.bucket_name,
+            prefix=existing_pdf_prefix
+        )
+
+        if existing_pdfs:
             logger.info(f"PDF with hash {file_hash} already exists in MinIO, skipping processing")
             processing_time = time.time() - start_time
+
+            # Get the first existing PDF path
+            first_pdf_path = existing_pdfs[0] if existing_pdfs else f"pdfs/{file_hash}_{file.filename}/{file.filename}"
+            # Extract file_unique_id from the existing path
+            existing_unique_id = first_pdf_path.split('/')[1] if '/' in first_pdf_path else file_hash
 
             return PDFUploadResponse(
                 status="already_processed",
                 message="PDF file was already processed previously",
                 file_hash=file_hash,
-                s3_path=pdf_s3_key,
-                mineru_result_path=f"mineru_results/{file_hash}/result.json",
+                s3_path=first_pdf_path,
+                mineru_result_path=f"mineru_results/{existing_unique_id}/result.json",
                 embeddings_computed=0,
                 processing_time=processing_time
             )
+
+        # Create unique directory for this file using both hash and filename
+        # to avoid conflicts when same content has different filenames
+        file_unique_id = f"{file_hash}_{file.filename}"
+        pdf_s3_key = f"pdfs/{file_unique_id}/{file.filename}"
 
         # Create temporary file
         temp_dir = Path("/tmp/pdf_processing")
@@ -463,24 +479,20 @@ def upload_pdf(file: UploadFile = File(...)):
         with open(temp_file_path, 'wb') as temp_file:
             temp_file.write(content)
 
-        # Upload original PDF to MinIO
-        pdf_s3_key = f"pdfs/{file_hash}/{file.filename}"
-        minio_client.upload(
-            bucket_name=minio_client.bucket_name,
-            object_name=pdf_s3_key,
-            data=content,
-            content_type="application/pdf"
-        )
-
-        logger.info(f"Uploaded PDF to S3: {pdf_s3_key}")
-
         # Process with MinerU
         logger.info(f"Processing PDF {file_hash} with MinerU service")
         mineru_result = process_with_mineru(temp_file_path)
 
-        # Store MinerU result in S3
-        mineru_result_key = f"mineru_results/{file_hash}/result.json"
+        # Store MinerU result in S3 with hash in the filename
+        mineru_result_key = f"mineru_results/{file_unique_id}/result.json"
+        # Add file_hash to the result JSON
         mineru_result_serializable = convert_to_serializable(mineru_result)
+        # Add metadata with file hash and original filename
+        mineru_result_serializable["metadata"] = {
+            "file_hash": file_hash,
+            "original_filename": file.filename,
+            "processed_at": datetime.now().isoformat()
+        }
         result_json = json.dumps(mineru_result_serializable, ensure_ascii=False, indent=2)
 
         minio_client.put_object(
@@ -515,6 +527,16 @@ def upload_pdf(file: UploadFile = File(...)):
         # Compute embeddings synchronously
         embeddings_count = compute_embeddings_for_elements(elements, file_hash)
         logger.info(f"Completed synchronous embedding computation: {embeddings_count} elements processed")
+
+        # Upload original PDF to MinIO
+        minio_client.upload(
+            bucket_name=minio_client.bucket_name,
+            object_name=pdf_s3_key,
+            data=content,
+            content_type="application/pdf"
+        )
+
+        logger.info(f"Uploaded PDF to S3: {pdf_s3_key}")
 
         processing_time = time.time() - start_time
 

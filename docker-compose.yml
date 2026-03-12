@@ -47,7 +47,7 @@ services:
       resources:
         reservations:
           devices:
-            - capabilities: [ gpu ]
+            - capabilities: [gpu]
               count: all # Request all available GPUs
   qdrant:
     image: qdrant/qdrant:latest

@@ -30,7 +30,7 @@ import io
 class ProcessingConfig:
     backend: str = "pipeline"
     method: str = "auto"
-    lang: str = "ru"
+    lang: str = "en"
     formula_enable: bool = True
     table_enable: bool = True
     start_page_id: int = 0

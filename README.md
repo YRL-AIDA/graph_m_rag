@@ -5,6 +5,29 @@
 - **Python 3.11**
 - **Docker** и **Docker Compose**
 - **GPU** (для работы MinerU с CUDA)
+  - Рекомендуемая версия CUDA: **12.0+**
+  - Поддерживаемые драйверы NVIDIA: **535.104.05+**
+  - Минимальный объем видеопамяти: **8 GB**
+  - Рекомендуемый объем видеопамяти: **16 GB+**
+
+### Установка NVIDIA Container Toolkit
+Для работы контейнеров с GPU необходимо установить NVIDIA Container Toolkit:
+
+#### Для Ubuntu/Debian:
+```bash
+# Добавление репозитория NVIDIA
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit.gpg] https://#g' | \
+  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+# Обновление списка пакетов и установка
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+
+# Перезапуск Docker
+sudo systemctl restart docker
+```
 
 ## Запуск через Docker Compose (Рекомендуемый)
 ### Шаг 1: Подготовка переменных окружения

@@ -58,7 +58,7 @@ class MinerUSettings(BaseSettings):
 
 class EmbeddingSettings(BaseSettings):
     """Embedding service configuration."""
-    EMBEDDING_BASE_URL: str = Field(default="http://localhost:10114/embedding", description="Embedding service URL")
+    EMBEDDING_BASE_URL: str = Field(default="http://192.168.19.127:10114/embedding", description="Embedding service URL")
     EMBEDDING_TIMEOUT: int = Field(default=30, description="Request timeout in seconds")
     EMBEDDING_MODEL: str = Field(default="qwen3-emb", description="Embedding model name")
 
@@ -118,7 +118,7 @@ class Settings(BaseSettings):
     MODELSCOPE_CACHE: str = Field(default="/app/models")
 
     # Embedding
-    EMBEDDING_BASE_URL: str = Field(default="http://localhost:10114/embedding")
+    EMBEDDING_BASE_URL: str = Field(default="http://192.168.19.127:10114/embedding")
     EMBEDDING_TIMEOUT: int = Field(default=30)
 
     # App

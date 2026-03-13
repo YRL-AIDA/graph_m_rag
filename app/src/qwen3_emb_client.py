@@ -11,7 +11,7 @@ class EmbeddingClient:
     A simple client for the embedding service.
     """
 
-    def __init__(self, base_url: str, timeout: int = 30):
+    def __init__(self, base_url: str, timeout: int = 300):
         """
         Args:
             base_url: The base URL of the embedding service (e.g. http://localhost:8000).

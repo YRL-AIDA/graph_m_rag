@@ -19,10 +19,10 @@ with open('test_file.json', 'r') as f:
 
 doc_manager = Manager(config)
 
-document1 = Document(data, mode='mineru', name='test1.pdf')
+document1 = Document(data, mode='mineru', name='hash_name')
 doc_manager.add_document(document1)
-document2 = Document(data, mode='mineru', name='test2.pdf')
+document2 = Document(data, mode='mineru', name='hash_name2')
 doc_manager.add_document(document2)
 
-doc_manager.delete_document(name='test1.pdf')
+doc_manager.delete_document(name='hash_name2')
 doc_manager.status()

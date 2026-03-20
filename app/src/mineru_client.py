@@ -95,7 +95,7 @@ class MinerUClient:
         self,
         file_content: bytes,
         filename: str,
-        backend: str = "pipeline",
+        backend: str = "vlm",
         method: str = "auto",
         lang: str = "ru",
         formula_enable: bool = True,

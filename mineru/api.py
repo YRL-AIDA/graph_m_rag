@@ -74,7 +74,7 @@ def health_check():
 @app.post("/process", response_model=ProcessResponse)
 def process_document(
         file: UploadFile = File(...),
-        backend: str = Query("pipeline", description="Бэкенд обработки: pipeline или vlm"),
+        backend: str = Query("vlm", description="Бэкенд обработки: pipeline или vlm"),
         method: str = Query("auto", description="Метод обработки: auto, txt, ocr"),
         lang: str = Query("ru", description="Язык документа"),
         formula_enable: bool = Query(True, description="Включить обработку формул"),

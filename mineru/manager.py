@@ -28,7 +28,7 @@ import io
 
 @dataclass
 class ProcessingConfig:
-    backend: str = "pipeline"
+    backend: str = "vlm"
     method: str = "auto"
     lang: str = "en"
     formula_enable: bool = True

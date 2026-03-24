@@ -27,7 +27,7 @@ from app.src.qwen3_emb_client import EmbeddingClient
 from app.src.minio_client import MinioClient
 from app.src.mineru_client import MinerUClient
 from app.config.settings import settings
-from app.src.utils.data_model import QuestionResponse, QuestionRequest, UploadedFileInfo, UploadedFilesListResponse
+from app.src.utils.data_model import QuestionResponse, QuestionRequest, UploadedFileInfo, UploadedFilesListResponse, CollectionCreateRequest, CollectionInfo, CollectionsListResponse
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -367,7 +367,10 @@ async def root():
             "GET /health": "Health check",
             "POST /ask-document": "Ask a question about a document",
             "GET /ask-document": "Web interface for asking questions about documents",
-            "GET /uploaded-files": "Get list of uploaded files with hashes"
+            "GET /uploaded-files": "Get list of uploaded files with hashes",
+            "GET /collections": "Get list of Qdrant collections",
+            "POST /collections": "Create a new Qdrant collection",
+            "DELETE /collections/{collection_name}": "Delete a Qdrant collection"
         }
     }
 
@@ -481,6 +484,154 @@ def get_uploaded_files():
             status_code=500,
             detail=f"Error retrieving file list: {str(e)}"
         )
+
+
+@app.get("/collections", response_model=CollectionsListResponse)
+def get_collections():
+    """
+    Get list of all Qdrant collections with their info
+
+    Returns:
+        List of collections with name and point counts
+    """
+    try:
+        client = get_qdrant_client()
+        collection_names = client.list_collections()
+
+        collections_info = []
+        for col_name in collection_names:
+            try:
+                # Create a client for this specific collection to get info
+                col_client = get_qdrant_client(collection_name=col_name)
+                col_info = col_client.client.get_collection(col_name)
+                collections_info.append(CollectionInfo(
+                    name=col_name,
+                    vectors_count=col_info.vectors_count if hasattr(col_info, 'vectors_count') else None,
+                    points_count=col_info.points_count if hasattr(col_info, 'points_count') else col_info.vectors_count
+                ))
+            except Exception as e:
+                logger.warning(f"Could not get info for collection {col_name}: {e}")
+                collections_info.append(CollectionInfo(name=col_name))
+
+        return CollectionsListResponse(
+            status="success",
+            message=f"Found {len(collections_info)} collections",
+            collections=collections_info,
+            total_count=len(collections_info)
+        )
+    except Exception as e:
+        logger.error(f"Error listing collections: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving collections list: {str(e)}"
+        )
+
+
+@app.post("/collections", response_model=Dict[str, Any])
+def create_collection(request: CollectionCreateRequest):
+    """
+    Create a new Qdrant collection
+
+    Args:
+        request: CollectionCreateRequest with collection_name, vector_size, and distance
+
+    Returns:
+        Status of collection creation
+    """
+    try:
+        client = get_qdrant_client(collection_name=request.collection_name)
+
+        # Check if collection already exists
+        if client.client.collection_exists(request.collection_name):
+            return {
+                "status": "already_exists",
+                "message": f"Collection '{request.collection_name}' already exists",
+                "collection_name": request.collection_name
+            }
+
+        # Map distance string to enum
+        from qdrant_client.http.models import Distance as QdrantDistance
+        distance_map = {
+            "COSINE": QdrantDistance.COSINE,
+            "DOT": QdrantDistance.DOT,
+            "EUCLID": QdrantDistance.EUCLID
+        }
+        distance = distance_map.get(request.distance.upper(), QdrantDistance.COSINE)
+
+        # Create collection
+        success = client.create_collection(
+            vector_size=request.vector_size,
+            distance=distance
+        )
+
+        if success:
+            return {
+                "status": "success",
+                "message": f"Collection '{request.collection_name}' created successfully",
+                "collection_name": request.collection_name,
+                "vector_size": request.vector_size,
+                "distance": request.distance
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to create collection '{request.collection_name}'"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating collection: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error creating collection: {str(e)}"
+        )
+
+
+@app.delete("/collections/{collection_name}", response_model=Dict[str, Any])
+def delete_collection(collection_name: str):
+    """
+    Delete a Qdrant collection
+
+    Args:
+        collection_name: Name of the collection to delete
+
+    Returns:
+        Status of collection deletion
+    """
+    try:
+        client = get_qdrant_client(collection_name=collection_name)
+
+        # Check if collection exists
+        if not client.client.collection_exists(collection_name):
+            return {
+                "status": "not_found",
+                "message": f"Collection '{collection_name}' does not exist",
+                "collection_name": collection_name
+            }
+
+        # Delete collection
+        success = client.delete_collection()
+
+        if success:
+            return {
+                "status": "success",
+                "message": f"Collection '{collection_name}' deleted successfully",
+                "collection_name": collection_name
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete collection '{collection_name}'"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting collection: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error deleting collection: {str(e)}"
+        )
+
 
 @app.post("/upload-pdf", response_model=PDFUploadResponse)
 def upload_pdf(file: UploadFile = File(...)):
@@ -640,18 +791,22 @@ def upload_pdf(file: UploadFile = File(...)):
                 logger.warning(f"Could not remove temporary file {temp_file_path}: {e}")
 
 
-def check_document_indexed(file_hash: str) -> bool:
+def check_document_indexed(file_hash: str, client=None) -> bool:
     """
     Check if a document is already indexed in Qdrant by file_hash
 
     Args:
         file_hash: Hash of the PDF file
+        client: Optional QdrantClientWrapper instance. If not provided, uses default client.
 
     Returns:
         True if document is indexed, False otherwise
     """
     try:
         from qdrant_client.http import models
+
+        # Use provided client or default
+        q_client = client or qdrant_client
 
         # Search for any point with this file_hash
         filter_condition = models.Filter(
@@ -663,7 +818,7 @@ def check_document_indexed(file_hash: str) -> bool:
             ]
         )
 
-        results = qdrant_client.search(
+        results = q_client.search(
             query_vector=[0.0] * 2048,  # Dummy vector, we just need to check existence
             limit=1,
             filter_condition=filter_condition
@@ -675,17 +830,28 @@ def check_document_indexed(file_hash: str) -> bool:
         return False
 
 
-def index_document_by_hash(file_hash: str) -> bool:
+def index_document_by_hash(file_hash: str, client=None) -> bool:
     """
     Index a document by its hash if it exists in MinIO
 
     Args:
         file_hash: Hash of the PDF file
+        client: Optional QdrantClientWrapper instance. If not provided, uses default client.
 
     Returns:
         True if successfully indexed, False otherwise
     """
     try:
+        global qdrant_client
+
+        # Use provided client or default
+        q_client = client or qdrant_client
+
+        # Temporarily set the global client's collection_name for compute_embeddings_for_elements
+        original_collection_name = qdrant_client.collection_name
+        if client and client != qdrant_client:
+            qdrant_client.collection_name = client.collection_name
+
         # Check if mineru result exists in MinIO
         mineru_result_key = f"mineru_results/{file_hash}"
 
@@ -728,6 +894,9 @@ def index_document_by_hash(file_hash: str) -> bool:
         embeddings_count = compute_embeddings_for_elements(elements, file_hash)
         logger.info(f"Indexed {embeddings_count} elements for file_hash: {file_hash}")
 
+        # Restore original collection name
+        qdrant_client.collection_name = original_collection_name
+
         return embeddings_count > 0
 
     except Exception as e:
@@ -762,19 +931,27 @@ def ask_document(request: QuestionRequest):
     3. Generate embedding for the question
     4. Search for relevant chunks in Qdrant filtered by file_hash
     5. Return the results
+
+    Args:
+        request: QuestionRequest with file_hash, question, limit, and optional collection_name
     """
     from qdrant_client.http import models
 
     file_hash = request.file_hash
     question = request.question
     limit = request.limit
+    collection_name = request.collection_name
+
+    # Use specified collection or default
+    client = get_qdrant_client(collection_name=collection_name) if collection_name else qdrant_client
+    actual_collection_name = collection_name or qdrant_client.collection_name
 
     # Check if document is already indexed
-    is_indexed = check_document_indexed(file_hash)
+    is_indexed = check_document_indexed(file_hash, client)
 
     if not is_indexed:
-        logger.info(f"Document {file_hash} is not indexed, attempting to index it...")
-        index_success = index_document_by_hash(file_hash)
+        logger.info(f"Document {file_hash} is not indexed in collection '{actual_collection_name}', attempting to index it...")
+        index_success = index_document_by_hash(file_hash, client)
 
         if not index_success:
             return QuestionResponse(
@@ -783,11 +960,12 @@ def ask_document(request: QuestionRequest):
                 file_hash=file_hash,
                 question=question,
                 answers=[],
-                indexed=False
+                indexed=False,
+                collection_name=actual_collection_name
             )
 
         is_indexed = True
-        logger.info(f"Document {file_hash} successfully indexed")
+        logger.info(f"Document {file_hash} successfully indexed in collection '{actual_collection_name}'")
 
     try:
         # Generate embedding for the question
@@ -804,7 +982,7 @@ def ask_document(request: QuestionRequest):
         )
 
         # Search for relevant chunks
-        search_results = qdrant_client.search(
+        search_results = client.search(
             query_vector=question_embedding.embedding,
             limit=limit,
             filter_condition=filter_condition
@@ -824,11 +1002,12 @@ def ask_document(request: QuestionRequest):
 
         return QuestionResponse(
             status="success",
-            message=f"Found {len(answers)} relevant chunks for the question",
+            message=f"Found {len(answers)} relevant chunks for the question in collection '{actual_collection_name}'",
             file_hash=file_hash,
             question=question,
             answers=answers,
-            indexed=is_indexed
+            indexed=is_indexed,
+            collection_name=actual_collection_name
         )
 
     except Exception as e:

@@ -3,11 +3,34 @@ from typing import Dict, List, Any, Optional
 from pydantic import BaseModel
 
 
+class CollectionCreateRequest(BaseModel):
+    """Request model for creating a Qdrant collection"""
+    collection_name: str
+    vector_size: int = 2048
+    distance: str = "COSINE"  # COSINE, DOT, EUCLID
+
+
+class CollectionInfo(BaseModel):
+    """Model for collection information"""
+    name: str
+    vectors_count: Optional[int] = None
+    points_count: Optional[int] = None
+
+
+class CollectionsListResponse(BaseModel):
+    """Response model for list of collections"""
+    status: str
+    message: str
+    collections: List[CollectionInfo]
+    total_count: int = 0
+
+
 class QuestionRequest(BaseModel):
     """Request model for asking a question about a document"""
     file_hash: str
     question: str
     limit: int = 10
+    collection_name: Optional[str] = None  # Optional collection name
 
 
 class QuestionResponse(BaseModel):
@@ -18,6 +41,7 @@ class QuestionResponse(BaseModel):
     question: str
     answers: List[Dict[str, Any]]
     indexed: bool
+    collection_name: Optional[str] = None  # Collection name used
 
 class UploadedFileInfo(BaseModel):
     """Model for uploaded file information"""

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class QdrantClientWrapper:
-    def __init__(self):
+    def __init__(self, collection_name: Optional[str] = None):
         if settings.qdrant.QDRANT_API_KEY:
             self.client = QdrantClient(
                 host=settings.qdrant.QDRANT_HOST,
@@ -24,7 +24,7 @@ class QdrantClientWrapper:
                 host=settings.qdrant.QDRANT_HOST,
                 port=settings.qdrant.QDRANT_PORT
             )
-        self.collection_name = settings.qdrant.QDRANT_COLLECTION_NAME
+        self.collection_name = collection_name or settings.qdrant.QDRANT_COLLECTION_NAME
 
     def create_collection(
         self,
@@ -186,6 +186,17 @@ class QdrantClientWrapper:
             logger.error(f"Error updating point {point_id}: {e}")
             return False
 
+    def list_collections(self) -> List[str]:
+        """
+        Возвращает список всех коллекций в Qdrant
+        """
+        try:
+            collections = self.client.get_collections().collections
+            return [col.name for col in collections]
+        except Exception as e:
+            logger.error(f"Error getting collections list: {e}")
+            return []
+
     def close(self):
         """
         Закрывает соединение с Qdrant
@@ -251,11 +262,14 @@ class QdrantClientWrapper:
             return False
 
 
-def get_qdrant_client() -> QdrantClientWrapper:
+def get_qdrant_client(collection_name: Optional[str] = None) -> QdrantClientWrapper:
     """
     Фабрика для создания клиента Qdrant
+
+    Args:
+        collection_name: Имя коллекции для использования. Если не указано, используется коллекция по умолчанию.
     """
-    return QdrantClientWrapper()
+    return QdrantClientWrapper(collection_name=collection_name)
 
 
 # Пример использования

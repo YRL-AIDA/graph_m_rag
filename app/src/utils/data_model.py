@@ -42,6 +42,7 @@ class QuestionResponse(BaseModel):
     answers: List[Dict[str, Any]]
     indexed: bool
     collection_name: Optional[str] = None  # Collection name used
+    llm_answer: Optional[str] = None  # LLM-generated answer if use_llm is True
 
 class UploadedFileInfo(BaseModel):
     """Model for uploaded file information"""

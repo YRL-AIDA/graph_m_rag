@@ -64,6 +64,15 @@ class EmbeddingSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+class LLMSettings(BaseSettings):
+    """LLM service configuration."""
+    LLM_BASE_URL: str = Field(default="http://192.168.19.127:8888/v1", description="LLM service URL")
+    LLM_API_KEY: str = Field(default="EMPTY", description="LLM API key")
+    LLM_MODEL_NAME: str = Field(default="Qwen/Qwen3-VL-32B-Thinking", description="LLM model name")
+    LLM_MAX_TOKENS: int = Field(default=2048, description="Max tokens for response")
+    LLM_TEMPERATURE: float = Field(default=0.7, description="Temperature for generation")
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 class AppSettings(BaseSettings):
     """Main application configuration."""

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from starlette.responses import HTMLResponse, FileResponse
 
+from app.src.llm_client import ModelMessageDict, send_messasge
 from app.src.qdrant_client_api import get_qdrant_client
 from app.src.qwen3_emb_client import EmbeddingClient
 from app.src.minio_client import MinioClient
@@ -343,7 +344,7 @@ def process_with_mineru(file_path: str) -> Dict[str, Any]:
             file_path=file_path,
             backend="pipeline",
             method="auto",
-            lang="ru",
+            lang="auto",
             formula_enable=True,
             table_enable=True
         )
@@ -931,9 +932,11 @@ def ask_document(request: QuestionRequest):
     3. Generate embedding for the question
     4. Search for relevant chunks in Qdrant filtered by file_hash
     5. Return the results
+    6. Optionally generate answer using LLM
 
     Args:
-        request: QuestionRequest with file_hash, question, limit, and optional collection_name
+        request: QuestionRequest with file_hash, question, limit, collection_name, and use_llm
+
     """
     from qdrant_client.http import models
 
@@ -941,6 +944,7 @@ def ask_document(request: QuestionRequest):
     question = request.question
     limit = request.limit
     collection_name = request.collection_name
+    use_llm = request.use_llm
 
     # Use specified collection or default
     client = get_qdrant_client(collection_name=collection_name) if collection_name else qdrant_client
@@ -999,7 +1003,49 @@ def ask_document(request: QuestionRequest):
                 "page_idx": result.payload.get("original_element", {}).get("page_idx", 0) if result.payload.get("original_element") else 0
             }
             answers.append(answer)
+            # Generate LLM answer if requested
+            llm_answer = None
+            if use_llm and answers:
+                try:
+                    # Combine retrieved texts into context
+                    context_texts = [ans["text"] for ans in answers if ans["text"]]
+                    context = "\n\n".join(context_texts)
 
+                    # Create prompt for LLM
+                    system_prompt = "Вы помощник, который отвечает на вопросы на основе предоставленного контекста. Если ответ не найден в контексте, скажите об этом."
+                    user_prompt = f"""Контекст из документа:
+        {context}
+
+        Вопрос: {question}
+
+        Ответьте на вопрос, используя только информацию из контекста выше."""
+
+                    # Create messages for LLM
+                    messages = [
+                        ModelMessageDict(role="system"),
+                        ModelMessageDict(role="user")
+                    ]
+                    messages[0].add_text_content(system_prompt)
+                    messages[1].add_text_content(user_prompt)
+
+                    # Call LLM
+                    success, llm_responses = send_messasge(
+                        messages=messages,
+                        base_url=settings.llm.LLM_BASE_URL,
+                        api_key=settings.llm.LLM_API_KEY,
+                        model_name=settings.llm.LLM_MODEL_NAME,
+                        max_tokens=settings.llm.LLM_MAX_TOKENS,
+                        temperature=settings.llm.LLM_TEMPERATURE
+                    )
+
+                    if success and llm_responses:
+                        llm_answer = llm_responses[0]
+                        logger.info(f"LLM answer generated successfully for question: {question}")
+                    else:
+                        logger.warning(f"LLM failed to generate answer for question: {question}")
+                except Exception as e:
+                    logger.error(f"Error generating LLM answer: {e}")
+                    llm_answer = f"Error generating LLM answer: {str(e)}"
         return QuestionResponse(
             status="success",
             message=f"Found {len(answers)} relevant chunks for the question in collection '{actual_collection_name}'",
@@ -1007,7 +1053,8 @@ def ask_document(request: QuestionRequest):
             question=question,
             answers=answers,
             indexed=is_indexed,
-            collection_name=actual_collection_name
+            collection_name=actual_collection_name,
+            llm_answer=llm_answer
         )
 
     except Exception as e:

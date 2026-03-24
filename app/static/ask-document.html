@@ -491,6 +491,13 @@
                     <input type="number" id="askLimit" name="limit" value="10" min="1" max="50">
                 </div>
 
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <input type="checkbox" id="useLlm" name="useLlm" style="width: auto;">
+                        <span>Использовать LLM для генерации ответа</span>
+                    </label>
+                </div>
+
                 <button type="submit" class="btn" id="submitBtn">
                     🔍 Найти ответ
                 </button>
@@ -506,8 +513,13 @@
 
         <div id="statusMessage" class="card hidden"></div>
 
+        <div id="llmAnswer" class="card hidden">
+            <h2 style="margin-bottom: 20px; color: #2c3e50;">🤖 Ответ от LLM</h2>
+            <div id="llmAnswerContent" style="background: #f8f9fa; padding: 20px; border-radius: 6px; border-left: 4px solid #9b59b6; line-height: 1.8;"></div>
+        </div>
+
         <div id="results" class="card hidden">
-            <h2 style="margin-bottom: 20px; color: #2c3e50;">Результаты</h2>
+            <h2 style="margin-bottom: 20px; color: #2c3e50;">Результаты поиска</h2>
             <div id="resultsContent"></div>
         </div>
     </div>
@@ -631,10 +643,20 @@
         function displayResults(data) {
             const resultsDiv = document.getElementById('results');
             const resultsContent = document.getElementById('resultsContent');
+            const llmAnswerDiv = document.getElementById('llmAnswer');
+            const llmAnswerContent = document.getElementById('llmAnswerContent');
 
             // Show status message
             const statusClass = data.status === 'success' ? 'success' : 'error';
             showStatus(data.message, statusClass);
+
+            // Display LLM answer if available
+            if (data.llm_answer) {
+                llmAnswerContent.innerHTML = `<div style="white-space: pre-wrap;">${escapeHtml(data.llm_answer)}</div>`;
+                llmAnswerDiv.classList.remove('hidden');
+            } else {
+                llmAnswerDiv.classList.add('hidden');
+            }
 
             if (data.answers && data.answers.length > 0) {
                 let html = '';
@@ -899,6 +921,7 @@
             const fileHash = document.getElementById('fileHash').value.trim();
             const question = document.getElementById('question').value.trim();
             const limit = parseInt(document.getElementById('askLimit').value) || 10;
+            const useLlm = document.getElementById('useLlm').checked;
             const collectionSelect = document.getElementById('collectionSelect');
             const collectionName = collectionSelect.value;
 
@@ -910,6 +933,7 @@
             // Show loading
             document.getElementById('loading').classList.remove('hidden');
             document.getElementById('results').classList.add('hidden');
+            document.getElementById('llmAnswer').classList.add('hidden');
             document.getElementById('statusMessage').classList.add('hidden');
             document.getElementById('submitBtn').disabled = true;
 
@@ -917,7 +941,8 @@
                 const requestBody = {
                     file_hash: fileHash,
                     question: question,
-                    limit: limit
+                    limit: limit,
+                    use_llm: useLlm
                 };
 
                 if (collectionName) {

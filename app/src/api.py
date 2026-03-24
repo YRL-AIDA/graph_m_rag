@@ -344,7 +344,7 @@ def process_with_mineru(file_path: str) -> Dict[str, Any]:
             file_path=file_path,
             backend="pipeline",
             method="auto",
-            lang="auto",
+            lang="en",
             formula_enable=True,
             table_enable=True
         )

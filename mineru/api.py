@@ -151,7 +151,7 @@ def process_document(
 
 def run_api(
         host: str = "0.0.0.0",
-        port: int = 8000,
+        port: int = 8001,
         reload: bool = False,
         log_level: str = "info") -> None:
     import asyncio

@@ -27,7 +27,7 @@ from app.src.qwen3_emb_client import EmbeddingClient
 from app.src.minio_client import MinioClient
 from app.src.mineru_client import MinerUClient
 from app.config.settings import settings
-from app.src.utils.data_model import QuestionResponse, QuestionRequest
+from app.src.utils.data_model import QuestionResponse, QuestionRequest, UploadedFileInfo, UploadedFilesListResponse
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)

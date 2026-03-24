@@ -25,6 +25,7 @@ from app.src.qwen3_emb_client import EmbeddingClient
 from app.src.minio_client import MinioClient
 from app.src.mineru_client import MinerUClient
 from app.config.settings import settings
+from app.src.utils.data_model import QuestionResponse, QuestionRequest
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -361,7 +362,8 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "POST /upload-pdf": "Upload and process PDF file",
-            "GET /health": "Health check"
+            "GET /health": "Health check",
+            "POST /ask-document": "Ask a question about a document"
         }
     }
 
@@ -566,6 +568,190 @@ def upload_pdf(file: UploadFile = File(...)):
                 logger.info(f"Removed temporary file: {temp_file_path}")
             except Exception as e:
                 logger.warning(f"Could not remove temporary file {temp_file_path}: {e}")
+
+
+def check_document_indexed(file_hash: str) -> bool:
+    """
+    Check if a document is already indexed in Qdrant by file_hash
+
+    Args:
+        file_hash: Hash of the PDF file
+
+    Returns:
+        True if document is indexed, False otherwise
+    """
+    try:
+        from qdrant_client.http import models
+
+        # Search for any point with this file_hash
+        filter_condition = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="file_hash",
+                    match=models.MatchValue(value=file_hash)
+                )
+            ]
+        )
+
+        results = qdrant_client.search(
+            query_vector=[0.0] * 2048,  # Dummy vector, we just need to check existence
+            limit=1,
+            filter_condition=filter_condition
+        )
+
+        return len(results.points) > 0
+    except Exception as e:
+        logger.error(f"Error checking if document is indexed: {e}")
+        return False
+
+
+def index_document_by_hash(file_hash: str) -> bool:
+    """
+    Index a document by its hash if it exists in MinIO
+
+    Args:
+        file_hash: Hash of the PDF file
+
+    Returns:
+        True if successfully indexed, False otherwise
+    """
+    try:
+        # Check if mineru result exists in MinIO
+        mineru_result_key = f"mineru_results/{file_hash}"
+
+        # Try to find the actual mineru result path
+        existing_objects = minio_client.list_objects(
+            bucket_name=minio_client.bucket_name,
+            prefix=f"mineru_results/"
+        )
+
+        # Find the matching mineru result for this file_hash
+        matching_mineru_path = None
+        for obj_path in existing_objects:
+            if obj_path.startswith(f"mineru_results/{file_hash}_"):
+                matching_mineru_path = obj_path
+                break
+
+        if not matching_mineru_path:
+            logger.error(f"No MinerU result found for file_hash: {file_hash}")
+            return False
+
+        # Download mineru result
+        mineru_result_json = minio_client.get_object(
+            bucket_name=minio_client.bucket_name,
+            object_name=matching_mineru_path
+        )
+        mineru_result = json.loads(mineru_result_json.decode('utf-8'))
+
+        # Extract elements from MinerU result
+        elements = []
+        if "results" in mineru_result and "result" in mineru_result["results"]:
+            results_data = mineru_result["results"]["result"]["results"]
+            if "content_list" in results_data:
+                elements.extend(results_data["content_list"])
+
+        if not elements:
+            logger.error(f"No elements found in MinerU result for file_hash: {file_hash}")
+            return False
+
+        # Compute embeddings for elements
+        embeddings_count = compute_embeddings_for_elements(elements, file_hash)
+        logger.info(f"Indexed {embeddings_count} elements for file_hash: {file_hash}")
+
+        return embeddings_count > 0
+
+    except Exception as e:
+        logger.error(f"Error indexing document: {e}")
+        return False
+
+
+@app.post("/ask-document", response_model=QuestionResponse)
+def ask_document(request: QuestionRequest):
+    """
+    Ask a question about a specific document by file_hash.
+    If the document is not indexed, it will be indexed first.
+
+    Steps:
+    1. Check if document is indexed in Qdrant by file_hash
+    2. If not indexed, index the document from MinIO
+    3. Generate embedding for the question
+    4. Search for relevant chunks in Qdrant filtered by file_hash
+    5. Return the results
+    """
+    from qdrant_client.http import models
+
+    file_hash = request.file_hash
+    question = request.question
+    limit = request.limit
+
+    # Check if document is already indexed
+    is_indexed = check_document_indexed(file_hash)
+
+    if not is_indexed:
+        logger.info(f"Document {file_hash} is not indexed, attempting to index it...")
+        index_success = index_document_by_hash(file_hash)
+
+        if not index_success:
+            return QuestionResponse(
+                status="error",
+                message=f"Failed to index document with hash {file_hash}. Document may not exist in MinIO.",
+                file_hash=file_hash,
+                question=question,
+                answers=[],
+                indexed=False
+            )
+
+        is_indexed = True
+        logger.info(f"Document {file_hash} successfully indexed")
+
+    try:
+        # Generate embedding for the question
+        question_embedding = emb_client.get_text_embedding(question)
+
+        # Create filter for file_hash
+        filter_condition = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="file_hash",
+                    match=models.MatchValue(value=file_hash)
+                )
+            ]
+        )
+
+        # Search for relevant chunks
+        search_results = qdrant_client.search(
+            query_vector=question_embedding.embedding,
+            limit=limit,
+            filter_condition=filter_condition
+        )
+
+        # Format results
+        answers = []
+        for result in search_results.points:
+            answer = {
+                "text": result.payload.get("text", ""),
+                "score": result.score,
+                "element_type": result.payload.get("element_type", ""),
+                "element_index": result.payload.get("element_index", 0),
+                "page_idx": result.payload.get("original_element", {}).get("page_idx", 0) if result.payload.get("original_element") else 0
+            }
+            answers.append(answer)
+
+        return QuestionResponse(
+            status="success",
+            message=f"Found {len(answers)} relevant chunks for the question",
+            file_hash=file_hash,
+            question=question,
+            answers=answers,
+            indexed=is_indexed
+        )
+
+    except Exception as e:
+        logger.error(f"Error answering question: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing question: {str(e)}"
+        )
 
 def run_api(
         host: str = "0.0.0.0",

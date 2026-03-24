@@ -20,6 +20,8 @@ from pydantic import BaseModel
 import os
 from pathlib import Path
 
+from starlette.responses import HTMLResponse, FileResponse
+
 from app.src.qdrant_client_api import get_qdrant_client
 from app.src.qwen3_emb_client import EmbeddingClient
 from app.src.minio_client import MinioClient
@@ -363,7 +365,8 @@ async def root():
         "endpoints": {
             "POST /upload-pdf": "Upload and process PDF file",
             "GET /health": "Health check",
-            "POST /ask-document": "Ask a question about a document"
+            "POST /ask-document": "Ask a question about a document",
+            "GET /ask-document": "Web interface for asking questions about documents"
         }
     }
 
@@ -663,6 +666,21 @@ def index_document_by_hash(file_hash: str) -> bool:
     except Exception as e:
         logger.error(f"Error indexing document: {e}")
         return False
+
+
+@app.get("/ask-document", response_class=HTMLResponse)
+async def ask_document_page():
+    """Serve the Ask Document web interface"""
+    static_path = Path(__file__).parent.parent / "static"
+    html_file = static_path / "ask-document.html"
+
+    if html_file.exists():
+        return FileResponse(html_file)
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail="Web interface not found"
+        )
 
 
 @app.post("/ask-document", response_model=QuestionResponse)

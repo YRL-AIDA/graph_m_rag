@@ -1,7 +1,3 @@
---- app/static/ask-document.html (原始)
-
-
-+++ app/static/ask-document.html (修改后)
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -56,6 +52,7 @@
 
         input[type="text"],
         input[type="number"],
+        input[type="file"],
         textarea {
             width: 100%;
             padding: 12px;
@@ -67,6 +64,7 @@
 
         input[type="text"]:focus,
         input[type="number"]:focus,
+        input[type="file"]:focus,
         textarea:focus {
             outline: none;
             border-color: #3498db;
@@ -96,6 +94,14 @@
         .btn:disabled {
             background-color: #bdc3c7;
             cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background-color: #27ae60;
+        }
+
+        .btn-secondary:hover {
+            background-color: #219a52;
         }
 
         .results {
@@ -185,16 +191,89 @@
             border-radius: 3px;
             font-family: monospace;
         }
+
+        .file-info {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 15px;
+        }
+
+        .file-info p {
+            margin: 5px 0;
+            font-size: 14px;
+        }
+
+        .file-info strong {
+            color: #2c3e50;
+        }
+
+        .divider {
+            border-top: 2px solid #eee;
+            margin: 25px 0;
+            position: relative;
+        }
+
+        .divider-text {
+            position: absolute;
+            top: -12px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: white;
+            padding: 0 15px;
+            color: #7f8c8d;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>📄 Ask Document</h1>
 
+        <!-- Upload Section -->
         <div class="card">
+            <h2 style="margin-bottom: 20px; color: #2c3e50;">1️⃣ Загрузка документа</h2>
+            <div class="info-box">
+                <strong>Как использовать:</strong> Загрузите PDF документ. Система обработает его и вернёт хэш, который можно использовать для вопросов.
+            </div>
+
+            <form id="uploadForm" enctype="multipart/form-data">
+                <div class="form-group">
+                    <label for="pdfFile">Выберите PDF файл</label>
+                    <input type="file" id="pdfFile" name="file" accept=".pdf" required>
+                </div>
+
+                <button type="submit" class="btn btn-secondary" id="uploadBtn">
+                    📤 Загрузить и обработать
+                </button>
+            </form>
+
+            <div id="uploadLoading" class="loading hidden">
+                <div class="spinner"></div>
+                <p>Загрузка и обработка документа...</p>
+                <p style="font-size: 12px; color: #7f8c8d; margin-top: 10px;">Это может занять несколько минут</p>
+            </div>
+
+            <div id="uploadStatus" class="status-message hidden"></div>
+
+            <div id="fileInfo" class="file-info hidden">
+                <p><strong>Имя файла:</strong> <span id="fileName"></span></p>
+                <p><strong>Хэш (file_hash):</strong> <code id="fileHashDisplay"></code></p>
+                <p><strong>Статус:</strong> <span id="fileStatus"></span></p>
+            </div>
+        </div>
+
+        <div class="divider">
+            <span class="divider-text">или</span>
+        </div>
+
+        <!-- Ask Question Section -->
+        <div class="card">
+            <h2 style="margin-bottom: 20px; color: #2c3e50;">2️⃣ Задать вопрос</h2>
             <div class="info-box">
                 <strong>Как использовать:</strong> Введите хэш файла документа (file_hash) и ваш вопрос.
-                Система найдет релевантные фрагменты документа. Хэш можно получить после загрузки PDF через <code>/upload-pdf</code>.
+                Система найдет релевантные фрагменты документа. Хэш можно получить после загрузки PDF выше.
             </div>
 
             <form id="askForm">
@@ -238,7 +317,74 @@
 
     <script>
         const API_BASE_URL = window.location.origin;
+        let uploadedFileHash = '';
 
+        // Handle file upload
+        document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const fileInput = document.getElementById('pdfFile');
+            const file = fileInput.files[0];
+
+            if (!file) {
+                showUploadStatus('Пожалуйста, выберите файл', 'error');
+                return;
+            }
+
+            if (!file.name.toLowerCase().endsWith('.pdf')) {
+                showUploadStatus('Пожалуйста, выберите PDF файл', 'error');
+                return;
+            }
+
+            // Show loading
+            document.getElementById('uploadLoading').classList.remove('hidden');
+            document.getElementById('uploadBtn').disabled = true;
+            document.getElementById('uploadStatus').classList.add('hidden');
+            document.getElementById('fileInfo').classList.add('hidden');
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/upload-pdf`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    uploadedFileHash = data.file_hash;
+
+                    // Display file info
+                    document.getElementById('fileName').textContent = file.name;
+                    document.getElementById('fileHashDisplay').textContent = data.file_hash;
+                    document.getElementById('fileStatus').textContent =
+                        data.status === 'already_processed' ? 'Уже обработан ранее' : 'Успешно обработан';
+                    document.getElementById('fileInfo').classList.remove('hidden');
+
+                    // Auto-fill the file hash in the question form
+                    document.getElementById('fileHash').value = data.file_hash;
+
+                    let message = data.message;
+                    if (data.status === 'already_processed') {
+                        message = `Файл уже был обработан ранее. Хэш: ${data.file_hash}`;
+                    } else {
+                        message = `Файл успешно загружен и обработан! Хэш: ${data.file_hash}`;
+                    }
+                    showUploadStatus(message, 'success');
+                } else {
+                    showUploadStatus(`Ошибка: ${data.detail || data.message || 'Неизвестная ошибка'}`, 'error');
+                }
+            } catch (error) {
+                showUploadStatus(`Ошибка соединения: ${error.message}`, 'error');
+            } finally {
+                document.getElementById('uploadLoading').classList.add('hidden');
+                document.getElementById('uploadBtn').disabled = false;
+            }
+        });
+
+        // Handle question submission
         document.getElementById('askForm').addEventListener('submit', async function(e) {
             e.preventDefault();
 
@@ -320,18 +466,12 @@
             }
         }
 
-        function showStatus(message, type) {
-            const statusDiv = document.getElementById('statusMessage');
-            statusDiv.className = `card status-message ${type}`;
+        function showUploadStatus(message, type) {
+            const statusDiv = document.getElementById('uploadStatus');
+            statusDiv.className = `status-message ${type}`;
             statusDiv.textContent = message;
             statusDiv.classList.remove('hidden');
         }
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-    </script>
-</body>
-</html>
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('statusMessage');

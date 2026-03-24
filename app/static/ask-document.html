@@ -292,17 +292,130 @@
             color: #7f8c8d;
             font-size: 14px;
         }
+
+        .collection-select-container {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .collection-select {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            background-color: white;
+            cursor: pointer;
+        }
+
+        .collection-select:focus {
+            outline: none;
+            border-color: #3498db;
+        }
+
+        .btn-small {
+            padding: 10px 15px;
+            font-size: 14px;
+            width: auto;
+        }
+
+        .btn-create {
+            background-color: #9b59b6;
+        }
+
+        .btn-create:hover {
+            background-color: #8e44ad;
+        }
+
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .modal {
+            background: white;
+            border-radius: 8px;
+            padding: 25px;
+            max-width: 500px;
+            width: 90%;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+        }
+
+        .modal h3 {
+            margin-bottom: 20px;
+            color: #2c3e50;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .modal-actions .btn {
+            width: auto;
+            flex: 1;
+        }
+
+        .btn-cancel {
+            background-color: #95a5a6;
+        }
+
+        .btn-cancel:hover {
+            background-color: #7f8c8d;
+        }
+
+        .collection-info {
+            font-size: 12px;
+            color: #7f8c8d;
+            margin-top: 5px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>📄 Ask Document</h1>
 
+        <!-- Collection Selection Section -->
+        <div class="card">
+            <h2 style="margin-bottom: 20px; color: #2c3e50;">📚 Выбор коллекции Qdrant</h2>
+            <div class="info-box">
+                <strong>Как использовать:</strong> Выберите коллекцию для загрузки и поиска документов.
+                Коллекции позволяют изолировать разные наборы документов друг от друга.
+            </div>
+
+            <div class="form-group">
+                <label for="collectionSelect">Коллекция</label>
+                <div class="collection-select-container">
+                    <select id="collectionSelect" class="collection-select">
+                        <option value="">Загрузка списка коллекций...</option>
+                    </select>
+                    <button type="button" class="btn btn-small btn-create" onclick="showCreateCollectionModal()">
+                        ➕ Создать
+                    </button>
+                    <button type="button" class="btn btn-small btn-refresh" onclick="loadCollections()">
+                        🔄 Обновить
+                    </button>
+                </div>
+                <div id="collectionInfo" class="collection-info"></div>
+            </div>
+        </div>
+
         <!-- Upload Section -->
         <div class="card">
             <h2 style="margin-bottom: 20px; color: #2c3e50;">1️⃣ Загрузка документа</h2>
             <div class="info-box">
-                <strong>Как использовать:</strong> Загрузите PDF документ. Система обработает его и вернёт хэш, который можно использовать для вопросов.
+                <strong>Как использовать:</strong> Загрузите PDF документ в выбранную коллекцию.
+                Система обработает его и вернёт хэш, который можно использовать для вопросов.
             </div>
 
             <form id="uploadForm" enctype="multipart/form-data">
@@ -356,7 +469,8 @@
             <h2 style="margin-bottom: 20px; color: #2c3e50;">2️⃣ Задать вопрос</h2>
             <div class="info-box">
                 <strong>Как использовать:</strong> Введите хэш файла документа (file_hash) и ваш вопрос.
-                Система найдет релевантные фрагменты документа. Хэш можно получить после загрузки PDF выше.
+                Система найдет релевантные фрагменты документа в выбранной коллекции.
+                Хэш можно получить после загрузки PDF выше.
             </div>
 
             <form id="askForm">
@@ -373,8 +487,8 @@
                 </div>
 
                 <div class="form-group">
-                    <label for="limit">Количество результатов (limit)</label>
-                    <input type="number" id="limit" name="limit" value="10" min="1" max="50">
+                    <label for="askLimit">Количество результатов (limit)</label>
+                    <input type="number" id="askLimit" name="limit" value="10" min="1" max="50">
                 </div>
 
                 <button type="submit" class="btn" id="submitBtn">
@@ -558,3 +672,280 @@
 
         function showStatus(message, type) {
             const statusDiv = document.getElementById('statusMessage');
+            statusDiv.className = `card status-message ${type}`;
+            statusDiv.textContent = message;
+            statusDiv.classList.remove('hidden');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Collection management functions
+        let selectedCollection = '';
+
+        // Load collections on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadCollections();
+        });
+
+        async function loadCollections() {
+            const select = document.getElementById('collectionSelect');
+            const infoDiv = document.getElementById('collectionInfo');
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/collections`);
+                const data = await response.json();
+
+                if (data.status === 'success' && data.collections) {
+                    select.innerHTML = '<option value="">-- Выберите коллекцию --</option>';
+
+                    data.collections.forEach(col => {
+                        const pointsCount = col.points_count || col.vectors_count || 0;
+                        const option = document.createElement('option');
+                        option.value = col.name;
+                        option.textContent = `${col.name} (${pointsCount} документов)`;
+                        select.appendChild(option);
+                    });
+
+                    if (data.collections.length === 0) {
+                        infoDiv.textContent = 'Нет доступных коллекций. Создайте новую.';
+                    } else {
+                        infoDiv.textContent = `Найдено коллекций: ${data.collections.length}`;
+                    }
+                } else {
+                    select.innerHTML = '<option value="">Ошибка загрузки</option>';
+                    infoDiv.textContent = 'Не удалось загрузить список коллекций';
+                }
+            } catch (error) {
+                select.innerHTML = '<option value="">Ошибка соединения</option>';
+                infoDiv.textContent = `Ошибка: ${error.message}`;
+            }
+        }
+
+        function showCreateCollectionModal() {
+            const modal = document.createElement('div');
+            modal.className = 'modal-overlay';
+            modal.id = 'createCollectionModal';
+            modal.innerHTML = `
+                <div class="modal">
+                    <h3>Создать новую коллекцию</h3>
+                    <form id="createCollectionForm">
+                        <div class="form-group">
+                            <label for="newCollectionName">Название коллекции</label>
+                            <input type="text" id="newCollectionName" required
+                                   placeholder="Например: my-documents">
+                        </div>
+                        <div class="form-group">
+                            <label for="vectorSize">Размер вектора</label>
+                            <input type="number" id="vectorSize" value="2048" min="1" required>
+                            <div class="collection-info">Обычно 2048 для большинства моделей эмбеддингов</div>
+                        </div>
+                        <div class="form-group">
+                            <label for="distanceMetric">Метрика расстояния</label>
+                            <select id="distanceMetric" class="collection-select">
+                                <option value="COSINE">Косинусное сходство (COSINE)</option>
+                                <option value="DOT">Скалярное произведение (DOT)</option>
+                                <option value="EUCLID">Евклидово расстояние (EUCLID)</option>
+                            </select>
+                        </div>
+                        <div class="modal-actions">
+                            <button type="button" class="btn btn-cancel" onclick="closeCreateCollectionModal()">Отмена</button>
+                            <button type="submit" class="btn btn-create">Создать</button>
+                        </div>
+                    </form>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            document.getElementById('createCollectionForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+
+                const name = document.getElementById('newCollectionName').value.trim();
+                const vectorSize = parseInt(document.getElementById('vectorSize').value);
+                const distance = document.getElementById('distanceMetric').value;
+
+                if (!name) {
+                    alert('Введите название коллекции');
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${API_BASE_URL}/collections`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            collection_name: name,
+                            vector_size: vectorSize,
+                            distance: distance
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok || data.status === 'already_exists') {
+                        alert(data.message);
+                        closeCreateCollectionModal();
+                        loadCollections();
+                    } else {
+                        alert(`Ошибка: ${data.detail || data.message}`);
+                    }
+                } catch (error) {
+                    alert(`Ошибка соединения: ${error.message}`);
+                }
+            });
+        }
+
+        function closeCreateCollectionModal() {
+            const modal = document.getElementById('createCollectionModal');
+            if (modal) {
+                modal.remove();
+            }
+        }
+
+        // Handle collection selection change
+        document.getElementById('collectionSelect').addEventListener('change', function() {
+            selectedCollection = this.value;
+            const infoDiv = document.getElementById('collectionInfo');
+
+            if (selectedCollection) {
+                infoDiv.textContent = `Выбрана коллекция: ${selectedCollection}`;
+            } else {
+                infoDiv.textContent = '';
+            }
+        });
+
+        // Modify upload form to include collection
+        document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const fileInput = document.getElementById('pdfFile');
+            const file = fileInput.files[0];
+            const collectionSelect = document.getElementById('collectionSelect');
+            const collectionName = collectionSelect.value;
+
+            if (!file) {
+                showUploadStatus('Пожалуйста, выберите файл', 'error');
+                return;
+            }
+
+            if (!file.name.toLowerCase().endsWith('.pdf')) {
+                showUploadStatus('Пожалуйста, выберите PDF файл', 'error');
+                return;
+            }
+
+            // Show loading
+            document.getElementById('uploadLoading').classList.remove('hidden');
+            document.getElementById('uploadBtn').disabled = true;
+            document.getElementById('uploadStatus').classList.add('hidden');
+            document.getElementById('fileInfo').classList.add('hidden');
+
+            const formData = new FormData();
+            formData.append('file', file);
+            if (collectionName) {
+                formData.append('collection_name', collectionName);
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/upload-pdf`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    uploadedFileHash = data.file_hash;
+
+                    // Display file info
+                    document.getElementById('fileName').textContent = file.name;
+                    document.getElementById('fileHashDisplay').textContent = data.file_hash;
+                    document.getElementById('fileStatus').textContent =
+                        data.status === 'already_processed' ? 'Уже обработан ранее' : 'Успешно обработан';
+                    document.getElementById('fileInfo').classList.remove('hidden');
+
+                    // Auto-fill the file hash in the question form
+                    document.getElementById('fileHash').value = data.file_hash;
+
+                    let message = data.message;
+                    if (data.status === 'already_processed') {
+                        message = `Файл уже был обработан ранее. Хэш: ${data.file_hash}`;
+                    } else {
+                        message = `Файл успешно загружен и обработан! Хэш: ${data.file_hash}`;
+                    }
+                    if (collectionName) {
+                        message += ` (коллекция: ${collectionName})`;
+                    }
+                    showUploadStatus(message, 'success');
+                } else {
+                    showUploadStatus(`Ошибка: ${data.detail || data.message || 'Неизвестная ошибка'}`, 'error');
+                }
+            } catch (error) {
+                showUploadStatus(`Ошибка соединения: ${error.message}`, 'error');
+            } finally {
+                document.getElementById('uploadLoading').classList.add('hidden');
+                document.getElementById('uploadBtn').disabled = false;
+            }
+        });
+
+        // Handle question submission with collection
+        document.getElementById('askForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const fileHash = document.getElementById('fileHash').value.trim();
+            const question = document.getElementById('question').value.trim();
+            const limit = parseInt(document.getElementById('askLimit').value) || 10;
+            const collectionSelect = document.getElementById('collectionSelect');
+            const collectionName = collectionSelect.value;
+
+            if (!fileHash || !question) {
+                showStatus('Пожалуйста, заполните все обязательные поля', 'error');
+                return;
+            }
+
+            // Show loading
+            document.getElementById('loading').classList.remove('hidden');
+            document.getElementById('results').classList.add('hidden');
+            document.getElementById('statusMessage').classList.add('hidden');
+            document.getElementById('submitBtn').disabled = true;
+
+            try {
+                const requestBody = {
+                    file_hash: fileHash,
+                    question: question,
+                    limit: limit
+                };
+
+                if (collectionName) {
+                    requestBody.collection_name = collectionName;
+                }
+
+                const response = await fetch(`${API_BASE_URL}/ask-document`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    displayResults(data);
+                } else {
+                    showStatus(`Ошибка: ${data.detail || data.message || 'Неизвестная ошибка'}`, 'error');
+                }
+            } catch (error) {
+                showStatus(`Ошибка соединения: ${error.message}`, 'error');
+            } finally {
+                document.getElementById('loading').classList.add('hidden');
+                document.getElementById('submitBtn').disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

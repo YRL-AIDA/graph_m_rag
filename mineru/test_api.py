@@ -7,7 +7,7 @@ with open(path_doc, "rb") as f:
     response = requests.post(
         f"http://localhost:8001/process",
         files={"file": f},
-        params={"backend": "pipeline", "lang": "ru"}
+        params={"backend": "vllm", "lang": "en"}
     )
 
 

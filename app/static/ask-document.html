@@ -209,6 +209,73 @@
             color: #2c3e50;
         }
 
+        .file-list {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .file-list-item {
+            background: white;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            padding: 12px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .file-list-item:hover {
+            border-color: #3498db;
+            box-shadow: 0 2px 8px rgba(52, 152, 219, 0.2);
+        }
+
+        .file-list-item.selected {
+            border-color: #27ae60;
+            background: #e8f8f0;
+        }
+
+        .file-list-name {
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 5px;
+        }
+
+        .file-list-hash {
+            font-family: monospace;
+            font-size: 12px;
+            color: #7f8c8d;
+            background: #f1f1f1;
+            padding: 2px 6px;
+            border-radius: 3px;
+            word-break: break-all;
+        }
+
+        .file-list-date {
+            font-size: 11px;
+            color: #95a5a6;
+            margin-top: 5px;
+        }
+
+        .file-list-empty {
+            text-align: center;
+            color: #95a5a6;
+            padding: 20px;
+        }
+
+        .btn-refresh {
+            background-color: #9b59b6;
+            margin-top: 10px;
+        }
+
+        .btn-refresh:hover {
+            background-color: #8e44ad;
+        }
+
         .divider {
             border-top: 2px solid #eee;
             margin: 25px 0;
@@ -261,6 +328,22 @@
                 <p><strong>Имя файла:</strong> <span id="fileName"></span></p>
                 <p><strong>Хэш (file_hash):</strong> <code id="fileHashDisplay"></code></p>
                 <p><strong>Статус:</strong> <span id="fileStatus"></span></p>
+            </div>
+        </div>
+
+        <!-- Uploaded Files List -->
+        <div class="card">
+            <h2 style="margin-bottom: 20px; color: #2c3e50;">📋 Список загруженных файлов</h2>
+            <div class="info-box">
+                <strong>Как использовать:</strong> Выберите файл из списка, чтобы автоматически заполнить поле хэша для вопроса.
+            </div>
+
+            <button type="button" class="btn btn-refresh" id="refreshFilesBtn" onclick="loadUploadedFiles()">
+                🔄 Обновить список
+            </button>
+
+            <div id="uploadedFilesList" class="file-list">
+                <div class="file-list-empty">Нажмите "Обновить список" для загрузки</div>
             </div>
         </div>
 

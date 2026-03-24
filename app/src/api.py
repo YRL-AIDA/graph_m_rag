@@ -366,7 +366,8 @@ async def root():
             "POST /upload-pdf": "Upload and process PDF file",
             "GET /health": "Health check",
             "POST /ask-document": "Ask a question about a document",
-            "GET /ask-document": "Web interface for asking questions about documents"
+            "GET /ask-document": "Web interface for asking questions about documents",
+            "GET /uploaded-files": "Get list of uploaded files with hashes"
         }
     }
 
@@ -414,6 +415,72 @@ async def health_check():
         services=services_status
     )
 
+@app.get("/uploaded-files", response_model=UploadedFilesListResponse)
+def get_uploaded_files():
+    """
+    Get list of all uploaded PDF files with their hashes
+
+    Returns:
+        List of uploaded files with file names and hashes
+    """
+    try:
+        # List all PDF objects in MinIO
+        existing_pdfs = minio_client.list_objects(
+            bucket_name=minio_client.bucket_name,
+            prefix="pdfs/"
+        )
+
+        files = []
+        seen_hashes = set()
+
+        for pdf_path in existing_pdfs:
+            # Extract file_hash from path: pdfs/{file_hash}_{filename}/{filename}
+            # or pdfs/{file_hash}_{filename}
+            parts = pdf_path.split('/')
+            if len(parts) >= 2:
+                dir_name = parts[1]  # e.g., "a1b2c3d4_filename.pdf"
+                file_name = parts[-1] if len(parts) > 2 else dir_name.split('_', 1)[-1] if '_' in dir_name else dir_name
+
+                # Extract hash from directory name (format: hash_filename)
+                if '_' in dir_name:
+                    file_hash = dir_name.split('_', 1)[0]
+                else:
+                    # Fallback: try to extract from filename
+                    file_hash = "unknown"
+
+                # Skip duplicates (same hash)
+                if file_hash in seen_hashes:
+                    continue
+                seen_hashes.add(file_hash)
+
+                # Try to get upload date from object metadata
+                try:
+                    stat = minio_client.client.stat_object(
+                        bucket_name=minio_client.bucket_name,
+                        object_name=pdf_path
+                    )
+                    upload_date = stat.last_modified.isoformat() if stat.last_modified else "unknown"
+                except Exception:
+                    upload_date = "unknown"
+
+                files.append(UploadedFileInfo(
+                    file_name=file_name,
+                    file_hash=file_hash,
+                    s3_path=pdf_path,
+                    upload_date=upload_date
+                ))
+
+        return UploadedFilesListResponse(
+            status="success",
+            files=files
+        )
+
+    except Exception as e:
+        logger.error(f"Error listing uploaded files: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving file list: {str(e)}"
+        )
 
 @app.post("/upload-pdf", response_model=PDFUploadResponse)
 def upload_pdf(file: UploadFile = File(...)):

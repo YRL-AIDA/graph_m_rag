@@ -2,6 +2,7 @@
 
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union, Tuple
 import tempfile
@@ -10,7 +11,6 @@ import base64
 from dataclasses import dataclass
 from functools import lru_cache
 
-import torch
 from mineru.cli.common import convert_pdf_bytes_to_bytes_by_pypdfium2, prepare_env, read_fn
 from mineru.data.data_reader_writer import FileBasedDataWriter
 from mineru.backend.pipeline.pipeline_analyze import doc_analyze as pipeline_doc_analyze
@@ -28,9 +28,9 @@ import io
 
 @dataclass
 class ProcessingConfig:
-    backend: str = "vlm"
+    backend: str = "pipeline"
     method: str = "auto"
-    lang: str = "en"
+    lang: str = "ru"
     formula_enable: bool = True
     table_enable: bool = True
     start_page_id: int = 0
@@ -93,8 +93,7 @@ class MinerUManager:
                     model=model,
                     processor=processor
                 )
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                print("VLM клиент создан успешно на " + device)
+                print("VLM клиент создан успешно")
             except Exception as e:
                 print(f"Ошибка создания VLM клиента: {e}")
                 raise
@@ -144,9 +143,11 @@ class MinerUManager:
             p_lang_list = [config.lang]
 
             if config.backend == "pipeline":
-                pdf_bytes_list[0] = convert_pdf_bytes_to_bytes_by_pypdfium2(
-                    pdf_bytes, config.start_page_id, config.end_page_id
-                )
+                pypdfium2_lock = threading.Lock()
+                with pypdfium2_lock:
+                    pdf_bytes_list[0] = convert_pdf_bytes_to_bytes_by_pypdfium2(
+                        pdf_bytes, config.start_page_id, config.end_page_id
+                    )
 
                 infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled_list = pipeline_doc_analyze(
                     pdf_bytes_list,
@@ -188,9 +189,13 @@ class MinerUManager:
                 format_type = "pipeline"
 
             else:
-                pdf_bytes_list[0] = convert_pdf_bytes_to_bytes_by_pypdfium2(
-                    pdf_bytes, config.start_page_id, config.end_page_id
-                )
+                pypdfium2_lock = threading.Lock()
+
+                with pypdfium2_lock:
+
+                    pdf_bytes_list[0] = convert_pdf_bytes_to_bytes_by_pypdfium2(
+                        pdf_bytes, config.start_page_id, config.end_page_id
+                    )
 
                 pdf_file_name = pdf_file_names[0]
                 local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, "vlm")

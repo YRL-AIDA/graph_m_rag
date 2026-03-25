@@ -103,6 +103,7 @@ class Settings(BaseSettings):
     qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
     app: AppSettings = Field(default_factory=AppSettings)
 
     # Direct access aliases for backward compatibility

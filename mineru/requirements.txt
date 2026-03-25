@@ -1,9 +1,11 @@
-mineru
-mineru-vl-utils[transformers]
-mineru-vl-utils[vllm]
+mineru==2.7.5
+mineru_vl_utils==0.1.22
+mineru-vl-utils[transformers]==0.1.22
+mineru-vl-utils[vllm]==0.1.22
 modelscope
 doclayout-yolo
 ultralytics
 fastapi
 uvicorn[standard]
 pydantic
+pypdf==6.9.2

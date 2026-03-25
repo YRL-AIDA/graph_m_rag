@@ -31,7 +31,7 @@ class QuestionRequest(BaseModel):
     question: str
     limit: int = 10
     collection_name: Optional[str] = None  # Optional collection name
-
+    use_llm: bool = False  # Option to generate answer using LLM
 
 class QuestionResponse(BaseModel):
     """Response model for question answering"""

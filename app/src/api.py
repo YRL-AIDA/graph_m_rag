@@ -162,6 +162,8 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
             text_level = element.get("text_level")
 
             # Format text with level information if available
+            if text == "":
+                continue
             if text_level is not None:
                 text_content = f"Text (level {text_level}): {text}"
             else:
@@ -178,7 +180,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 )
 
                 # Get image as bytes
-                image_base64 = base64.b64encode(image_data)
+                image_base64 = base64.b64encode(image_data).decode('utf-8')
 
                 # Compute embedding for the image
                 embedding = emb_client.get_image_embedding_base64(image_base64)
@@ -232,7 +234,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 caption_text = " ".join(image_captions) if image_captions else ""
                 footnote_text = " ".join(image_footnotes) if image_footnotes else ""
 
-                text_content = f"Image: {img_path}"
+                text_content = f"{img_path}"
                 if caption_text:
                     text_content += f" | Caption: {caption_text}"
                 if footnote_text:
@@ -248,7 +250,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
             caption_text = " ".join(table_captions) if table_captions else ""
             footnote_text = " ".join(table_footnotes) if table_footnotes else ""
 
-            text_content = f"Table: {img_path}"
+            text_content = "Table: "
             if caption_text:
                 text_content += f" | Caption: {caption_text}"
             if footnote_text:
@@ -702,6 +704,7 @@ def upload_pdf(file: UploadFile = File(...)):
 
         with open(temp_file_path, 'wb') as temp_file:
             temp_file.write(content)
+            temp_file.close()
 
         # Process with MinerU
         logger.info(f"Processing PDF {file_hash} with MinerU service")
@@ -1004,48 +1007,42 @@ def ask_document(request: QuestionRequest):
             }
             answers.append(answer)
             # Generate LLM answer if requested
-            llm_answer = None
-            if use_llm and answers:
-                try:
-                    # Combine retrieved texts into context
-                    context_texts = [ans["text"] for ans in answers if ans["text"]]
-                    context = "\n\n".join(context_texts)
+        llm_answer = None
+        if use_llm and answers:
+            try:
+                # Combine retrieved texts into context
+                context_texts = [ans["text"] for ans in answers if ans["text"]]
+                context = "\n\n".join(context_texts)
 
-                    # Create prompt for LLM
-                    system_prompt = "Вы помощник, который отвечает на вопросы на основе предоставленного контекста. Если ответ не найден в контексте, скажите об этом."
-                    user_prompt = f"""Контекст из документа:
-        {context}
+                # Create prompt for LLM
+                system_prompt = "Вы помощник, который отвечает на вопросы на основе предоставленного контекста. Если ответ не найден в контексте, скажите об этом."
+                user_prompt = f"""Контекст из документа:
+    {context}
 
-        Вопрос: {question}
+    Вопрос: {question}
 
-        Ответьте на вопрос, используя только информацию из контекста выше."""
+    Ответьте на вопрос, используя только информацию из контекста выше."""
 
-                    # Create messages for LLM
-                    messages = [
-                        ModelMessageDict(role="system"),
-                        ModelMessageDict(role="user")
-                    ]
-                    messages[0].add_text_content(system_prompt)
-                    messages[1].add_text_content(user_prompt)
+                 # Create messages for LLM
+                message = ModelMessageDict()
 
-                    # Call LLM
-                    success, llm_responses = send_messasge(
-                        messages=messages,
-                        base_url=settings.llm.LLM_BASE_URL,
-                        api_key=settings.llm.LLM_API_KEY,
-                        model_name=settings.llm.LLM_MODEL_NAME,
-                        max_tokens=settings.llm.LLM_MAX_TOKENS,
-                        temperature=settings.llm.LLM_TEMPERATURE
-                    )
+                message.add_text_content(system_prompt)
+                message.add_text_content(user_prompt)
 
-                    if success and llm_responses:
-                        llm_answer = llm_responses[0]
-                        logger.info(f"LLM answer generated successfully for question: {question}")
-                    else:
-                        logger.warning(f"LLM failed to generate answer for question: {question}")
-                except Exception as e:
-                    logger.error(f"Error generating LLM answer: {e}")
-                    llm_answer = f"Error generating LLM answer: {str(e)}"
+                # Call LLM
+                success, llm_responses = send_messasge(
+                    messages=message
+                )
+
+                if success and llm_responses:
+                    llm_answer = llm_responses[0]
+                    logger.info(f"LLM answer generated successfully for question: {question}")
+                else:
+                    logger.warning(f"LLM failed to generate answer for question: {question}")
+            except Exception as e:
+                logger.error(f"Error generating LLM answer: {e}")
+                llm_answer = f"Error generating LLM answer: {str(e)}"
+
         return QuestionResponse(
             status="success",
             message=f"Found {len(answers)} relevant chunks for the question in collection '{actual_collection_name}'",

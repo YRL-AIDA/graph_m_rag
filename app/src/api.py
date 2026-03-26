@@ -999,36 +999,59 @@ def ask_document(request: QuestionRequest):
         # Format results
         answers = []
         for result in search_results.points:
+            payload = result.payload
+            element_type = payload.get("element_type", "")
+
             answer = {
-                "text": result.payload.get("text", ""),
+                "text": payload.get("text", ""),
                 "score": result.score,
-                "element_type": result.payload.get("element_type", ""),
-                "element_index": result.payload.get("element_index", 0),
-                "page_idx": result.payload.get("original_element", {}).get("page_idx", 0) if result.payload.get("original_element") else 0
+                "element_type": element_type,
+                "element_index": payload.get("element_index", 0),
+                "page_idx": payload.get("original_element", {}).get("page_idx", 0) if payload.get("original_element") else 0,
+                "img_path": payload.get("original_element", {}).get("img_path", None),  # Store img_path for images
+                "image_base64": None  # Will be populated for image elements
             }
+
+            # Download image data for image elements
+            if element_type == "image" and answer["img_path"]:
+                try:
+                    image_data = minio_client.get_object(
+                        bucket_name=minio_client.bucket_name,
+                        object_name=answer["img_path"]
+                    )
+                    answer["image_base64"] = base64.b64encode(image_data).decode('utf-8')
+                except Exception as e:
+                    logger.error(f"Failed to download image {answer['img_path']}: {e}")
+
             answers.append(answer)
-            # Generate LLM answer if requested
+        # Generate LLM answer if requested
         llm_answer = None
         if use_llm and answers:
             try:
-                # Combine retrieved texts into context
-                context_texts = [ans["text"] for ans in answers if ans["text"]]
-                context = "\n\n".join(context_texts)
-
-                # Create prompt for LLM
+                # Create messages for LLM with system prompt
+                message = ModelMessageDict(role='user')
                 system_prompt = "Вы помощник, который отвечает на вопросы на основе предоставленного контекста. Если ответ не найден в контексте, скажите об этом."
-                user_prompt = f"""Контекст из документа:
-    {context}
-
-    Вопрос: {question}
-
-    Ответьте на вопрос, используя только информацию из контекста выше."""
-
-                 # Create messages for LLM
-                message = ModelMessageDict()
-
                 message.add_text_content(system_prompt)
-                message.add_text_content(user_prompt)
+
+                # Build context with text and images
+                context_parts = []
+                for ans in answers:
+                    element_type = ans.get("element_type", "")
+
+                    # Add image if available
+                    if element_type == "image" and ans.get("image_base64"):
+                        message.add_img_content_base64(ans["image_base64"])
+
+                    # Add text content
+                    if ans.get("text"):
+                        context_parts.append(ans["text"])
+
+                # Combine all text context
+                if context_parts:
+                    context = "\n\n".join(context_parts)
+                    message.add_text_content(context)
+                    user_prompt = f"Вопрос: {question} Ответьте на вопрос, используя только информацию из контекста."""
+                    message.add_text_content(user_prompt)
 
                 # Call LLM
                 success, llm_responses = send_messasge(

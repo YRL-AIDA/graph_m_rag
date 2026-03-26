@@ -8,8 +8,8 @@ def test_upload_pdf_directory():
     Тестирование загрузки всех PDF файлов из директории через API
     """
     # Директория с PDF файлами для тестирования
-    pdf_directory = "/home/sunveil/Documents/projects/laba/graph-m-rag/data/MMLongBench-Doc/data/documents"
-
+    #pdf_directory = "/home/sunveil/Documents/projects/laba/graph-m-rag/data/MMLongBench-Doc/data/documents"
+    pdf_directory = "/home/sunveil/Documents/projects/laba/graph-m-rag/data/test"
     # Проверяем существование директории
     if not os.path.exists(pdf_directory):
         print(f"Директория {pdf_directory} не найдена")

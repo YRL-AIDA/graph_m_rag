@@ -195,8 +195,11 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     "file_hash": file_hash,
                     "created_at": datetime.now().isoformat(),
                     "original_element": element,
-                    "img_path": img_path
+                    "img_path": img_path,
+                    "bbox": element.get("bbox", []),
+                    "page_idx": element.get("page_idx", 0)
                 }
+
                 metadata_list.append(metadata)
 
                 # Save embedding to S3 with a specific naming convention
@@ -223,22 +226,10 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 processed_count += 1
                 logger.info(f"Computed embedding for image element {i} (type: {element_type}, path: {img_path})")
 
-                # Skip the rest of the processing since we've already handled the image
-                continue
+
             except Exception as e:
                 logger.error(f"Failed to download or process image {img_path} for element {i}: {e}")
-                # If image processing fails, fall back to text-based approach
-                image_captions = element.get("image_caption", [])
-                image_footnotes = element.get("image_footnote", [])
 
-                caption_text = " ".join(image_captions) if image_captions else ""
-                footnote_text = " ".join(image_footnotes) if image_footnotes else ""
-
-                text_content = f"{img_path}"
-                if caption_text:
-                    text_content += f" | Caption: {caption_text}"
-                if footnote_text:
-                    text_content += f" | Footnote: {footnote_text}"
 
         elif element_type == "table":
             # Combine table information
@@ -248,6 +239,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
             table_body = element.get("table_body", "")
 
             caption_text = " ".join(table_captions) if table_captions else ""
+            footnote_text = " ".join(table_footnotes) if table_footnotes else ""
             footnote_text = " ".join(table_footnotes) if table_footnotes else ""
 
             text_content = "Table: "
@@ -263,7 +255,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
             text_content = json.dumps(element, ensure_ascii=False)
 
         # Only process elements with non-empty text content
-        if text_content.strip():
+        if text_content.strip() and element_type != "image":
             try:
                 # Generate embedding using the embedding client
                 embedding = emb_client.get_text_embedding(text_content)
@@ -661,7 +653,6 @@ def upload_pdf(file: UploadFile = File(...)):
     try:
         # Read file content
         content = file.file.read()
-
         # Calculate file hash based on content only (not filename)
         file_hash = hashlib.md5(content).hexdigest()
 
@@ -705,6 +696,9 @@ def upload_pdf(file: UploadFile = File(...)):
         with open(temp_file_path, 'wb') as temp_file:
             temp_file.write(content)
             temp_file.close()
+
+        file.file.close()
+        file.close()
 
         # Process with MinerU
         logger.info(f"Processing PDF {file_hash} with MinerU service")

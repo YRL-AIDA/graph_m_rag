@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+import logging
 import os
 import sys
 import threading
@@ -25,6 +25,9 @@ from mineru_vl_utils import MinerUClient
 from PIL import Image
 import io
 
+from pypdf import PdfReader, PdfWriter
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ProcessingConfig:
@@ -99,6 +102,87 @@ class MinerUManager:
                 raise
         return self._vlm_client
 
+    def __convert_pdf_bytes_to_bytes_by_pymupdf(self, pdf_bytes, start_page_id=0, end_page_id=None):
+        try:
+            # Open the source PDF from bytes
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                total_pages = len(doc)
+
+                # Determine the page range
+                if end_page_id is None:
+                    end_page_id = total_pages - 1
+                else:
+                    end_page_id = min(end_page_id, total_pages - 1)
+
+                # Create a new empty PDF
+                new_doc = fitz.open()
+
+                # Copy pages one by one, skipping those that cause errors
+                for page_index in range(start_page_id, end_page_id + 1):
+                    try:
+                        # Insert the current page as a separate range
+                        new_doc.insert_pdf(doc, from_page=page_index, to_page=page_index)
+                    except Exception as page_error:
+                        logger.warning(f"Failed to import page {page_index}: {page_error}, skipping this page.")
+                        continue
+
+                # If no pages were copied, return the original bytes
+                if len(new_doc) == 0:
+                    logger.warning("No pages were successfully imported, returning original PDF bytes.")
+                    return pdf_bytes
+
+                # Save the new PDF to a bytes buffer
+                output_buffer = io.BytesIO()
+                new_doc.save(output_buffer)
+                output_bytes = output_buffer.getvalue()
+                return output_bytes
+
+        except Exception as e:
+            logger.warning(f"Error in converting PDF bytes: {e}, Using original PDF bytes.")
+            return pdf_bytes
+
+    def __convert_pdf_bytes_to_bytes_by_pypdf2(self,pdf_bytes, start_page_id=0, end_page_id=None):
+        try:
+            # Читаем исходный PDF
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            total_pages = len(reader.pages)
+
+            # Определяем конечную страницу
+            if end_page_id is None:
+                end_page_id = total_pages - 1
+            else:
+                end_page_id = min(end_page_id, total_pages - 1)
+
+            # Создаем writer для нового PDF
+            writer = PdfWriter()
+
+            # Перебираем страницы в указанном диапазоне
+            for page_index in range(start_page_id, end_page_id + 1):
+                try:
+                    # Пробуем добавить страницу
+                    page = reader.pages[page_index]
+                    writer.add_page(page)
+                except Exception as page_error:
+                    logger.warning(f"Failed to import page {page_index}: {page_error}, skipping this page.")
+                    continue
+
+            # Сохраняем в буфер
+            output_buffer = io.BytesIO()
+            writer.write(output_buffer)
+            output_bytes = output_buffer.getvalue()
+
+            # Если не было добавлено ни одной страницы, может быть пустой PDF? В исходной функции такого не проверяется.
+            # Но можем вернуть исходные байты, если ничего не добавилось.
+            if len(writer.pages) == 0:
+                logger.warning("No pages were successfully imported, returning original PDF bytes.")
+                return pdf_bytes
+
+            return output_bytes
+        except Exception as e:
+            logger.warning(f"Error in converting PDF bytes: {e}, Using original PDF bytes.")
+            return pdf_bytes
+
+
     def process_image(self, image_bytes: bytes) -> Dict[str, Any]:
         try:
             client = self.get_vlm_client()
@@ -143,11 +227,9 @@ class MinerUManager:
             p_lang_list = [config.lang]
 
             if config.backend == "pipeline":
-                pypdfium2_lock = threading.Lock()
-                with pypdfium2_lock:
-                    pdf_bytes_list[0] = convert_pdf_bytes_to_bytes_by_pypdfium2(
-                        pdf_bytes, config.start_page_id, config.end_page_id
-                    )
+                pdf_bytes_list[0] = self.__convert_pdf_bytes_to_bytes_by_pymupdf(
+                    pdf_bytes, config.start_page_id, config.end_page_id
+                )
 
                 infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled_list = pipeline_doc_analyze(
                     pdf_bytes_list,
@@ -189,13 +271,9 @@ class MinerUManager:
                 format_type = "pipeline"
 
             else:
-                pypdfium2_lock = threading.Lock()
-
-                with pypdfium2_lock:
-
-                    pdf_bytes_list[0] = convert_pdf_bytes_to_bytes_by_pypdfium2(
-                        pdf_bytes, config.start_page_id, config.end_page_id
-                    )
+                pdf_bytes_list[0] = self.__convert_pdf_bytes_to_bytes_by_pymupdf(
+                    pdf_bytes, config.start_page_id, config.end_page_id
+                )
 
                 pdf_file_name = pdf_file_names[0]
                 local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, "vlm")

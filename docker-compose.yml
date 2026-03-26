@@ -22,7 +22,7 @@ services:
       dockerfile: Dockerfile
     container_name: rag-mineru
     ports:
-      - "8002:8000"
+      - "8001:8000"
     environment:
       - MODELSCOPE_CACHE=/app/models
       - PYTHONUNBUFFERED=1

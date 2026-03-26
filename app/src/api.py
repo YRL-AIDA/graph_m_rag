@@ -1008,12 +1008,12 @@ def ask_document(request: QuestionRequest):
                 "element_type": element_type,
                 "element_index": payload.get("element_index", 0),
                 "page_idx": payload.get("original_element", {}).get("page_idx", 0) if payload.get("original_element") else 0,
-                "img_path": payload.get("original_element", {}).get("img_path", None),  # Store img_path for images
-                "image_base64": None  # Will be populated for image elements
+                "img_path": payload.get("original_element", {}).get("img_path", None),  # Store img_path for images and tables
+                "image_base64": None  # Will be populated for image and table elements
             }
 
-            # Download image data for image elements
-            if element_type == "image" and answer["img_path"]:
+            # Download image data for image and table elements
+            if element_type in ("image", "table") and answer["img_path"]:
                 try:
                     image_data = minio_client.get_object(
                         bucket_name=minio_client.bucket_name,
@@ -1038,8 +1038,8 @@ def ask_document(request: QuestionRequest):
                 for ans in answers:
                     element_type = ans.get("element_type", "")
 
-                    # Add image if available
-                    if element_type == "image" and ans.get("image_base64"):
+                    # Add image if available (for both image and table elements)
+                    if element_type in ("image", "table") and ans.get("image_base64"):
                         message.add_img_content_base64(ans["image_base64"])
 
                     # Add text content

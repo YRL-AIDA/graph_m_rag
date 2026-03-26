@@ -661,11 +661,19 @@
                 let html = '';
 
                 data.answers.forEach((answer, index) => {
+                    // Render image or table if image_base64 is available
+                    let mediaContent = '';
+                    if (answer.image_base64 && (answer.element_type === 'image' || answer.element_type === 'table')) {
+                        const altText = answer.element_type === 'table' ? 'Таблица' : 'Изображение';
+                        mediaContent = `<div style="margin: 10px 0;"><img src="data:image/png;base64,${answer.image_base64}" alt="${altText}" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px;"></div>`;
+                    }
+
                     html += `
                         <div class="result-item">
                             <div class="result-score">
                                 <strong>#${index + 1}</strong> | Score: ${answer.score?.toFixed(4) || 'N/A'}
                             </div>
+                            ${mediaContent}
                             <div class="result-text">${escapeHtml(answer.text)}</div>
                             <div class="result-meta">
                                 Тип: ${answer.element_type || 'N/A'} |

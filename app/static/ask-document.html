@@ -455,7 +455,7 @@
             </button>
 
             <div id="uploadedFilesList" class="file-list">
-                <div class="file-list-empty">Нажмите "Обновить список" для загрузки</div>
+                <div class="file-list-empty">Выберите коллекцию для отображения файлов</div>
             </div>
         </div>
 
@@ -843,10 +843,72 @@
 
             if (selectedCollection) {
                 infoDiv.textContent = `Выбрана коллекция: ${selectedCollection}`;
+                loadUploadedFiles();
             } else {
                 infoDiv.textContent = '';
+                document.getElementById('uploadedFilesList').innerHTML = '<div class="file-list-empty">Выберите коллекцию для отображения файлов</div>';
             }
         });
+
+        async function loadUploadedFiles() {
+            const filesListDiv = document.getElementById('uploadedFilesList');
+            const collectionSelect = document.getElementById('collectionSelect');
+            const collectionName = collectionSelect.value;
+
+            if (!collectionName) {
+                filesListDiv.innerHTML = '<div class="file-list-empty">Сначала выберите коллекцию</div>';
+                return;
+            }
+
+            filesListDiv.innerHTML = '<div class="loading"><div class="spinner"></div><p>Загрузка списка файлов...</p></div>';
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/collections/${encodeURIComponent(collectionName)}/files`);
+                const data = await response.json();
+
+                if (response.ok && data.status === 'success') {
+                    const files = data.files || [];
+
+                    if (files.length === 0) {
+                        filesListDiv.innerHTML = '<div class="file-list-empty">В этой коллекции нет загруженных файлов</div>';
+                        return;
+                    }
+
+                    filesListDiv.innerHTML = '';
+                    files.forEach(file => {
+                        const fileItem = document.createElement('div');
+                        fileItem.className = 'file-list-item';
+                        fileItem.onclick = () => selectFile(file.file_hash, file.filename);
+
+                        const fileName = file.filename || 'Неизвестно';
+                        const fileHash = file.file_hash || 'N/A';
+                        const uploadedAt = file.uploaded_at ? new Date(file.uploaded_at).toLocaleString('ru-RU') : 'N/A';
+
+                        fileItem.innerHTML = `
+                            <div class="file-list-name">${escapeHtml(fileName)}</div>
+                            <div class="file-list-hash">${fileHash}</div>
+                            <div class="file-list-date">Загружен: ${uploadedAt}</div>
+                        `;
+                        filesListDiv.appendChild(fileItem);
+                    });
+                } else {
+                    filesListDiv.innerHTML = `<div class="file-list-empty">Ошибка: ${data.detail || data.message || 'Не удалось загрузить список файлов'}</div>`;
+                }
+            } catch (error) {
+                filesListDiv.innerHTML = `<div class="file-list-empty">Ошибка соединения: ${error.message}</div>`;
+            }
+        }
+
+        function selectFile(fileHash, fileName) {
+            document.getElementById('fileHash').value = fileHash;
+
+            // Highlight selected file
+            const allItems = document.querySelectorAll('.file-list-item');
+            allItems.forEach(item => item.classList.remove('selected'));
+            event.currentTarget.classList.add('selected');
+
+            showUploadStatus(`Выбран файл: ${fileName}`, 'success');
+        }
 
         // Modify upload form to include collection
         document.getElementById('uploadForm').addEventListener('submit', async function(e) {

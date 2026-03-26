@@ -1085,6 +1085,124 @@ def ask_document(request: QuestionRequest):
             detail=f"Error processing question: {str(e)}"
         )
 
+@app.get("/collections/{collection_name}/files", response_model=UploadedFilesListResponse)
+def get_collection_files(collection_name: str):
+    """
+    Get list of uploaded files for a specific collection based on file_hash in Qdrant points
+
+    Args:
+        collection_name: Name of the Qdrant collection
+
+    Returns:
+        List of unique files (by file_hash) that have embeddings in this collection
+    """
+    try:
+        from qdrant_client.http import models
+
+        client = get_qdrant_client(collection_name=collection_name)
+
+        # Check if collection exists
+        if not client.client.collection_exists(collection_name):
+            return UploadedFilesListResponse(
+                status="success",
+                message=f"Collection '{collection_name}' does not exist or is empty",
+                files=[],
+                total_count=0
+            )
+
+        # Use scroll to get all points and extract unique file_hash values
+        seen_hashes = set()
+        files = []
+
+        try:
+            # Scroll through all points to get unique file hashes
+            offset = None
+            limit = 100
+
+            while True:
+                records, offset = client.client.scroll(
+                    collection_name=collection_name,
+                    limit=limit,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False
+                )
+
+                if not records:
+                    break
+
+                for record in records:
+                    payload = record.payload if hasattr(record, 'payload') else {}
+                    file_hash = payload.get('file_hash')
+
+                    if file_hash and file_hash not in seen_hashes:
+                        seen_hashes.add(file_hash)
+
+                        # Try to get file info from MinIO
+                        try:
+                            existing_pdfs = minio_client.list_objects(
+                                bucket_name=minio_client.bucket_name,
+                                prefix=f"pdfs/{file_hash}_"
+                            )
+
+                            if existing_pdfs:
+                                pdf_path = existing_pdfs[0]
+                                parts = pdf_path.split('/')
+                                dir_name = parts[1] if len(parts) >= 2 else pdf_path
+                                file_name = parts[-1] if len(parts) > 2 else dir_name.split('_', 1)[-1] if '_' in dir_name else dir_name
+
+                                # Get upload date
+                                try:
+                                    stat = minio_client.client.stat_object(
+                                        bucket_name=minio_client.bucket_name,
+                                        object_name=pdf_path
+                                    )
+                                    upload_date = stat.last_modified.isoformat() if stat.last_modified else "unknown"
+                                except Exception:
+                                    upload_date = "unknown"
+
+                                files.append(UploadedFileInfo(
+                                    file_hash=file_hash,
+                                    filename=file_name,
+                                    upload_date=upload_date
+                                ))
+                        except Exception as e:
+                            logger.warning(f"Could not get file info for hash {file_hash}: {e}")
+                            # Still add the hash even if we can't get file info
+                            files.append(UploadedFileInfo(
+                                file_hash=file_hash,
+                                filename=f"unknown_{file_hash[:8]}",
+                                upload_date="unknown"
+                            ))
+
+                if len(records) < limit:
+                    break
+
+            return UploadedFilesListResponse(
+                status="success",
+                message=f"Found {len(files)} unique files in collection '{collection_name}'",
+                files=files,
+                total_count=len(files)
+            )
+
+        except Exception as e:
+            logger.error(f"Error scrolling collection: {e}")
+            # Fallback: return empty list if scroll fails
+            return UploadedFilesListResponse(
+                status="success",
+                message=f"Collection '{collection_name}' exists but could not retrieve files: {str(e)}",
+                files=[],
+                total_count=0
+            )
+
+    except Exception as e:
+        logger.error(f"Error listing collection files: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving collection files list: {str(e)}"
+        )
+
+
 def run_api(
         host: str = "0.0.0.0",
         port: int = 9191,

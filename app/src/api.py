@@ -201,7 +201,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 }
 
                 metadata_list.append(metadata)
-
+                texts_list.append("")
                 # Save embedding to S3 with a specific naming convention
                 embedding_key = f"embeddings/{file_hash}/element_{i}.json"
                 embedding_data = {
@@ -240,7 +240,6 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
 
             caption_text = " ".join(table_captions) if table_captions else ""
             footnote_text = " ".join(table_footnotes) if table_footnotes else ""
-            footnote_text = " ".join(table_footnotes) if table_footnotes else ""
 
             text_content = "Table: "
             if caption_text:
@@ -250,12 +249,20 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
             if table_body:
                 text_content += f" | Body: {table_body}"
 
+        elif element_type == "equation":
+            # Extract LaTeX equation content
+            latex = element.get("latex", "")
+
+            if latex == "":
+                continue
+
+            text_content = f"Equation: {latex}"
         else:
             # For unknown types, try to extract any available text content
             text_content = json.dumps(element, ensure_ascii=False)
 
         # Only process elements with non-empty text content
-        if text_content.strip() and element_type != "image":
+        if text_content.strip() or element_type == "image":
             try:
                 # Generate embedding using the embedding client
                 embedding = emb_client.get_text_embedding(text_content)

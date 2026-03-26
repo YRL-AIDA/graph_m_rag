@@ -636,35 +636,52 @@ def delete_collection(collection_name: str):
 
 
 @app.post("/upload-pdf", response_model=PDFUploadResponse)
-def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(file: UploadFile = File(...)):
     """
     Upload PDF document to S3, process with MinerU, and compute embeddings
 
     Steps:
-    1. Upload PDF to S3
-    2. Process with MinerU service
-    3. Store MinerU results in S3
-    4. Compute embeddings for each element in the result
+    1. Validate and read PDF file
+    2. Check if file already exists by hash
+    3. Upload PDF to S3
+    4. Save to temporary file for processing
+    5. Process with MinerU service
+    6. Store MinerU results in S3
+    7. Compute embeddings for each element in the result
     """
     start_time = time.time()
-
-    # Validate file type
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(
-            status_code=400,
-            detail="File must be in PDF format"
-        )
-
     temp_file_path = None
 
+    # Validate file type
+    if not file.filename or not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(
+            status_code=400,
+            detail="File must be a PDF with .pdf extension"
+        )
+
+    # Validate filename to prevent path traversal attacks
+    safe_filename = Path(file.filename).name
+    if safe_filename != file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid filename"
+        )
+
     try:
-        # Read file content
-        content = file.file.read()
-        # Calculate file hash based on content only (not filename)
+        # Read file content into memory
+        # For large files, consider using SpooledTemporaryFile or streaming
+        content = await file.read()
+
+        if len(content) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="File is empty"
+            )
+
+        # Calculate file hash based on content
         file_hash = hashlib.md5(content).hexdigest()
 
-        # Check if PDF with this hash already exists (regardless of filename)
-        # Use hash-based prefix to detect duplicates by content
+        # Check if PDF with this hash already exists
         existing_pdf_prefix = f"pdfs/{file_hash}_"
         existing_pdfs = minio_client.list_objects(
             bucket_name=minio_client.bucket_name,
@@ -675,9 +692,7 @@ def upload_pdf(file: UploadFile = File(...)):
             logger.info(f"PDF with hash {file_hash} already exists in MinIO, skipping processing")
             processing_time = time.time() - start_time
 
-            # Get the first existing PDF path
-            first_pdf_path = existing_pdfs[0] if existing_pdfs else f"pdfs/{file_hash}_{file.filename}/{file.filename}"
-            # Extract file_unique_id from the existing path
+            first_pdf_path = existing_pdfs[0]
             existing_unique_id = first_pdf_path.split('/')[1] if '/' in first_pdf_path else file_hash
 
             return PDFUploadResponse(
@@ -690,35 +705,56 @@ def upload_pdf(file: UploadFile = File(...)):
                 processing_time=processing_time
             )
 
-        # Create unique directory for this file using both hash and filename
-        # to avoid conflicts when same content has different filenames
-        file_unique_id = f"{file_hash}_{file.filename}"
-        pdf_s3_key = f"pdfs/{file_unique_id}/{file.filename}"
-
-        # Create temporary file
-        temp_dir = Path("/tmp/pdf_processing")
-        temp_dir.mkdir(exist_ok=True)
-        temp_file_path = str(temp_dir / f"{file_hash}_{file.filename}")
-
-        with open(temp_file_path, 'wb') as temp_file:
-            temp_file.write(content)
-            temp_file.close()
-
-        file.file.close()
-        file.close()
-
-        # Process with MinerU
-        logger.info(f"Processing PDF {file_hash} with MinerU service")
-        mineru_result = process_with_mineru(temp_file_path)
-
-        # Store MinerU result in S3 with hash in the filename
+        # Create unique identifier for this file
+        file_unique_id = f"{file_hash}_{safe_filename}"
+        pdf_s3_key = f"pdfs/{file_unique_id}/{safe_filename}"
         mineru_result_key = f"mineru_results/{file_unique_id}/result.json"
-        # Add file_hash to the result JSON
+
+        # Upload original PDF to MinIO first
+        logger.info(f"Uploading PDF to S3: {pdf_s3_key}")
+        minio_client.upload(
+            bucket_name=minio_client.bucket_name,
+            object_name=pdf_s3_key,
+            data=content,
+            content_type="application/pdf"
+        )
+        logger.info(f"Successfully uploaded PDF to S3: {pdf_s3_key}")
+
+        # Create temporary file for MinerU processing
+        temp_dir = Path("/tmp/pdf_processing")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        temp_file = temp_dir / f"{file_hash}_{safe_filename}"
+        temp_file_path = str(temp_file)
+
+        try:
+            # Write content to temporary file
+            with open(temp_file_path, 'wb') as f:
+                f.write(content)
+
+            # Verify file was written correctly
+            if not temp_file.exists():
+                raise IOError(f"Failed to create temporary file: {temp_file_path}")
+
+            # Process with MinerU
+            logger.info(f"Processing PDF {file_hash} with MinerU service")
+            mineru_result = process_with_mineru(temp_file_path)
+
+        finally:
+            # Clean up temporary file immediately after processing
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                    logger.info(f"Removed temporary file: {temp_file_path}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Could not remove temporary file {temp_file_path}: {cleanup_error}")
+
+        # Store MinerU result in S3
+        logger.info(f"Storing MinerU result to S3: {mineru_result_key}")
         mineru_result_serializable = convert_to_serializable(mineru_result)
-        # Add metadata with file hash and original filename
         mineru_result_serializable["metadata"] = {
             "file_hash": file_hash,
-            "original_filename": file.filename,
+            "original_filename": safe_filename,
             "processed_at": datetime.now().isoformat()
         }
         result_json = json.dumps(mineru_result_serializable, ensure_ascii=False, indent=2)
@@ -729,42 +765,39 @@ def upload_pdf(file: UploadFile = File(...)):
             data=result_json.encode('utf-8'),
             content_type="application/json"
         )
+        logger.info(f"Successfully stored MinerU result to S3: {mineru_result_key}")
 
-        images = mineru_result["results"]["result"]["results"]["images_base64"]
+        # Save images from MinerU result
+        images = mineru_result.get("results", {}).get("result", {}).get("results", {}).get("images_base64", {})
 
-        for key, image_base64 in images.items():
-            image_key = f"images/{key}"
-            image_data = base64.b64decode(image_base64)
-            image_buffer = io.BytesIO(image_data)
+        if images:
+            logger.info(f"Saving {len(images)} images from MinerU result")
+            for img_key, image_base64 in images.items():
+                try:
+                    image_key = f"images/{img_key}"
+                    image_data = base64.b64decode(image_base64)
 
-            minio_client.put_object(
-                bucket_name=minio_client.bucket_name,
-                object_name=image_key,
-                data=image_buffer,
-                content_type="image/jpeg"
-            )
-
-        logger.info(f"Stored MinerU result to S3: {mineru_result_key}")
+                    minio_client.put_object(
+                        bucket_name=minio_client.bucket_name,
+                        object_name=image_key,
+                        data=image_data,
+                        content_type="image/jpeg"
+                    )
+                except Exception as img_error:
+                    logger.error(f"Failed to save image {img_key}: {img_error}")
 
         # Compute embeddings for each element in the result
         logger.info(f"Computing embeddings for MinerU result elements")
 
-        # Extract elements from MinerU result - structure may vary depending on MinerU output
-        elements = []
-        elements.extend(mineru_result["results"]["result"]["results"]["content_list"])
+        # Extract elements from MinerU result
+        elements = mineru_result.get("results", {}).get("result", {}).get("results", {}).get("content_list", [])
+
+        if not elements:
+            logger.warning(f"No content elements found in MinerU result for file {file_hash}")
+
         # Compute embeddings synchronously
         embeddings_count = compute_embeddings_for_elements(elements, file_hash)
-        logger.info(f"Completed synchronous embedding computation: {embeddings_count} elements processed")
-
-        # Upload original PDF to MinIO
-        minio_client.upload(
-            bucket_name=minio_client.bucket_name,
-            object_name=pdf_s3_key,
-            data=content,
-            content_type="application/pdf"
-        )
-
-        logger.info(f"Uploaded PDF to S3: {pdf_s3_key}")
+        logger.info(f"Completed embedding computation: {embeddings_count} elements processed for file {file_hash}")
 
         processing_time = time.time() - start_time
 
@@ -774,26 +807,26 @@ def upload_pdf(file: UploadFile = File(...)):
             file_hash=file_hash,
             s3_path=pdf_s3_key,
             mineru_result_path=mineru_result_key,
-            embeddings_computed=embeddings_count,  # Actual count computed
+            embeddings_computed=embeddings_count,
             processing_time=processing_time
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error processing PDF: {e}")
+        logger.error(f"Error processing PDF upload: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Internal server error: {str(e)}"
+            detail=f"Failed to process PDF: {str(e)}"
         )
     finally:
-        # Clean up temporary file
+        # Ensure temporary file is cleaned up even if an error occurs
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.remove(temp_file_path)
-                logger.info(f"Removed temporary file: {temp_file_path}")
-            except Exception as e:
-                logger.warning(f"Could not remove temporary file {temp_file_path}: {e}")
+                logger.info(f"Cleaned up temporary file in finally block: {temp_file_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Could not remove temporary file {temp_file_path}: {cleanup_error}")
 
 
 def check_document_indexed(file_hash: str, client=None) -> bool:
@@ -1050,7 +1083,7 @@ def ask_document(request: QuestionRequest):
                 if context_parts:
                     context = "\n\n".join(context_parts)
                     message.add_text_content(context)
-                    user_prompt = f"Вопрос: {question} Ответьте на вопрос, используя только информацию из контекста."""
+                    user_prompt = f"Вопрос: {question} Ответьте на вопрос, используя только информацию из контекста (текст и изображения)."""
                     message.add_text_content(user_prompt)
 
                 # Call LLM

@@ -735,7 +735,7 @@
                         const pointsCount = col.points_count || col.vectors_count || 0;
                         const option = document.createElement('option');
                         option.value = col.name;
-                        option.textContent = `${col.name} (${pointsCount} документов)`;
+                        option.textContent = `${col.name} (${pointsCount})`;
                         select.appendChild(option);
                     });
 

@@ -1854,8 +1854,8 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
                         "bbox": img_bbox,
                         "page_idx": element.get("page_idx", 0),
                         "color": color_map["image_caption"],
-                        "label": f"image_caption_{i}",
-                        "text_preview": f"🖼️ Caption: {caption_text[:100]}..." if len(caption_text) > 100 else f"🖼️ Caption: {caption_text}"
+                        "label": "image_caption",
+                        "text_preview": "image_caption"
                     }
                     bboxes.append(caption_bbox_info)
 
@@ -1867,8 +1867,8 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
                         "bbox": img_bbox,
                         "page_idx": element.get("page_idx", 0),
                         "color": color_map["image_footnote"],
-                        "label": f"image_footnote_{i}",
-                        "text_preview": f"📝 Footnote: {footnote_text[:100]}..." if len(footnote_text) > 100 else f"📝 Footnote: {footnote_text}"
+                        "label": "image_footnote",
+                        "text_preview": "image_footnote"
                     }
                     bboxes.append(footnote_bbox_info)
 
@@ -1902,8 +1902,8 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
                         "bbox": table_bbox,
                         "page_idx": element.get("page_idx", 0),
                         "color": color_map["table_caption"],
-                        "label": f"table_caption_{i}",
-                        "text_preview": f"📊 Caption: {caption_text[:100]}..." if len(caption_text) > 100 else f"📊 Caption: {caption_text}"
+                        "label": "table_caption",
+                        "text_preview": "table_caption"
                     }
                     bboxes.append(caption_bbox_info)
 
@@ -1915,8 +1915,8 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
                         "bbox": table_bbox,
                         "page_idx": element.get("page_idx", 0),
                         "color": color_map["table_footnote"],
-                        "label": f"table_footnote_{i}",
-                        "text_preview": f"📝 Footnote: {footnote_text[:100]}..." if len(footnote_text) > 100 else f"📝 Footnote: {footnote_text}"
+                        "label": "table_footnote",
+                        "text_preview": "table_footnote"
                     }
                     bboxes.append(footnote_bbox_info)
 

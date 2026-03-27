@@ -1188,7 +1188,7 @@
 
             bboxes.forEach((bbox, idx) => {
                 // Use text_preview directly from backend - it already contains formatted info
-                let preview = bbox.text_preview || `${bbox.element_type} #${bbox.element_index}`;
+                let preview = bbox.label || bbox.text_preview || `${bbox.element_type} #${bbox.element_index}`;
 
                 html += `
                     <div class="bbox-legend-item" onclick="highlightBbox(${idx})">

@@ -172,6 +172,9 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
         elif element_type == "image":
             # Combine image path and captions if available
             img_path = element.get("img_path", "")
+            image_captions = element.get("image_caption", [])
+            image_footnotes = element.get("image_footnote", [])
+
             # Download image from MinIO
             try:
                 image_data = minio_client.get_object(
@@ -224,6 +227,62 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
 
                 processed_count += 1
                 logger.info(f"Computed embedding for image element {i} (type: {element_type}, path: {img_path})")
+
+                # Create text embeddings from image captions if available
+                caption_text = " ".join(image_captions) if image_captions else ""
+                footnote_text = " ".join(image_footnotes) if image_footnotes else ""
+
+                if caption_text or footnote_text:
+                    caption_content = f"Image Caption: {caption_text}"
+                    if footnote_text:
+                        caption_content += f" | Footnote: {footnote_text}"
+
+                    try:
+                        caption_embedding = emb_client.get_text_embedding(caption_content)
+
+                        # Prepare data for Qdrant
+                        embeddings_list.append(caption_embedding.embedding)
+                        texts_list.append(caption_content)
+
+                        caption_metadata = {
+                            "element_index": i,
+                            "element_type": f"{element_type}_caption",
+                            "file_hash": file_hash,
+                            "created_at": datetime.now().isoformat(),
+                            "original_element": element,
+                            "img_path": img_path,
+                            "bbox": element.get("bbox", []),
+                            "page_idx": element.get("page_idx", 0)
+                        }
+                        metadata_list.append(caption_metadata)
+
+                        # Save caption embedding to S3
+                        caption_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
+                        caption_embedding_data = {
+                            "original_element": element,
+                            "img_path": img_path,
+                            "text": caption_content,
+                            "embedding": caption_embedding.embedding,
+                            "element_index": i,
+                            "element_type": f"{element_type}_caption",
+                            "file_hash": file_hash,
+                            "created_at": datetime.now().isoformat()
+                        }
+
+                        caption_json = json.dumps(caption_embedding_data, ensure_ascii=False)
+                        minio_client.put_object(
+                            bucket_name=minio_client.bucket_name,
+                            object_name=caption_embedding_key,
+                            data=caption_json.encode('utf-8'),
+                            content_type='application/json'
+                        )
+
+                        processed_count += 1
+                        logger.info(f"Computed text embedding for image caption element {i} (type: {element_type}_caption)")
+
+                    except Exception as e:
+                        logger.error(f"Failed to compute text embedding for image caption element {i}: {e}")
+
                 continue
 
             except Exception as e:
@@ -240,11 +299,64 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
             caption_text = " ".join(table_captions) if table_captions else ""
             footnote_text = " ".join(table_footnotes) if table_footnotes else ""
 
+            # First, create a separate text embedding for table captions/footnotes if available
+            if caption_text or footnote_text:
+                caption_content = f"Table Caption: {caption_text}"
+                if footnote_text:
+                    caption_content += f" | Footnote: {footnote_text}"
+
+                try:
+                    caption_embedding = emb_client.get_text_embedding(caption_content)
+
+                    # Prepare data for Qdrant
+                    embeddings_list.append(caption_embedding.embedding)
+                    texts_list.append(caption_content)
+
+                    caption_metadata = {
+                        "element_index": i,
+                        "element_type": f"{element_type}_caption",
+                        "file_hash": file_hash,
+                        "created_at": datetime.now().isoformat(),
+                        "original_element": element,
+                        "img_path": img_path,
+                        "bbox": element.get("bbox", []),
+                        "page_idx": element.get("page_idx", 0)
+                    }
+                    metadata_list.append(caption_metadata)
+
+                    # Save caption embedding to S3
+                    caption_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
+                    caption_embedding_data = {
+                        "original_element": element,
+                        "img_path": img_path,
+                        "text": caption_content,
+                        "embedding": caption_embedding.embedding,
+                        "element_index": i,
+                        "element_type": f"{element_type}_caption",
+                        "file_hash": file_hash,
+                        "created_at": datetime.now().isoformat()
+                    }
+
+                    caption_json = json.dumps(caption_embedding_data, ensure_ascii=False)
+                    minio_client.put_object(
+                        bucket_name=minio_client.bucket_name,
+                        object_name=caption_embedding_key,
+                        data=caption_json.encode('utf-8'),
+                        content_type='application/json'
+                    )
+
+                    processed_count += 1
+                    logger.info(f"Computed text embedding for table caption element {i} (type: {element_type}_caption)")
+
+                except Exception as e:
+                    logger.error(f"Failed to compute text embedding for table caption element {i}: {e}")
+
+            # Now process the full table content (body + captions + footnotes)
             text_content = "Table: "
-            if caption_text:
-                text_content += f" | Caption: {caption_text}"
-            if footnote_text:
-                text_content += f" | Footnote: {footnote_text}"
+            #if caption_text:
+            #    text_content += f" | Caption: {caption_text}"
+            #if footnote_text:
+            #    text_content += f" | Footnote: {footnote_text}"
             if table_body:
                 text_content += f" | Body: {table_body}"
 

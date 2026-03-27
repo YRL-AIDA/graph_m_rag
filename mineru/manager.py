@@ -283,23 +283,8 @@ class MinerUManager:
                 "markdown": md_content,
                 "content_list": content_list,
                 "output_dir": output_dir,
-                "files": {
-                    "middle_json": str(Path(local_md_dir) / "document_middle.json"),
-                    "markdown": str(Path(local_md_dir) / "document.md"),
-                    "content_list": str(Path(local_md_dir) / "document_content_list.json"),
-                    "images_dir": local_image_dir,
-                },
                 "images_base64": images_base64
             }
-
-            with open(results["files"]["middle_json"], "w") as f:
-                json.dump(middle_json, f, ensure_ascii=False, indent=2)
-
-            with open(results["files"]["markdown"], "w") as f:
-                f.write(md_content)
-
-            with open(results["files"]["content_list"], "w") as f:
-                json.dump(content_list, f, ensure_ascii=False, indent=2)
 
             return {
                 "success": True,

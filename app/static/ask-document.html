@@ -1182,7 +1182,18 @@
             let html = '';
 
             bboxes.forEach((bbox, idx) => {
-                const preview = bbox.text_preview || `${bbox.element_type} #${bbox.element_index}`;
+                // Build text preview with title/image_caption/table_caption support
+                let preview = bbox.text_preview || `${bbox.element_type} #${bbox.element_index}`;
+
+                // Show additional caption info if available
+                if (bbox.is_title && !preview.startsWith('Title:')) {
+                    preview = `📑 Title: ${preview}`;
+                } else if (bbox.image_caption && bbox.element_type === 'image') {
+                    preview = `🖼️ Image: ${bbox.image_caption}`;
+                } else if (bbox.table_caption && bbox.element_type === 'table') {
+                    preview = `📊 Table: ${bbox.table_caption}`;
+                }
+
                 html += `
                     <div class="bbox-legend-item" onclick="highlightBbox(${idx})">
                         <div class="bbox-legend-color" style="background: ${bbox.color}"></div>

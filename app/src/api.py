@@ -164,7 +164,10 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
             # Format text with level information if available
             if text == "":
                 continue
-            if text_level is not None:
+
+            if text_level == 1:
+                text_content = f"Title: {text}"
+            elif text_level is not None:
                 text_content = f"Text (level {text_level}): {text}"
             else:
                 text_content = f"Text: {text}"
@@ -1709,7 +1712,32 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
             # Add text preview for text elements
             if element_type == "text":
                 text = element.get("text", "")
-                bbox_info["text_preview"] = text[:100] + "..." if len(text) > 100 else text
+                text_level = element.get("text_level")
+
+                # If text_level = 1, treat as title
+                if text_level == 1:
+                    bbox_info["text_preview"] = f"Title: {text[:100]}..." if len(text) > 100 else f"Title: {text}"
+                    bbox_info["is_title"] = True
+                else:
+                    bbox_info["text_preview"] = text[:100] + "..." if len(text) > 100 else text
+                    if text_level is not None:
+                        bbox_info["text_level"] = text_level
+
+                # Add image_caption for image elements
+            elif element_type == "image":
+                image_captions = element.get("image_caption", [])
+                if image_captions:
+                    caption_text = " ".join(image_captions)
+                    bbox_info["image_caption"] = caption_text
+                    bbox_info["text_preview"] = caption_text[:100] + "..." if len(caption_text) > 100 else caption_text
+
+                # Add table_caption for table elements
+            elif element_type == "table":
+                table_captions = element.get("table_caption", [])
+                if table_captions:
+                    caption_text = " ".join(table_captions)
+                    bbox_info["table_caption"] = caption_text
+                    bbox_info["text_preview"] = caption_text[:100] + "..." if len(caption_text) > 100 else caption_text
 
             bboxes.append(bbox_info)
 

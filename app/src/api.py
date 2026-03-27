@@ -201,7 +201,6 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 }
 
                 metadata_list.append(metadata)
-                texts_list.append("")
                 # Save embedding to S3 with a specific naming convention
                 embedding_key = f"embeddings/{file_hash}/element_{i}.json"
                 embedding_data = {
@@ -225,7 +224,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
 
                 processed_count += 1
                 logger.info(f"Computed embedding for image element {i} (type: {element_type}, path: {img_path})")
-
+                continue
 
             except Exception as e:
                 logger.error(f"Failed to download or process image {img_path} for element {i}: {e}")
@@ -262,7 +261,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
             text_content = json.dumps(element, ensure_ascii=False)
 
         # Only process elements with non-empty text content
-        if text_content.strip() or element_type == "image":
+        if text_content.strip() or element_type != "image":
             try:
                 # Generate embedding using the embedding client
                 embedding = emb_client.get_text_embedding(text_content)
@@ -1229,10 +1228,113 @@ def get_collection_files(collection_name: str):
             )
 
     except Exception as e:
-        logger.error(f"Error listing collection files: {e}")
+        logger.error(f"Error getting collection files: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error retrieving collection files list: {str(e)}"
+            detail=f"Error retrieving collection files: {str(e)}"
+        )
+
+
+@app.get("/pdf/{file_hash}")
+async def get_pdf_file(file_hash: str):
+    """
+    Get PDF file by file_hash for viewing in the browser
+
+    Args:
+        file_hash: Hash of the PDF file
+
+    Returns:
+        PDF file content with appropriate content type
+    """
+    try:
+        # Find the PDF file in MinIO
+        existing_pdfs = minio_client.list_objects(
+            bucket_name=minio_client.bucket_name,
+            prefix=f"pdfs/{file_hash}"
+        )
+
+        if not existing_pdfs:
+            raise HTTPException(
+                status_code=404,
+                detail=f"PDF file with hash {file_hash} not found"
+            )
+
+        pdf_path = existing_pdfs[0]
+
+        # Download the PDF file
+        pdf_data = minio_client.get_object(
+            bucket_name=minio_client.bucket_name,
+            object_name=pdf_path
+        )
+
+        # Return the PDF file with appropriate headers
+        from fastapi.responses import Response
+        return Response(
+            content=pdf_data,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"inline; filename=\"{file_hash}.pdf\""
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving PDF file {file_hash}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving PDF file: {str(e)}"
+        )
+
+
+@app.get("/api/pdf/{file_hash}/info")
+async def get_pdf_info(file_hash: str):
+    """
+    Get PDF file info including available pages and dimensions
+
+    Args:
+        file_hash: Hash of the PDF file
+
+    Returns:
+        PDF metadata
+    """
+    try:
+        # Find the PDF file in MinIO
+        existing_pdfs = minio_client.list_objects(
+            bucket_name=minio_client.bucket_name,
+            prefix=f"pdfs/{file_hash}"
+        )
+
+        if not existing_pdfs:
+            raise HTTPException(
+                status_code=404,
+                detail=f"PDF file with hash {file_hash} not found"
+            )
+
+        pdf_path = existing_pdfs[0]
+
+        # Get file stats
+        stat = minio_client.client.stat_object(
+            bucket_name=minio_client.bucket_name,
+            object_name=pdf_path
+        )
+
+        return {
+            "status": "success",
+            "file_hash": file_hash,
+            "file_name": pdf_path.split('/')[-1],
+            "s3_path": pdf_path,
+            "size": stat.size,
+            "last_modified": stat.last_modified.isoformat() if stat.last_modified else None
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting PDF info for {file_hash}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting PDF info: {str(e)}"
         )
 
 

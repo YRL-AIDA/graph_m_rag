@@ -114,6 +114,19 @@
             padding: 15px;
             margin-bottom: 15px;
             border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .result-item:hover {
+            background: #e8f4fc;
+            box-shadow: 0 2px 8px rgba(52, 152, 219, 0.2);
+        }
+
+        .result-item.highlighted {
+            background: #fff3cd;
+            border-left-color: #f39c12;
+            box-shadow: 0 2px 12px rgba(243, 156, 18, 0.3);
         }
 
         .result-score {
@@ -378,6 +391,103 @@
             color: #7f8c8d;
             margin-top: 5px;
         }
+
+        /* PDF Viewer styles */
+        .pdf-viewer-container {
+            position: fixed;
+            top: 0;
+            right: -60%;
+            width: 60%;
+            height: 100vh;
+            background: white;
+            box-shadow: -4px 0 20px rgba(0, 0, 0, 0.3);
+            z-index: 2000;
+            transition: right 0.3s ease-in-out;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .pdf-viewer-container.open {
+            right: 0;
+        }
+
+        .pdf-viewer-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            background: #2c3e50;
+            color: white;
+        }
+
+        .pdf-viewer-header h3 {
+            margin: 0;
+            font-size: 16px;
+        }
+
+        .pdf-viewer-close {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 5px 10px;
+        }
+
+        .pdf-viewer-close:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+
+        .pdf-viewer-content {
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .pdf-viewer-content iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+
+        .pdf-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1999;
+            display: none;
+        }
+
+        .pdf-overlay.show {
+            display: block;
+        }
+
+        .page-highlight {
+            position: absolute;
+            border: 3px solid #f39c12;
+            background: rgba(243, 156, 18, 0.2);
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        .result-item .view-pdf-btn {
+            display: inline-block;
+            margin-left: 10px;
+            padding: 4px 10px;
+            background: #3498db;
+            color: white;
+            border-radius: 4px;
+            font-size: 12px;
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .result-item .view-pdf-btn:hover {
+            background: #2980b9;
+        }
     </style>
 </head>
 <body>
@@ -523,9 +633,24 @@
         </div>
     </div>
 
+    <!-- PDF Viewer Overlay -->
+    <div class="pdf-overlay" id="pdfOverlay" onclick="closePdfViewer()"></div>
+
+    <!-- PDF Viewer Panel -->
+    <div class="pdf-viewer-container" id="pdfViewerContainer">
+        <div class="pdf-viewer-header">
+            <h3 id="pdfViewerTitle">Просмотр PDF</h3>
+            <button class="pdf-viewer-close" onclick="closePdfViewer()">×</button>
+        </div>
+        <div class="pdf-viewer-content">
+            <iframe id="pdfViewerIframe" src=""></iframe>
+        </div>
+    </div>
+
     <script>
         const API_BASE_URL = window.location.origin;
         let uploadedFileHash = '';
+        let currentFileHash = '';
 
         // Handle file upload
         document.getElementById('uploadForm').addEventListener('submit', async function(e) {
@@ -668,10 +793,17 @@
                         mediaContent = `<div style="margin: 10px 0;"><img src="data:image/png;base64,${answer.image_base64}" alt="${altText}" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px;"></div>`;
                     }
 
+                    // Add PDF view button if page_idx is available
+                    let pdfButton = '';
+                    if (answer.page_idx !== undefined && answer.page_idx !== null && currentFileHash) {
+                        pdfButton = `<span class="view-pdf-btn" onclick="openPdfViewer('${currentFileHash}', ${answer.page_idx})">📄 Открыть PDF (стр. ${answer.page_idx + 1})</span>`;
+                    }
+
                     html += `
-                        <div class="result-item">
+                        <div class="result-item" onclick="openPdfViewer('${currentFileHash}', ${answer.page_idx ?? 0})">
                             <div class="result-score">
                                 <strong>#${index + 1}</strong> | Score: ${answer.score?.toFixed(4) || 'N/A'}
+                                ${pdfButton}
                             </div>
                             ${mediaContent}
                             <div class="result-text">${escapeHtml(answer.text)}</div>
@@ -710,6 +842,28 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        // PDF Viewer functions
+        function openPdfViewer(fileHash, pageIndex) {
+            if (!fileHash) {
+                showStatus('Хэш файла не указан', 'error');
+                return;
+            }
+
+            currentFileHash = fileHash;
+            const pdfUrl = `${API_BASE_URL}/pdf/${fileHash}#page=${pageIndex + 1}`;
+
+            document.getElementById('pdfViewerIframe').src = pdfUrl;
+            document.getElementById('pdfViewerTitle').textContent = `Просмотр PDF (стр. ${pageIndex + 1})`;
+            document.getElementById('pdfOverlay').classList.add('show');
+            document.getElementById('pdfViewerContainer').classList.add('open');
+        }
+
+        function closePdfViewer() {
+            document.getElementById('pdfOverlay').classList.remove('show');
+            document.getElementById('pdfViewerContainer').classList.remove('open');
+            document.getElementById('pdfViewerIframe').src = '';
         }
 
         // Collection management functions

@@ -1785,12 +1785,16 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
 
             # Assign colors based on element type
             color_map = {
-                "text": "#3498db",      # Blue
-                "title": "#9b59b6",     # Purple
-                "image": "#27ae60",     # Green
-                "table": "#e67e22",     # Orange
-                "equation": "#e74c3c",  # Red
-                "discarded": "#95a5a6"  # Gray
+                "title": "#9b59b6",        # Purple - headings (text_level == 1)
+                "text": "#3498db",         # Blue - regular text and equations
+                "image": "#27ae60",        # Green - visual image embeddings
+                "image_caption": "#2ecc71", # Light Green - image captions
+                "image_footnote": "#1abc9c", # Teal - image footnotes
+                "table": "#e67e22",        # Orange - table contents
+                "table_caption": "#f39c12", # Yellow-Orange - table captions
+                "table_footnote": "#d35400", # Dark Orange - table footnotes
+                "equation": "#e74c3c",     # Red - equations
+                "discarded": "#95a5a6"     # Gray - discarded elements (not indexed)
             }
             color = color_map.get(element_type, "#333333")
 
@@ -1803,7 +1807,7 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
                 "label": f"{element_type}_{i}"
             }
 
-            # Add text preview for text elements
+            # Add text preview for different element types
             if element_type == "text":
                 text = element.get("text", "")
                 text_level = element.get("text_level")
@@ -1817,21 +1821,77 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
                     if text_level is not None:
                         bbox_info["text_level"] = text_level
 
-                # Add image_caption for image elements
+            elif element_type == "title":
+                text = element.get("text", "")
+                bbox_info["text_preview"] = f"📑 Title: {text[:100]}..." if len(text) > 100 else f"📑 Title: {text}"
+
+            # Add image_caption for image elements
             elif element_type == "image":
                 image_captions = element.get("image_caption", [])
-                if image_captions:
-                    caption_text = " ".join(image_captions)
-                    bbox_info["image_caption"] = caption_text
-                    bbox_info["text_preview"] = caption_text[:100] + "..." if len(caption_text) > 100 else caption_text
+                image_footnotes = element.get("image_footnote", [])
 
-                # Add table_caption for table elements
+                caption_text = " ".join(image_captions) if image_captions else ""
+                footnote_text = " ".join(image_footnotes) if image_footnotes else ""
+
+                if caption_text:
+                    bbox_info["image_caption"] = caption_text
+                if footnote_text:
+                    bbox_info["image_footnote"] = footnote_text
+
+                preview_parts = []
+                if caption_text:
+                    preview_parts.append(f"🖼️ Caption: {caption_text[:50]}")
+                if footnote_text:
+                    preview_parts.append(f"📝 Footnote: {footnote_text[:50]}")
+
+                bbox_info["text_preview"] = " | ".join(preview_parts) if preview_parts else f"🖼️ Image #{i}"
+
+            # Add image_caption/image_footnote separate elements
+            elif element_type == "image_caption":
+                caption_text = element.get("text", "") or " ".join(element.get("image_caption", []))
+                bbox_info["text_preview"] = f"🖼️ Caption: {caption_text[:100]}..." if len(caption_text) > 100 else f"🖼️ Caption: {caption_text}"
+
+            elif element_type == "image_footnote":
+                footnote_text = element.get("text", "") or " ".join(element.get("image_footnote", []))
+                bbox_info["text_preview"] = f"📝 Footnote: {footnote_text[:100]}..." if len(footnote_text) > 100 else f"📝 Footnote: {footnote_text}"
+
+            # Add table_caption for table elements
             elif element_type == "table":
                 table_captions = element.get("table_caption", [])
-                if table_captions:
-                    caption_text = " ".join(table_captions)
+                table_footnotes = element.get("table_footnote", [])
+
+                caption_text = " ".join(table_captions) if table_captions else ""
+                footnote_text = " ".join(table_footnotes) if table_footnotes else ""
+
+                if caption_text:
                     bbox_info["table_caption"] = caption_text
-                    bbox_info["text_preview"] = caption_text[:100] + "..." if len(caption_text) > 100 else caption_text
+                if footnote_text:
+                    bbox_info["table_footnote"] = footnote_text
+
+                preview_parts = []
+                if caption_text:
+                    preview_parts.append(f"📊 Caption: {caption_text[:50]}")
+                if footnote_text:
+                    preview_parts.append(f"📝 Footnote: {footnote_text[:50]}")
+
+                bbox_info["text_preview"] = " | ".join(preview_parts) if preview_parts else f"📊 Table #{i}"
+
+            # Add table_caption/table_footnote separate elements
+            elif element_type == "table_caption":
+                caption_text = element.get("text", "") or " ".join(element.get("table_caption", []))
+                bbox_info["text_preview"] = f"📊 Caption: {caption_text[:100]}..." if len(caption_text) > 100 else f"📊 Caption: {caption_text}"
+
+            elif element_type == "table_footnote":
+                footnote_text = element.get("text", "") or " ".join(element.get("table_footnote", []))
+                bbox_info["text_preview"] = f"📝 Footnote: {footnote_text[:100]}..." if len(footnote_text) > 100 else f"📝 Footnote: {footnote_text}"
+
+            elif element_type == "equation":
+                text = element.get("text", "")
+                bbox_info["text_preview"] = f"∫ Equation: {text[:100]}..." if len(text) > 100 else f"∫ Equation: {text}"
+
+            elif element_type == "discarded":
+                text = element.get("text", "")
+                bbox_info["text_preview"] = f"🗑️ Discarded: {text[:100]}..." if len(text) > 100 else f"🗑️ Discarded: {text}"
 
             bboxes.append(bbox_info)
 

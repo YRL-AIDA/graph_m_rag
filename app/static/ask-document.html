@@ -758,11 +758,16 @@
             <label style="margin-left: 15px;">Фильтр:</label>
             <select id="typeFilter" onchange="loadPageWithBboxes()">
                 <option value="">Все типы</option>
-                <option value="text">Текст</option>
-                <option value="title">Заголовок</option>
-                <option value="image">Изображение</option>
-                <option value="table">Таблица</option>
-                <option value="equation">Формула</option>
+                <option value="title">📑 Заголовки (title)</option>
+                <option value="text">📝 Текст и уравнения (text)</option>
+                <option value="image">🖼️ Изображения (image)</option>
+                <option value="image_caption">📷 Подписи к изображениям</option>
+                <option value="image_footnote">📝 Примечания к изображениям</option>
+                <option value="table">📊 Таблицы (table)</option>
+                <option value="table_caption">📋 Подписи к таблицам</option>
+                <option value="table_footnote">📝 Примечания к таблицам</option>
+                <option value="equation">∫ Формулы (equation)</option>
+                <option value="discarded">🗑️ Отброшенные элементы</option>
             </select>
         </div>
         <div class="pdf-viewer-content" id="pdfViewerContentIframe" style="display: block;">
@@ -1182,17 +1187,8 @@
             let html = '';
 
             bboxes.forEach((bbox, idx) => {
-                // Build text preview with title/image_caption/table_caption support
+                // Use text_preview directly from backend - it already contains formatted info
                 let preview = bbox.text_preview || `${bbox.element_type} #${bbox.element_index}`;
-
-                // Show additional caption info if available
-                if (bbox.is_title && !preview.startsWith('Title:')) {
-                    preview = `📑 Title: ${preview}`;
-                } else if (bbox.image_caption && bbox.element_type === 'image') {
-                    preview = `🖼️ Image: ${bbox.image_caption}`;
-                } else if (bbox.table_caption && bbox.element_type === 'table') {
-                    preview = `📊 Table: ${bbox.table_caption}`;
-                }
 
                 html += `
                     <div class="bbox-legend-item" onclick="highlightBbox(${idx})">

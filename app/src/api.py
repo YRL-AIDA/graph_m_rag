@@ -1848,27 +1848,29 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
 
                 # Create separate bbox entry for image_caption if exists
                 if image_captions:
+                    caption_text = " ".join(image_captions)
                     caption_bbox_info = {
                         "element_index": i,
                         "element_type": "image_caption",
                         "bbox": img_bbox,
                         "page_idx": element.get("page_idx", 0),
                         "color": color_map["image_caption"],
-                        "label": "image_caption",
-                        "text_preview": "image_caption"
+                        "label": f"image_caption_{i}",
+                        "text_preview": f"📷 Caption: {caption_text[:100]}..." if len(caption_text) > 100 else f"📷 Caption: {caption_text}"
                     }
                     bboxes.append(caption_bbox_info)
 
                 # Create separate bbox entry for image_footnote if exists
                 if image_footnotes:
+                    footnote_text = " ".join(image_footnotes)
                     footnote_bbox_info = {
                         "element_index": i,
                         "element_type": "image_footnote",
                         "bbox": img_bbox,
                         "page_idx": element.get("page_idx", 0),
                         "color": color_map["image_footnote"],
-                        "label": "image_footnote",
-                        "text_preview": "image_footnote"
+                        "label": f"image_footnote_{i}",
+                        "text_preview": f"📝 Footnote: {footnote_text[:100]}..." if len(footnote_text) > 100 else f"📝 Footnote: {footnote_text}"
                     }
                     bboxes.append(footnote_bbox_info)
 
@@ -1896,27 +1898,29 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
 
                 # Create separate bbox entry for table_caption if exists
                 if table_captions:
+                    caption_text = " ".join(table_captions)
                     caption_bbox_info = {
                         "element_index": i,
                         "element_type": "table_caption",
                         "bbox": table_bbox,
                         "page_idx": element.get("page_idx", 0),
                         "color": color_map["table_caption"],
-                        "label": "table_caption",
-                        "text_preview": "table_caption"
+                        "label": f"table_caption_{i}",
+                        "text_preview": f"📋 Caption: {caption_text[:100]}..." if len(caption_text) > 100 else f"📋 Caption: {caption_text}"
                     }
                     bboxes.append(caption_bbox_info)
 
                 # Create separate bbox entry for table_footnote if exists
                 if table_footnotes:
+                    footnote_text = " ".join(table_footnotes)
                     footnote_bbox_info = {
                         "element_index": i,
                         "element_type": "table_footnote",
                         "bbox": table_bbox,
                         "page_idx": element.get("page_idx", 0),
                         "color": color_map["table_footnote"],
-                        "label": "table_footnote",
-                        "text_preview": "table_footnote"
+                        "label": f"table_footnote_{i}",
+                        "text_preview": f"📝 Footnote: {footnote_text[:100]}..." if len(footnote_text) > 100 else f"📝 Footnote: {footnote_text}"
                     }
                     bboxes.append(footnote_bbox_info)
 

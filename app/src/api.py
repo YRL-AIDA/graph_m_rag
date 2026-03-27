@@ -1449,6 +1449,275 @@ async def get_pdf_info(file_hash: str):
             detail=f"Error getting PDF info: {str(e)}"
         )
 
+@app.get("/api/pdf/{file_hash}/page/{page_number}")
+async def get_pdf_page_with_bbox(
+    file_hash: str,
+    page_number: int,
+    bboxes: Optional[str] = None
+):
+    """
+    Get PDF page as image with optional bbox highlights
+
+    Args:
+        file_hash: Hash of the PDF file
+        page_number: Page number (0-indexed)
+        bboxes: JSON string of bboxes to highlight: [{"bbox": [x1, y1, x2, y2], "color": "#FF0000", "label": "text"}, ...]
+
+    Returns:
+        PNG image of the PDF page with highlighted bboxes
+    """
+    import fitz  # PyMuPDF
+    from PIL import Image, ImageDraw
+    import io
+    import json
+
+    try:
+        # Find the PDF file in MinIO
+        existing_pdfs = minio_client.list_objects(
+            bucket_name=minio_client.bucket_name,
+            prefix=f"pdfs/{file_hash}"
+        )
+
+        if not existing_pdfs:
+            raise HTTPException(
+                status_code=404,
+                detail=f"PDF file with hash {file_hash} not found"
+            )
+
+        pdf_path = existing_pdfs[0]
+
+        # Download the PDF file
+        pdf_data = minio_client.get_object(
+            bucket_name=minio_client.bucket_name,
+            object_name=pdf_path
+        )
+
+        # Open PDF with PyMuPDF
+        doc = fitz.open(stream=pdf_data, filetype="pdf")
+
+        # Validate page number
+        if page_number < 0 or page_number >= len(doc):
+            doc.close()
+            raise HTTPException(
+                status_code=404,
+                detail=f"Page {page_number} not found. PDF has {len(doc)} pages (0-{len(doc)-1})"
+            )
+
+        # Render page to image (higher resolution for better quality)
+        page = doc[page_number]
+        mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for better quality
+        pix = page.get_pixmap(matrix=mat)
+
+        # Convert to PIL Image
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        # Parse bboxes if provided
+        bbox_list = []
+        if bboxes:
+            try:
+                bbox_list = json.loads(bboxes)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid bboxes JSON: {bboxes}")
+
+        # Draw bboxes on image if provided
+        if bbox_list:
+            draw = ImageDraw.Draw(img)
+
+            # Get page dimensions for coordinate scaling
+            page_rect = page.rect
+            page_width = page_rect.width
+            page_height = page_rect.height
+
+            for bbox_item in bbox_list:
+                if not isinstance(bbox_item, dict):
+                    continue
+
+                bbox = bbox_item.get("bbox", [])
+                if not bbox or len(bbox) != 4:
+                    continue
+
+                x1, y1, x2, y2 = bbox
+
+                # Scale coordinates to match the rendered image resolution
+                scale_x = pix.width / page_width
+                scale_y = pix.height / page_height
+
+                scaled_x1 = int(x1 * scale_x)
+                scaled_y1 = int(y1 * scale_y)
+                scaled_x2 = int(x2 * scale_x)
+                scaled_y2 = int(y2 * scale_y)
+
+                # Get color (default to red with semi-transparent fill)
+                color = bbox_item.get("color", "#FF0000")
+                label = bbox_item.get("label", "")
+
+                # Draw rectangle outline
+                draw.rectangle(
+                    [scaled_x1, scaled_y1, scaled_x2, scaled_y2],
+                    outline=color,
+                    width=3
+                )
+
+                # Draw semi-transparent fill
+                overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+                overlay_draw = ImageDraw.Draw(overlay)
+
+                # Parse color to RGBA with transparency
+                if color.startswith('#'):
+                    r = int(color[1:3], 16)
+                    g = int(color[3:5], 16) if len(color) >= 5 else 0
+                    b = int(color[5:7], 16) if len(color) >= 7 else 0
+                    fill_color = (r, g, b, 50)  # 50/255 transparency
+                else:
+                    fill_color = (255, 0, 0, 50)  # Default red with transparency
+
+                overlay_draw.rectangle(
+                    [scaled_x1, scaled_y1, scaled_x2, scaled_y2],
+                    fill=fill_color
+                )
+
+                # Composite overlay onto main image
+                img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+                draw = ImageDraw.Draw(img)
+
+                # Draw label if provided
+                if label:
+                    # Draw text background
+                    text_bbox = draw.textbbox((scaled_x1, scaled_y1 - 20), label)
+                    draw.rectangle(text_bbox, fill=(0, 0, 0, 180))
+                    draw.text((scaled_x1, scaled_y1 - 20), label, fill=(255, 255, 255, 255))
+
+        doc.close()
+
+        # Save to bytes
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format='PNG')
+        img_bytes.seek(0)
+
+        from fastapi.responses import Response
+        return Response(
+            content=img_bytes.read(),
+            media_type="image/png",
+            headers={
+                "Content-Disposition": f"inline; filename=\"{file_hash}_page_{page_number}.png\""
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rendering PDF page {page_number} for {file_hash}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error rendering PDF page: {str(e)}"
+        )
+
+
+@app.get("/api/pdf/{file_hash}/mineru-bboxes")
+async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
+    """
+    Get all bounding boxes from MinerU results for a PDF
+
+    Args:
+        file_hash: Hash of the PDF file
+        page_idx: Optional page index to filter bboxes
+
+    Returns:
+        List of bboxes with metadata
+    """
+    try:
+        # Find mineru result for this file_hash
+        existing_objects = minio_client.list_objects(
+            bucket_name=minio_client.bucket_name,
+            prefix=f"mineru_results/"
+        )
+
+        matching_mineru_path = None
+        for obj_path in existing_objects:
+            if obj_path.startswith(f"mineru_results/{file_hash}_"):
+                matching_mineru_path = obj_path
+                break
+
+        if not matching_mineru_path:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No MinerU result found for file_hash: {file_hash}"
+            )
+
+        # Download mineru result
+        mineru_result_json = minio_client.get_object(
+            bucket_name=minio_client.bucket_name,
+            object_name=matching_mineru_path
+        )
+        mineru_result = json.loads(mineru_result_json.decode('utf-8'))
+
+        # Extract elements from MinerU result
+        elements = []
+        if "results" in mineru_result and "result" in mineru_result["results"]:
+            results_data = mineru_result["results"]["result"]["results"]
+            if "content_list" in results_data:
+                elements.extend(results_data["content_list"])
+
+        # Filter by page if specified
+        if page_idx is not None:
+            elements = [e for e in elements if e.get("page_idx") == page_idx]
+
+        # Format bboxes
+        bboxes = []
+        for i, element in enumerate(elements):
+            if not isinstance(element, dict):
+                continue
+
+            bbox = element.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+
+            element_type = element.get("type", "unknown")
+
+            # Assign colors based on element type
+            color_map = {
+                "text": "#3498db",      # Blue
+                "title": "#9b59b6",     # Purple
+                "image": "#27ae60",     # Green
+                "table": "#e67e22",     # Orange
+                "equation": "#e74c3c",  # Red
+                "discarded": "#95a5a6"  # Gray
+            }
+            color = color_map.get(element_type, "#333333")
+
+            bbox_info = {
+                "element_index": i,
+                "element_type": element_type,
+                "bbox": bbox,
+                "page_idx": element.get("page_idx", 0),
+                "color": color,
+                "label": f"{element_type}_{i}"
+            }
+
+            # Add text preview for text elements
+            if element_type == "text":
+                text = element.get("text", "")
+                bbox_info["text_preview"] = text[:100] + "..." if len(text) > 100 else text
+
+            bboxes.append(bbox_info)
+
+        return {
+            "status": "success",
+            "file_hash": file_hash,
+            "page_idx": page_idx,
+            "total_elements": len(bboxes),
+            "bboxes": bboxes
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting MinerU bboxes for {file_hash}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting bboxes: {str(e)}"
+        )
+
 
 def run_api(
         host: str = "0.0.0.0",

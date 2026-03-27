@@ -488,6 +488,115 @@
         .result-item .view-pdf-btn:hover {
             background: #2980b9;
         }
+
+        /* Enhanced PDF Viewer with bbox visualization */
+        .pdf-viewer-content-img {
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background: #525659;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            padding: 20px;
+        }
+
+        .pdf-viewer-content-img img {
+            max-width: 100%;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .bbox-legend {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 3000;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .bbox-legend h4 {
+            margin: 0 0 10px 0;
+            color: white;
+            font-size: 14px;
+        }
+
+        .bbox-legend-item {
+            display: flex;
+            align-items: center;
+            margin: 5px 0;
+            color: white;
+            font-size: 12px;
+            cursor: pointer;
+            padding: 3px 6px;
+            border-radius: 4px;
+        }
+
+        .bbox-legend-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .bbox-legend-color {
+            width: 16px;
+            height: 16px;
+            margin-right: 8px;
+            border-radius: 3px;
+            border: 2px solid white;
+        }
+
+        .bbox-legend-text {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 200px;
+        }
+
+        .bbox-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            padding: 10px 20px;
+            background: #34495e;
+            border-bottom: 1px solid #2c3e50;
+        }
+
+        .bbox-controls label {
+            color: white;
+            font-size: 14px;
+            margin-right: 5px;
+        }
+
+        .bbox-controls select {
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: none;
+            background: white;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .bbox-controls button {
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: none;
+            background: #3498db;
+            color: white;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .bbox-controls button:hover {
+            background: #2980b9;
+        }
+
+        .bbox-controls button.active {
+            background: #27ae60;
+        }
     </style>
 </head>
 <body>
@@ -636,14 +745,35 @@
     <!-- PDF Viewer Overlay -->
     <div class="pdf-overlay" id="pdfOverlay" onclick="closePdfViewer()"></div>
 
-    <!-- PDF Viewer Panel -->
+    <!-- PDF Viewer Panel with bbox visualization -->
     <div class="pdf-viewer-container" id="pdfViewerContainer">
         <div class="pdf-viewer-header">
             <h3 id="pdfViewerTitle">Просмотр PDF</h3>
             <button class="pdf-viewer-close" onclick="closePdfViewer()">×</button>
         </div>
-        <div class="pdf-viewer-content">
+        <div class="bbox-controls" id="bboxControls" style="display: none;">
+            <label for="pageSelect">Страница:</label>
+            <select id="pageSelect" onchange="loadPageWithBboxes()"></select>
+            <button id="toggleBboxesBtn" onclick="toggleBboxes()" class="active">Показать bbox</button>
+            <label style="margin-left: 15px;">Фильтр:</label>
+            <select id="typeFilter" onchange="loadPageWithBboxes()">
+                <option value="">Все типы</option>
+                <option value="text">Текст</option>
+                <option value="title">Заголовок</option>
+                <option value="image">Изображение</option>
+                <option value="table">Таблица</option>
+                <option value="equation">Формула</option>
+            </select>
+        </div>
+        <div class="pdf-viewer-content" id="pdfViewerContentIframe" style="display: block;">
             <iframe id="pdfViewerIframe" src=""></iframe>
+        </div>
+        <div class="pdf-viewer-content-img" id="pdfViewerContentImg" style="display: none;">
+            <img id="pdfPageImage" src="" alt="PDF Page">
+        </div>
+        <div class="bbox-legend" id="bboxLegend" style="display: none;">
+            <h4>Элементы на странице</h4>
+            <div id="bboxLegendContent"></div>
         </div>
     </div>
 
@@ -844,7 +974,12 @@
             return div.innerHTML;
         }
 
-        // PDF Viewer functions
+        // PDF Viewer functions with bbox visualization
+        let currentPageIndex = 0;
+        let totalPages = 0;
+        let showBboxes = true;
+        let currentBboxes = [];
+
         function openPdfViewer(fileHash, pageIndex) {
             if (!fileHash) {
                 showStatus('Хэш файла не указан', 'error');
@@ -852,18 +987,162 @@
             }
 
             currentFileHash = fileHash;
-            const pdfUrl = `${API_BASE_URL}/pdf/${fileHash}#page=${pageIndex + 1}`;
+            currentPageIndex = pageIndex;
 
-            document.getElementById('pdfViewerIframe').src = pdfUrl;
-            document.getElementById('pdfViewerTitle').textContent = `Просмотр PDF (стр. ${pageIndex + 1})`;
+            // Show enhanced viewer with bbox controls
+            document.getElementById('bboxControls').style.display = 'flex';
+            document.getElementById('pdfViewerContentIframe').style.display = 'none';
+            document.getElementById('pdfViewerContentImg').style.display = 'flex';
+
+            // Load page count and initialize viewer
+            loadPageCount(fileHash).then(() => {
+                updatePageSelect();
+                loadPageWithBboxes();
+            });
+
+            document.getElementById('pdfViewerTitle').textContent = `Просмотр PDF`;
             document.getElementById('pdfOverlay').classList.add('show');
             document.getElementById('pdfViewerContainer').classList.add('open');
+        }
+
+        async function loadPageCount(fileHash) {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/pdf/${fileHash}/info`);
+                const data = await response.json();
+
+                // Try to get page count from PDF using pdf.js or estimate from mineru results
+                try {
+                    const bboxesResponse = await fetch(`${API_BASE_URL}/api/pdf/${fileHash}/mineru-bboxes`);
+                    const bboxesData = await bboxesResponse.json();
+
+                    if (bboxesData.status === 'success' && bboxesData.bboxes) {
+                        // Find max page index
+                        const maxPageIdx = Math.max(...bboxesData.bboxes.map(b => b.page_idx), 0);
+                        totalPages = maxPageIdx + 1;
+                    }
+                } catch (e) {
+                    console.warn('Could not load bbox data:', e);
+                    totalPages = 10; // Default fallback
+                }
+            } catch (e) {
+                console.error('Error loading page count:', e);
+                totalPages = 10; // Default fallback
+            }
+        }
+
+        function updatePageSelect() {
+            const select = document.getElementById('pageSelect');
+            select.innerHTML = '';
+            for (let i = 0; i < totalPages; i++) {
+                const option = document.createElement('option');
+                option.value = i;
+                option.textContent = `Стр. ${i + 1}`;
+                select.appendChild(option);
+            }
+            select.value = currentPageIndex;
+        }
+
+        async function loadPageWithBboxes() {
+            const pageSelect = document.getElementById('pageSelect');
+            const typeFilter = document.getElementById('typeFilter');
+
+            currentPageIndex = parseInt(pageSelect.value);
+            const filterType = typeFilter.value;
+
+            document.getElementById('pdfViewerTitle').textContent = `Просмотр PDF (стр. ${currentPageIndex + 1})`;
+
+            try {
+                // Fetch bboxes for this page
+                const bboxesUrl = `${API_BASE_URL}/api/pdf/${currentFileHash}/mineru-bboxes?page_idx=${currentPageIndex}`;
+                const response = await fetch(bboxesUrl);
+                const data = await response.json();
+
+                if (data.status === 'success') {
+                    currentBboxes = data.bboxes || [];
+
+                    // Filter bboxes by type if specified
+                    let filteredBboxes = currentBboxes;
+                    if (filterType) {
+                        filteredBboxes = currentBboxes.filter(b => b.element_type === filterType);
+                    }
+
+                    // Update legend
+                    updateBboxLegend(filteredBboxes);
+
+                    // Load page image with bboxes
+                    if (showBboxes && filteredBboxes.length > 0) {
+                        const bboxesParam = encodeURIComponent(JSON.stringify(filteredBboxes));
+                        const imgUrl = `${API_BASE_URL}/api/pdf/${currentFileHash}/page/${currentPageIndex}?bboxes=${bboxesParam}`;
+                        document.getElementById('pdfPageImage').src = imgUrl;
+                    } else {
+                        // Load plain page image without bboxes
+                        const imgUrl = `${API_BASE_URL}/api/pdf/${currentFileHash}/page/${currentPageIndex}`;
+                        document.getElementById('pdfPageImage').src = imgUrl;
+                    }
+                } else {
+                    // Fallback to plain PDF view if no bboxes available
+                    const pdfUrl = `${API_BASE_URL}/pdf/${currentFileHash}#page=${currentPageIndex + 1}`;
+                    document.getElementById('pdfViewerContentIframe').style.display = 'block';
+                    document.getElementById('pdfViewerContentImg').style.display = 'none';
+                    document.getElementById('pdfViewerIframe').src = pdfUrl;
+                    document.getElementById('bboxControls').style.display = 'none';
+                }
+            } catch (e) {
+                console.error('Error loading page with bboxes:', e);
+                // Fallback to plain PDF view
+                const pdfUrl = `${API_BASE_URL}/pdf/${currentFileHash}#page=${currentPageIndex + 1}`;
+                document.getElementById('pdfViewerContentIframe').style.display = 'block';
+                document.getElementById('pdfViewerContentImg').style.display = 'none';
+                document.getElementById('pdfViewerIframe').src = pdfUrl;
+                document.getElementById('bboxControls').style.display = 'none';
+            }
+        }
+
+        function updateBboxLegend(bboxes) {
+            const legend = document.getElementById('bboxLegend');
+            const legendContent = document.getElementById('bboxLegendContent');
+
+            if (bboxes.length === 0) {
+                legend.style.display = 'none';
+                return;
+            }
+
+            legend.style.display = 'block';
+            let html = '';
+
+            bboxes.forEach((bbox, idx) => {
+                const preview = bbox.text_preview || `${bbox.element_type} #${bbox.element_index}`;
+                html += `
+                    <div class="bbox-legend-item" onclick="highlightBbox(${idx})">
+                        <div class="bbox-legend-color" style="background: ${bbox.color}"></div>
+                        <div class="bbox-legend-text">${escapeHtml(preview)}</div>
+                    </div>
+                `;
+            });
+
+            legendContent.innerHTML = html;
+        }
+
+        function toggleBboxes() {
+            showBboxes = !showBboxes;
+            const btn = document.getElementById('toggleBboxesBtn');
+            btn.classList.toggle('active');
+            btn.textContent = showBboxes ? 'Показать bbox' : 'Скрыть bbox';
+            loadPageWithBboxes();
+        }
+
+        function highlightBbox(index) {
+            // Could implement additional highlighting logic here
+            console.log('Highlighting bbox:', index);
         }
 
         function closePdfViewer() {
             document.getElementById('pdfOverlay').classList.remove('show');
             document.getElementById('pdfViewerContainer').classList.remove('open');
             document.getElementById('pdfViewerIframe').src = '';
+            document.getElementById('pdfPageImage').src = '';
+            document.getElementById('bboxControls').style.display = 'none';
+            document.getElementById('bboxLegend').style.display = 'none';
         }
 
         // Collection management functions

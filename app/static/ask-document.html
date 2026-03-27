@@ -900,6 +900,11 @@
             const llmAnswerDiv = document.getElementById('llmAnswer');
             const llmAnswerContent = document.getElementById('llmAnswerContent');
 
+            // Set current file hash from response for PDF viewer
+            if (data.file_hash) {
+                currentFileHash = data.file_hash;
+            }
+
             // Show status message
             const statusClass = data.status === 'success' ? 'success' : 'error';
             showStatus(data.message, statusClass);
@@ -926,11 +931,19 @@
                     // Add PDF view button if page_idx is available
                     let pdfButton = '';
                     if (answer.page_idx !== undefined && answer.page_idx !== null && currentFileHash) {
-                        pdfButton = `<span class="view-pdf-btn" onclick="openPdfViewer('${currentFileHash}', ${answer.page_idx})">📄 Открыть PDF (стр. ${answer.page_idx + 1})</span>`;
+                        pdfButton = `<span class="view-pdf-btn" onclick="event.stopPropagation(); openPdfViewerWithResult('${currentFileHash}', ${answer.page_idx}, ${index})">📄 Открыть PDF (стр. ${answer.page_idx + 1})</span>`;
                     }
 
+                    // Store bbox data for highlighting
+                    const bboxData = JSON.stringify({
+                        page_idx: answer.page_idx ?? 0,
+                        element_type: answer.element_type || '',
+                        element_index: answer.element_index ?? 0,
+                        bbox: answer.bbox || null
+                    }).replace(/"/g, '&quot;');
+
                     html += `
-                        <div class="result-item" onclick="openPdfViewer('${currentFileHash}', ${answer.page_idx ?? 0})">
+                        <div class="result-item" id="result-${index}" onclick="openPdfViewerWithResult('${currentFileHash}', ${answer.page_idx ?? 0}, ${index})" data-bbox='${bboxData}'>
                             <div class="result-score">
                                 <strong>#${index + 1}</strong> | Score: ${answer.score?.toFixed(4) || 'N/A'}
                                 ${pdfButton}
@@ -979,6 +992,7 @@
         let totalPages = 0;
         let showBboxes = true;
         let currentBboxes = [];
+        let highlightedResultIndex = null;
 
         function openPdfViewer(fileHash, pageIndex) {
             if (!fileHash) {
@@ -988,6 +1002,7 @@
 
             currentFileHash = fileHash;
             currentPageIndex = pageIndex;
+            highlightedResultIndex = null;
 
             // Show enhanced viewer with bbox controls
             document.getElementById('bboxControls').style.display = 'flex';
@@ -998,6 +1013,37 @@
             loadPageCount(fileHash).then(() => {
                 updatePageSelect();
                 loadPageWithBboxes();
+            });
+
+            document.getElementById('pdfViewerTitle').textContent = `Просмотр PDF`;
+            document.getElementById('pdfOverlay').classList.add('show');
+            document.getElementById('pdfViewerContainer').classList.add('open');
+        }
+
+        function openPdfViewerWithResult(fileHash, pageIndex, resultIndex) {
+            if (!fileHash) {
+                showStatus('Хэш файла не указан', 'error');
+                return;
+            }
+
+            currentFileHash = fileHash;
+            currentPageIndex = pageIndex;
+            highlightedResultIndex = resultIndex;
+
+            // Highlight the selected result in the list
+            document.querySelectorAll('.result-item').forEach((item, idx) => {
+                item.classList.toggle('highlighted', idx === resultIndex);
+            });
+
+            // Show enhanced viewer with bbox controls
+            document.getElementById('bboxControls').style.display = 'flex';
+            document.getElementById('pdfViewerContentIframe').style.display = 'none';
+            document.getElementById('pdfViewerContentImg').style.display = 'flex';
+
+            // Load page count and initialize viewer
+            loadPageCount(fileHash).then(() => {
+                updatePageSelect();
+                loadPageWithBboxes(resultIndex);
             });
 
             document.getElementById('pdfViewerTitle').textContent = `Просмотр PDF`;
@@ -1042,7 +1088,7 @@
             select.value = currentPageIndex;
         }
 
-        async function loadPageWithBboxes() {
+        async function loadPageWithBboxes(resultIndex = null) {
             const pageSelect = document.getElementById('pageSelect');
             const typeFilter = document.getElementById('typeFilter');
 
@@ -1064,6 +1110,31 @@
                     let filteredBboxes = currentBboxes;
                     if (filterType) {
                         filteredBboxes = currentBboxes.filter(b => b.element_type === filterType);
+                    }
+
+                    // Highlight bbox for selected result if provided
+                    let highlightedBbox = null;
+                    if (resultIndex !== null && highlightedResultIndex !== null) {
+                        const resultElement = document.getElementById(`result-${highlightedResultIndex}`);
+                        if (resultElement && resultElement.dataset.bbox) {
+                            try {
+                                const bboxData = JSON.parse(resultElement.dataset.bbox.replace(/&quot;/g, '"'));
+                                if (bboxData.page_idx === currentPageIndex && bboxData.bbox) {
+                                    highlightedBbox = bboxData.bbox;
+
+                                    // Add the highlighted bbox to the filtered list with special color
+                                    filteredBboxes = filteredBboxes.map(b => ({...b}));
+                                    filteredBboxes.push({
+                                        bbox: highlightedBbox,
+                                        color: '#FF0000',
+                                        label: 'Выбранный элемент',
+                                        element_type: 'highlighted'
+                                    });
+                                }
+                            } catch (e) {
+                                console.warn('Could not parse bbox data from result:', e);
+                            }
+                        }
                     }
 
                     // Update legend

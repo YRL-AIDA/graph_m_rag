@@ -1145,15 +1145,17 @@ def ask_document(request: QuestionRequest):
         for result in search_results.points:
             payload = result.payload
             element_type = payload.get("element_type", "")
+            original_element = payload.get("original_element", {})
 
             answer = {
                 "text": payload.get("text", ""),
                 "score": result.score,
                 "element_type": element_type,
                 "element_index": payload.get("element_index", 0),
-                "page_idx": payload.get("original_element", {}).get("page_idx", 0) if payload.get("original_element") else 0,
-                "img_path": payload.get("original_element", {}).get("img_path", None),  # Store img_path for images and tables
-                "image_base64": None  # Will be populated for image and table elements
+                "page_idx": original_element.get("page_idx", 0) if original_element else 0,
+                "img_path": original_element.get("img_path", None),  # Store img_path for images and tables
+                "image_base64": None,  # Will be populated for image and table elements
+                "bbox": original_element.get("bbox", None)  # Store bbox for visualization
             }
 
             # Download image data for image and table elements

@@ -289,15 +289,15 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     footnote_content = f"Image Footnote: {footnote_text}"
 
                     try:
-                        caption_embedding = emb_client.get_text_embedding(footnote_text)
+                        footnote_embedding = emb_client.get_text_embedding(footnote_content)
 
                         # Prepare data for Qdrant
-                        embeddings_list.append(caption_embedding.embedding)
-                        texts_list.append(footnote_text)
+                        embeddings_list.append(footnote_embedding.embedding)
+                        texts_list.append(footnote_content)
 
-                        caption_metadata = {
+                        footnote_metadata = {
                             "element_index": i,
-                            "element_type": f"{element_type}_caption",
+                            "element_type": f"{element_type}_footnote",
                             "file_hash": file_hash,
                             "created_at": datetime.now().isoformat(),
                             "original_element": element,
@@ -305,31 +305,31 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                             "bbox": element.get("bbox", []),
                             "page_idx": element.get("page_idx", 0)
                         }
-                        metadata_list.append(caption_metadata)
+                        metadata_list.append(footnote_metadata)
 
                         # Save caption embedding to S3
-                        caption_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
-                        caption_embedding_data = {
+                        footnote_embedding_key = f"embeddings/{file_hash}/element_{i}_footnote.json"
+                        footnote_embedding_data = {
                             "original_element": element,
                             "img_path": img_path,
                             "text": footnote_text,
-                            "embedding": caption_embedding.embedding,
+                            "embedding": footnote_embedding.embedding,
                             "element_index": i,
                             "element_type": f"{element_type}_caption",
                             "file_hash": file_hash,
                             "created_at": datetime.now().isoformat()
                         }
 
-                        caption_json = json.dumps(caption_embedding_data, ensure_ascii=False)
+                        caption_json = json.dumps(footnote_embedding_data, ensure_ascii=False)
                         minio_client.put_object(
                             bucket_name=minio_client.bucket_name,
-                            object_name=caption_embedding_key,
+                            object_name=footnote_embedding_key,
                             data=caption_json.encode('utf-8'),
                             content_type='application/json'
                         )
 
                         processed_count += 1
-                        logger.info(f"Computed text embedding for image caption element {i} (type: {element_type}_caption)")
+                        logger.info(f"Computed text embedding for image caption element {i} (type: {element_type}_footnote)")
 
                     except Exception as e:
                         logger.error(f"Failed to compute text embedding for image caption element {i}: {e}")
@@ -400,16 +400,16 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 except Exception as e:
                     logger.error(f"Failed to compute text embedding for table caption element {i}: {e}")
             if footnote_text:
-                footnote_content = f"Table Caption: {footnote_text}"
+                footnote_content = f"Table Footnote: {footnote_text}"
 
                 try:
-                    caption_embedding = emb_client.get_text_embedding(footnote_content)
+                    footnote_embedding = emb_client.get_text_embedding(footnote_content)
 
                     # Prepare data for Qdrant
-                    embeddings_list.append(caption_embedding.embedding)
+                    embeddings_list.append(footnote_embedding.embedding)
                     texts_list.append(footnote_content)
 
-                    caption_metadata = {
+                    footnote_metadata = {
                         "element_index": i,
                         "element_type": f"{element_type}_footnote",
                         "file_hash": file_hash,
@@ -419,26 +419,26 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         "bbox": element.get("bbox", []),
                         "page_idx": element.get("page_idx", 0)
                     }
-                    metadata_list.append(caption_metadata)
+                    metadata_list.append(footnote_metadata)
 
                     # Save caption embedding to S3
-                    caption_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
-                    caption_embedding_data = {
+                    footnote_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
+                    footnote_embedding_data = {
                         "original_element": element,
                         "img_path": img_path,
                         "text": footnote_content,
-                        "embedding": caption_embedding.embedding,
+                        "embedding": footnote_embedding.embedding,
                         "element_index": i,
-                        "element_type": f"{element_type}_caption",
+                        "element_type": f"{element_type}_footnote",
                         "file_hash": file_hash,
                         "created_at": datetime.now().isoformat()
                     }
 
-                    caption_json = json.dumps(caption_embedding_data, ensure_ascii=False)
+                    footnote_json = json.dumps(footnote_embedding_data, ensure_ascii=False)
                     minio_client.put_object(
                         bucket_name=minio_client.bucket_name,
-                        object_name=caption_embedding_key,
-                        data=caption_json.encode('utf-8'),
+                        object_name=footnote_embedding_key,
+                        data=footnote_json.encode('utf-8'),
                         content_type='application/json'
                     )
 

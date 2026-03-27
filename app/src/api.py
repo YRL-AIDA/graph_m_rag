@@ -1540,14 +1540,24 @@ async def get_pdf_page_with_bbox(
 
                 x1, y1, x2, y2 = bbox
 
-                # Scale coordinates to match the rendered image resolution
-                scale_x = pix.width / page_width
-                scale_y = pix.height / page_height
+                # MinerU returns coordinates in normalized format (0-1000)
+                # Convert to PDF page coordinates
+                scale_x = page_width / 1000.0
+                scale_y = page_height / 1000.0
 
                 scaled_x1 = int(x1 * scale_x)
                 scaled_y1 = int(y1 * scale_y)
                 scaled_x2 = int(x2 * scale_x)
                 scaled_y2 = int(y2 * scale_y)
+
+                # Now scale to match the rendered image resolution (2x zoom)
+                img_scale_x = pix.width / page_width
+                img_scale_y = pix.height / page_height
+
+                scaled_x1 = int(scaled_x1 * img_scale_x)
+                scaled_y1 = int(scaled_y1 * img_scale_y)
+                scaled_x2 = int(scaled_x2 * img_scale_x)
+                scaled_y2 = int(scaled_y2 * img_scale_y)
 
                 # Get color (default to red with semi-transparent fill)
                 color = bbox_item.get("color", "#FF0000")

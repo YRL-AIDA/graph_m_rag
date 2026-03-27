@@ -2,6 +2,8 @@ import logging
 import os
 from typing import BinaryIO, List, Any, Union
 import io
+from urllib.parse import quote
+
 from minio import Minio
 from minio.error import S3Error
 from app.config.settings import settings
@@ -185,6 +187,21 @@ class MinioClient:
             self.logger.error(f"Error removing object {object_name} from {bucket_name}: {e}")
             raise
 
+    def _normalize_object_name(self, object_name: str) -> str:
+        """Normalize object name by encoding special characters including spaces
+
+        Args:
+            object_name: Original object name
+
+        Returns:
+            Normalized object name with special characters encoded
+        """
+        if not object_name:
+            return object_name
+        # URL encode the object name to handle spaces and other special characters
+        # safe='' ensures all special characters are encoded
+        return quote(object_name, safe='/')
+
     def get_presigned_url(self, bucket_name: str = None, object_name: str = None, expiration: int = 3600) -> str:
         """Generate presigned URL for object download"""
         if bucket_name is None:
@@ -192,6 +209,8 @@ class MinioClient:
 
         if object_name is None:
             raise ValueError("object_name is required")
+
+        object_name = self._normalize_object_name(object_name)
 
         try:
             url = self.client.presigned_get_object(

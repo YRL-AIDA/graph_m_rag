@@ -60,6 +60,19 @@ services:
     environment:
       - API_KEY=${QDRANT_API_KEY}
 
+  neo4j:
+    image: neo4j:5.26.0
+    container_name: rag-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/password}
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - rag-network
+
 networks:
   rag-network:
     driver: bridge
@@ -68,3 +81,4 @@ volumes:
   minio_data:
   mineru_models:
   qdrant_data:
+  neo4j_data:

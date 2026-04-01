@@ -22,7 +22,7 @@ from pathlib import Path
 
 from starlette.responses import HTMLResponse, FileResponse
 
-from app.src.llm_client import ModelMessageDict, send_messasge
+from app.src.llm_client import ModelMessageDict, LLMClient
 from app.src.qdrant_client_api import get_qdrant_client
 from app.src.qwen3_emb_client import EmbeddingClient
 from app.src.minio_client import MinioClient
@@ -39,6 +39,7 @@ minio_client = MinioClient(logger)
 mineru_client = MinerUClient(base_url=f"{settings.mineru.MINERU_HOST}:{settings.mineru.MINERU_PORT}")
 emb_client = EmbeddingClient(base_url=settings.embedding.EMBEDDING_BASE_URL)
 qdrant_client = get_qdrant_client()
+llm_client = LLMClient(base_url=settings.llm.LLM_BASE_URL)
 
 # Create FastAPI application
 app = FastAPI(
@@ -1297,7 +1298,7 @@ def ask_document(request: QuestionRequest):
                     message.add_text_content(user_prompt)
 
                 # Call LLM
-                success, llm_responses = send_messasge(
+                success, llm_responses = llm_client.send_message(
                     messages=[message]
                 )
 

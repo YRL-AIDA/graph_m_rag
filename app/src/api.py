@@ -1298,7 +1298,7 @@ def ask_document(request: QuestionRequest):
 
                 # Call LLM
                 success, llm_responses = send_messasge(
-                    messages=message
+                    messages=[message]
                 )
 
                 if success and llm_responses:

@@ -28,7 +28,12 @@ class Document:
                 label = 'header'
             if label == 'discarded':
                 continue
-            regions.append(Region(f'key: {self.name}/element_{i}.json', element['bbox'], Style(-1), i, label, f'{self.name}/element_{i}.json'))
+            regions.append(Region(f'key: {self.name}/element_{i}.json',
+                                  element['bbox'],
+                                  Style(-1),
+                                  i,
+                                  label
+                                  ))
         return regions
 
     # For pdf_info (qdrant used content_list)

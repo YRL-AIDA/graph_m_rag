@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
+import logger
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -29,6 +30,16 @@ from app.src.minio_client import MinioClient
 from app.src.mineru_client import MinerUClient
 from app.config.settings import settings
 from app.src.utils.data_model import QuestionResponse, QuestionRequest, UploadedFileInfo, UploadedFilesListResponse, CollectionCreateRequest, CollectionInfo, CollectionsListResponse
+
+# Import document index service for Neo4j graph creation
+try:
+    from documet_index import DocumentIndexService, create_neo4j_graph
+    NEO4J_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Neo4j document index not available: {e}")
+    NEO4J_AVAILABLE = False
+    DocumentIndexService = None
+    create_neo4j_graph = None
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -69,6 +80,7 @@ class PDFUploadResponse(BaseModel):
     mineru_result_path: str
     embeddings_computed: int
     processing_time: float
+    neo4j_graph_created: bool = False
 
 
 class HealthCheckResponse(BaseModel):
@@ -1008,16 +1020,34 @@ async def upload_pdf(file: UploadFile = File(...)):
         embeddings_count = compute_embeddings_for_elements(elements, file_hash)
         logger.info(f"Completed embedding computation: {embeddings_count} elements processed for file {file_hash}")
 
+        # Create Neo4j graph from MinerU result
+        neo4j_graph_created = False
+        if NEO4J_AVAILABLE:
+            try:
+                logger.info(f"Creating Neo4j graph for document '{file_hash}'")
+                neo4j_graph_created = create_neo4j_graph(mineru_result, file_hash)
+                if neo4j_graph_created:
+                    logger.info(f"Successfully created Neo4j graph for document '{file_hash}'")
+                else:
+                    logger.info(f"Document '{file_hash}' already exists in Neo4j, skipping graph creation")
+            except Exception as neo4j_error:
+                logger.error(f"Failed to create Neo4j graph for document '{file_hash}': {neo4j_error}")
+                # Don't fail the entire process if Neo4j graph creation fails
+                # The document is still available in MinIO and Qdrant
+        else:
+            logger.info("Neo4j document index not available, skipping graph creation")
+
         processing_time = time.time() - start_time
 
         return PDFUploadResponse(
             status="success",
-            message="PDF uploaded, processed with MinerU, and embeddings computed",
+            message="PDF uploaded, processed with MinerU, embeddings computed, and Neo4j graph created",
             file_hash=file_hash,
             s3_path=pdf_s3_key,
             mineru_result_path=mineru_result_key,
             embeddings_computed=embeddings_count,
-            processing_time=processing_time
+            processing_time=processing_time,
+            neo4j_graph_created=neo4j_graph_created
         )
 
     except HTTPException:

@@ -1,74 +1,84 @@
-from typing import List, Dict, Any
-import logging
-
 from .region import Region, Style, BBox
-
-logger = logging.getLogger(__name__)
+from typing import List
 
 
 class Document:
-    """Document class for processing MinerU results."""
-
-    def __init__(self, json_data: Dict[str, Any], name: str, mode: str = "mineru"):
-        """Initialize a Document from MinerU JSON data.
-
-        Args:
-            json_data: JSON data from MinerU processing result
-            name: Unique name/identifier for the document (e.g., file hash)
-            mode: Processing mode (currently only 'mineru' is supported)
-
-        Raises:
-            ValueError: If mode is not 'mineru'
-        """
+    def __init__(self, json_data, name, mode):
         self.mode = mode
         self.name = name
         if mode == "mineru":
             pass
         else:
             raise ValueError('mode in ("mineru", ...)')
-
-        # Extract the actual content from the nested structure
         self.json_data = json_data["results"]["result"]["results"]
+
 
     @property
     def regions(self) -> List[Region]:
-        """Get list of regions from the document.
-
-        Returns:
-            List of Region objects extracted from the document
-        """
         if self.mode == 'mineru':
             return self.__parser_mineru(self.json_data)
         raise ValueError('there is not parser for this mode ')
 
 
-    def __parser_mineru(self, json_data: Dict[str, Any]) -> List[Region]:
-        """Parse MinerU JSON data into Region objects.
-
-        Args:
-            json_data: Parsed JSON data from MinerU
-
-        Returns:
-            List of Region objects
-        """
+    def __parser_mineru(self, json_data) -> List[Region]:
         regions = []
         for i, element in enumerate(json_data["content_list"]):
             label = element['type']
             if 'text_level' in element:
-                label = 'header'
+                label = 'title'
             if label == 'discarded':
                 continue
 
-            # Create text key for storage/retrieval
-            text_key = f'key: {self.name}/element_{i}.json'
+            # Извлекаем текст в зависимости от типа региона
+            text = f'key: {self.name}/element_{i}.json'
 
-            regions.append(Region(
-                text=text_key,
-                bbox=BBox(*element['bbox']),
-                style=Style(font_size=-1),
-                order=i,
-                label=label
-            ))
+            if label == 'text':
+                text_content = element.get('text', '')
+                if text_content:
+                    text = f"Text: {text_content}"
+            elif label == 'title':
+                text_content = element.get('text', '')
+                if text_content:
+                    text = f"Title: {text_content}"
+            elif label == 'table':
+                table_body = element.get('table_body', '')
+                table_captions = element.get('table_caption', [])
+                caption_text = ' '.join(table_captions) if table_captions else ''
+                if table_body:
+                    text = f"Table: {table_body}"
+                elif caption_text:
+                    text = f"Table Caption: {caption_text}"
+            elif label == 'image':
+                img_path = element.get('img_path', '')
+                image_captions = element.get('image_caption', [])
+                caption_text = ' '.join(image_captions) if image_captions else ''
+                if img_path:
+                    text = f"Image: {img_path}"
+                if caption_text:
+                    text = f"{text} Caption: {caption_text}"
+            elif label == 'equation':
+                text_content = element.get('text', '')
+                if text_content:
+                    text = f"Equation: {text_content}"
+            elif label == 'list':
+                text_content = element.get('text', '')
+                if text_content:
+                    text = f"List: {text_content}"
+            elif label == 'figure':
+                text_content = element.get('text', '')
+                if text_content:
+                    text = f"Figure: {text_content}"
+            elif label == 'interline_equation':
+                text_content = element.get('text', '')
+                if text_content:
+                    text = f"Interline Equation: {text_content}"
+
+            regions.append(Region(text,
+                                  element['bbox'],
+                                  Style(-1),
+                                  i,
+                                  label
+                                  ))
         return regions
 
     # For pdf_info (qdrant used content_list)
@@ -100,12 +110,7 @@ class Document:
     #     return regions
     # For pdf_info (qdrant used content_list)
 
-    def get_graph(self) -> Dict[str, Any]:
-        """Build a graph representation of the document.
-
-        Returns:
-            Dictionary containing nodes (document and regions) and edges (order and parental relationships)
-        """
+    def get_graph(self):
         regions = self.regions
         regions.sort(key=lambda x: x.order)
         # (n1, n2) : n1 -> n2
@@ -116,14 +121,14 @@ class Document:
 
         tmp_parent_list_id = [-1] # -1 is id Document
 
+
         # region_embs = {i:get_embedding(reg) for i, reg in enumerate(regions)}
-        def is_include_by_id(parent_id: int, child_id: int) -> bool:
-            """Check if parent can include child based on style hierarchy."""
+        def is_include_by_id(parent_id, child_id):
             if parent_id == -1:
                 return True
             return regions[parent_id].style > regions[child_id].style
 
-        for id_reg, reg in enumerate(regions):
+        for id_reg, reg  in enumerate(regions):
             test_parent_id = tmp_parent_list_id[-1]
 
             # Поместить контент
@@ -146,7 +151,7 @@ class Document:
                     "name": self.name
                 },
                 "regions": {id_reg: reg.to_dict()
-                    for id_reg, reg in enumerate(regions)
+                    for id_reg, reg  in enumerate(regions)
                 }
             },
             "edges": {

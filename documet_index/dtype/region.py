@@ -1,5 +1,5 @@
 # CONTENT_LABELS = ['text', 'table', 'list', 'figure', 'interline_equation']
-CONTENT_LABELS = ['text', 'table', 'image', 'equation', 'title', 'list', 'figure', 'interline_equation']
+CONTENT_LABELS = ['text', 'table', 'image']
 class BBox:
     def __init__(self, x1, y1, x2, y2):
         self.x1 = x1
@@ -30,12 +30,13 @@ class Style:
 
 
 class Region:
-    def __init__(self, text:str, bbox:BBox, style:Style, order:int, label:str):
+    def __init__(self, text:str, bbox:BBox, style:Style, order:int, label:str, element_data:dict=None):
         self.text = text
         self.bbox = bbox
         self.style = style
         self.order = order
         self.label = label
+        self.element_data = element_data or {}
 
 
     def is_content(self):
@@ -45,4 +46,5 @@ class Region:
         return {
             "label": self.label,
             "text": self.text,
+            "element_data": self.element_data
         }

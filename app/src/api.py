@@ -1263,7 +1263,7 @@ def ask_document(request: QuestionRequest):
 
         # Search for relevant chunks
         search_results = client.search(
-            query_vector=question_embedding.embedding,
+            query_vector=question_embedding.messages[0].embedding,
             limit=limit,
             filter_condition=filter_condition
         )

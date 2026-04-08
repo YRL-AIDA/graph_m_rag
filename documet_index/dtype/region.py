@@ -30,13 +30,13 @@ class Style:
 
 
 class Region:
-    def __init__(self, text:str, bbox:BBox, style:Style, order:int, label:str, element_data:dict=None):
+    def __init__(self, text:str, bbox:BBox, style:Style, order:int, label:str, element_data:str):
         self.text = text
         self.bbox = bbox
         self.style = style
         self.order = order
         self.label = label
-        self.element_data = element_data or {}
+        self.element_data = element_data
 
 
     def is_content(self):

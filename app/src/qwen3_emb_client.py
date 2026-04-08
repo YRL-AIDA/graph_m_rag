@@ -2,7 +2,7 @@ import requests
 from typing import List, Union, Optional
 from pydantic import BaseModel, ConfigDict
 
-from app.src.utils.emb_utils import EmbedResponse, Message, EmbedRequest
+from app.src.utils.emb_utils import Message, EmbedRequest, EmbedSuccessResponse
 
 
 # ========== Client ==========
@@ -21,7 +21,7 @@ class EmbeddingClient:
         self.timeout = timeout
 
 
-    def get_text_embedding(self, text: str) -> EmbedResponse:
+    def get_text_embedding(self, text: str) -> EmbedSuccessResponse:
 
         message = Message(type="text", text=text)
         request_payload = EmbedRequest(messages=[message]).model_dump()  # or .dict() for older Pydantic
@@ -29,11 +29,11 @@ class EmbeddingClient:
         response = requests.post(url, json=request_payload, timeout=self.timeout)
         response.raise_for_status()  # raise exception for HTTP errors
         try:
-            return EmbedResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
+            return EmbedSuccessResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
         except Exception as e:
             raise ValueError(f"Invalid response format: {e}") from e
 
-    def get_image_embedding(self, image_path: str) -> EmbedResponse:
+    def get_image_embedding(self, image_path: str) -> EmbedSuccessResponse:
         """
         Get embedding for an image file.
 
@@ -54,11 +54,11 @@ class EmbeddingClient:
         response = requests.post(url, json=request_payload, timeout=self.timeout)
         response.raise_for_status()
         try:
-            return EmbedResponse.model_validate(response.json())
+            return EmbedSuccessResponse.model_validate(response.json())
         except Exception as e:
             raise ValueError(f"Invalid response format: {e}") from e
 
-    def get_image_embedding_base64(self, image_base64: str) -> EmbedResponse:
+    def get_image_embedding_base64(self, image_base64: str) -> EmbedSuccessResponse:
         image_base64 = f"data:image/jpeg;base64,{image_base64}"
         message = Message(type="image", image=image_base64)
         request_payload = EmbedRequest(messages=[message]).model_dump()  # or .dict() for older Pydantic
@@ -66,11 +66,11 @@ class EmbeddingClient:
         response = requests.post(url, json=request_payload, timeout=self.timeout)
         response.raise_for_status()  # raise exception for HTTP errors
         try:
-            return EmbedResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
+            return EmbedSuccessResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
         except Exception as e:
             raise ValueError(f"Invalid response format: {e}") from e
 
-    def get_image_embedding_url(self, image_url: str) -> EmbedResponse:
+    def get_image_embedding_url(self, image_url: str) -> EmbedSuccessResponse:
 
         message = Message(type="image", image_url=image_url)
         request_payload = EmbedRequest(messages=[message]).model_dump()  # or .dict() for older Pydantic
@@ -78,11 +78,11 @@ class EmbeddingClient:
         response = requests.post(url, json=request_payload, timeout=self.timeout)
         response.raise_for_status()  # raise exception for HTTP errors
         try:
-            return EmbedResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
+            return EmbedSuccessResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
         except Exception as e:
             raise ValueError(f"Invalid response format: {e}") from e
 
-    def get_embeddings(self, messages: List[Message]) -> EmbedResponse:
+    def get_embeddings(self, messages: List[Message]) -> EmbedSuccessResponse:
         """
         Send a list of messages to the service and retrieve the embedding.
 
@@ -106,7 +106,7 @@ class EmbeddingClient:
 
         # Parse and validate the response
         try:
-            return EmbedResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
+            return EmbedSuccessResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
         except Exception as e:
             raise ValueError(f"Invalid response format: {e}") from e
 

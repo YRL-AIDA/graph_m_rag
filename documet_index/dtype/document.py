@@ -22,6 +22,8 @@ class Document:
 
     def __parser_mineru(self, json_data) -> List[Region]:
         regions = []
+        return create_graph_from_mineru_result(json_data, self.name)
+
         for i, element in enumerate(json_data["content_list"]):
             label = element['type']
             if 'text_level' in element:
@@ -99,7 +101,6 @@ class Document:
             parent_edges.append((test_parent_id, id_reg))
             tmp_parent_list_id.append(id_reg)
 
-
         return {
             "nodes": {
                 "document": {
@@ -136,10 +137,9 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
     """
     # Extract content_list from mineru_result
     content_list = []
-    if "results" in mineru_result and "result" in mineru_result["results"]:
-        results_data = mineru_result["results"]["result"]["results"]
-        if "content_list" in results_data:
-            content_list = results_data["content_list"]
+
+    if "content_list" in mineru_result:
+        content_list = mineru_result["content_list"]
 
     # Build regions for all element types
     regions = []
@@ -169,7 +169,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="title",
-                    element_data=element.copy()
+                    element_data=text
                 ))
                 element_index += 1
             else:
@@ -182,7 +182,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                         style=Style(-1),
                         order=element_index,
                         label="text",
-                        element_data=element.copy()
+                        element_data=text
                     ))
                     element_index += 1
 
@@ -199,7 +199,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                 style=Style(-1),
                 order=element_index,
                 label="image",
-                element_data=element.copy()
+                element_data=img_path
             ))
             element_index += 1
 
@@ -212,7 +212,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="image_caption",
-                    element_data=element.copy()
+                    element_data=caption_text
                 ))
                 element_index += 1
 
@@ -225,7 +225,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="image_footnote",
-                    element_data=element.copy()
+                    element_data=footnote_text
                 ))
                 element_index += 1
 
@@ -246,7 +246,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                 style=Style(-1),
                 order=element_index,
                 label="table",
-                element_data=element.copy()
+                element_data=table_text
             ))
             element_index += 1
 
@@ -259,7 +259,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="table_caption",
-                    element_data=element.copy()
+                    element_data=caption_text
                 ))
                 element_index += 1
 
@@ -272,7 +272,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="table_footnote",
-                    element_data=element.copy()
+                    element_data=footnote_text
                 ))
                 element_index += 1
 
@@ -286,7 +286,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="equation",
-                    element_data=element.copy()
+                    element_data=element_type
                 ))
                 element_index += 1
 
@@ -300,7 +300,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label=element_type,
-                    element_data=element.copy()
+                    element_data=text
                 ))
                 element_index += 1
 
@@ -335,18 +335,4 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
         parent_edges.append((test_parent_id, id_reg))
         tmp_parent_list_id.append(id_reg)
 
-    return {
-        "nodes": {
-            "document": {
-                "name": document_name
-            },
-            "regions": {
-                id_reg: reg.to_dict()
-                for id_reg, reg in enumerate(regions)
-            }
-        },
-        "edges": {
-            "order": order_edges,
-            "parental": parent_edges
-        }
-    }
+    return regions

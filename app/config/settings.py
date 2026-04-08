@@ -69,7 +69,7 @@ class RerankerSettings(BaseSettings):
     """Reranker service configuration."""
     RERANKER_BASE_URL: str = Field(default="http://192.168.19.127:10115/reranker", description="Reranker service URL")
     RERANKER_TIMEOUT: int = Field(default=30, description="Request timeout in seconds")
-    RERANKER_TOP_N: int = Field(default=50, description="Default number of top results to return")
+    RERANKER_TOP_N: int = Field(default=100, description="Default number of top results to return")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

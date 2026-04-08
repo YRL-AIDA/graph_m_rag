@@ -10,6 +10,7 @@ import json
 import logging
 import time
 from datetime import datetime
+from operator import itemgetter
 from typing import Dict, List, Optional, Any
 
 import logger
@@ -206,10 +207,10 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 image_base64 = base64.b64encode(image_data).decode('utf-8')
 
                 # Compute embedding for the image
-                embedding = emb_client.get_image_embedding_base64(image_base64)
+                embedding = emb_client.get_image_embedding_base64(image_base64).messages[0]
 
                 # Prepare data for Qdrant
-                embeddings_list.append(embedding.embedding)
+                embeddings_list.append(embedding)
                 texts_list.append(f"Image: {img_path}")  # Text representation for Qdrant
 
                 metadata = {
@@ -229,7 +230,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 embedding_data = {
                     "original_element": element,
                     "img_path": img_path,
-                    "embedding": embedding.embedding,
+                    "embedding": embedding,
                     "element_index": i,
                     "element_type": element_type,
                     "file_hash": file_hash,
@@ -259,7 +260,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         caption_embedding = emb_client.get_text_embedding(caption_content)
 
                         # Prepare data for Qdrant
-                        embeddings_list.append(caption_embedding.embedding)
+                        embeddings_list.append(caption_embedding)
                         texts_list.append(caption_content)
 
                         caption_metadata = {
@@ -280,7 +281,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                             "original_element": element,
                             "img_path": img_path,
                             "text": caption_content,
-                            "embedding": caption_embedding.embedding,
+                            "embedding": caption_embedding,
                             "element_index": i,
                             "element_type": f"{element_type}_caption",
                             "file_hash": file_hash,
@@ -308,7 +309,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         footnote_embedding = emb_client.get_text_embedding(footnote_content)
 
                         # Prepare data for Qdrant
-                        embeddings_list.append(footnote_embedding.embedding)
+                        embeddings_list.append(footnote_embedding)
                         texts_list.append(footnote_content)
 
                         footnote_metadata = {
@@ -329,7 +330,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                             "original_element": element,
                             "img_path": img_path,
                             "text": footnote_text,
-                            "embedding": footnote_embedding.embedding,
+                            "embedding": footnote_embedding,
                             "element_index": i,
                             "element_type": f"{element_type}_caption",
                             "file_hash": file_hash,
@@ -374,7 +375,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     caption_embedding = emb_client.get_text_embedding(caption_content)
 
                     # Prepare data for Qdrant
-                    embeddings_list.append(caption_embedding.embedding)
+                    embeddings_list.append(caption_embedding)
                     texts_list.append(caption_content)
 
                     caption_metadata = {
@@ -395,7 +396,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         "original_element": element,
                         "img_path": img_path,
                         "text": caption_content,
-                        "embedding": caption_embedding.embedding,
+                        "embedding": caption_embedding,
                         "element_index": i,
                         "element_type": f"{element_type}_caption",
                         "file_hash": file_hash,
@@ -422,7 +423,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     footnote_embedding = emb_client.get_text_embedding(footnote_content)
 
                     # Prepare data for Qdrant
-                    embeddings_list.append(footnote_embedding.embedding)
+                    embeddings_list.append(footnote_embedding)
                     texts_list.append(footnote_content)
 
                     footnote_metadata = {
@@ -443,7 +444,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         "original_element": element,
                         "img_path": img_path,
                         "text": footnote_content,
-                        "embedding": footnote_embedding.embedding,
+                        "embedding": footnote_embedding,
                         "element_index": i,
                         "element_type": f"{element_type}_footnote",
                         "file_hash": file_hash,
@@ -492,7 +493,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 embedding = emb_client.get_text_embedding(text_content)
 
                 # Prepare data for Qdrant
-                embeddings_list.append(embedding.embedding)
+                embeddings_list.append(embedding)
                 texts_list.append(text_content)
 
                 metadata = {
@@ -509,7 +510,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 embedding_data = {
                     "original_element": element,
                     "text": text_content,
-                    "embedding": embedding.embedding,
+                    "embedding": embedding,
                     "element_index": i,
                     "element_type": element_type,
                     "file_hash": file_hash,
@@ -618,7 +619,7 @@ async def health_check():
     try:
         # Test embedding generation
         test_embedding = emb_client.get_text_embedding("test")
-        if test_embedding and len(test_embedding.embedding) > 0:
+        if test_embedding and len(test_embedding) > 0:
             services_status["embedding"] = "healthy"
         else:
             services_status["embedding"] = "unhealthy: invalid response"
@@ -981,6 +982,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             "original_filename": safe_filename,
             "processed_at": datetime.now().isoformat()
         }
+
         result_json = json.dumps(mineru_result_serializable, ensure_ascii=False, indent=2)
 
         minio_client.put_object(
@@ -989,6 +991,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             data=result_json.encode('utf-8'),
             content_type="application/json"
         )
+
         logger.info(f"Successfully stored MinerU result to S3: {mineru_result_key}")
 
         # Save images from MinerU result
@@ -1224,6 +1227,7 @@ def ask_document(request: QuestionRequest):
     limit = request.limit
     collection_name = request.collection_name
     use_llm = request.use_llm
+    use_reranker = request.use_reranker
 
     # Use specified collection or default
     client = get_qdrant_client(collection_name=collection_name) if collection_name else qdrant_client
@@ -1266,10 +1270,13 @@ def ask_document(request: QuestionRequest):
 
         # Search for relevant chunks (retrieve more candidates for reranking)
         rerank_top_n = settings.reranker.RERANKER_TOP_N if hasattr(settings.reranker, 'RERANKER_TOP_N') else limit
-        search_limit = max(limit * 3, rerank_top_n)  # Get more candidates for reranking
+        if use_reranker:
+            search_limit = max(limit * 3, rerank_top_n)  # Get more candidates for reranking
+        else:
+            search_limit = limit
 
         search_results = client.search(
-            query_vector=question_embedding.messages[0].embedding,
+            query_vector=question_embedding,
             limit=search_limit,
             filter_condition=filter_condition
         )
@@ -1325,7 +1332,9 @@ def ask_document(request: QuestionRequest):
 
                 # Reorder answers based on reranker scores
                 reranked_answers = []
-                for res in rerank_result.messages:
+                rerank_messages = sorted(rerank_result.messages, reverse=True, key=lambda x: x.score)
+
+                for res in rerank_messages:
                     if 0 <= res.message_id < limit:
                         answer_copy = answers[res.message_id].copy()
                         answer_copy["reranker_score"] = res.score

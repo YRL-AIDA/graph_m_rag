@@ -716,6 +716,13 @@
                     </label>
                 </div>
 
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <input type="checkbox" id="useReranker" name="useReranker" style="width: auto;">
+                        <span>Использовать реранкер для улучшения результатов поиска</span>
+                    </label>
+                </div>
+
                 <button type="submit" class="btn" id="submitBtn">
                     🔍 Найти ответ
                 </button>
@@ -1502,6 +1509,7 @@
             const question = document.getElementById('question').value.trim();
             const limit = parseInt(document.getElementById('askLimit').value) || 10;
             const useLlm = document.getElementById('useLlm').checked;
+            const useReranker = document.getElementById('useReranker').checked;
             const collectionSelect = document.getElementById('collectionSelect');
             const collectionName = collectionSelect.value;
 
@@ -1522,7 +1530,8 @@
                     file_hash: fileHash,
                     question: question,
                     limit: limit,
-                    use_llm: useLlm
+                    use_llm: useLlm,
+                    use_reranker: useReranker
                 };
 
                 if (collectionName) {

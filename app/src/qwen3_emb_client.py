@@ -28,8 +28,9 @@ class EmbeddingClient:
         url = f"{self.base_url}/embed"  # adjust the endpoint path as needed
         response = requests.post(url, json=request_payload, timeout=self.timeout)
         response.raise_for_status()  # raise exception for HTTP errors
+        result = EmbedSuccessResponse.model_validate(response.json()).messages[0].embedding
         try:
-            return EmbedSuccessResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
+            return result
         except Exception as e:
             raise ValueError(f"Invalid response format: {e}") from e
 
@@ -53,8 +54,10 @@ class EmbeddingClient:
         url = f"{self.base_url}/embed"
         response = requests.post(url, json=request_payload, timeout=self.timeout)
         response.raise_for_status()
+        result = EmbedSuccessResponse.model_validate(response.json()).messages[0].embedding
+
         try:
-            return EmbedSuccessResponse.model_validate(response.json())
+            return result
         except Exception as e:
             raise ValueError(f"Invalid response format: {e}") from e
 
@@ -65,8 +68,10 @@ class EmbeddingClient:
         url = f"{self.base_url}/embed"  # adjust the endpoint path as needed
         response = requests.post(url, json=request_payload, timeout=self.timeout)
         response.raise_for_status()  # raise exception for HTTP errors
+        result = EmbedSuccessResponse.model_validate(response.json()).messages[0].embedding
+
         try:
-            return EmbedSuccessResponse.model_validate(response.json())  # or .parse_obj() for older Pydantic
+            return result  # or .parse_obj() for older Pydantic
         except Exception as e:
             raise ValueError(f"Invalid response format: {e}") from e
 

@@ -30,6 +30,7 @@ from app.src.minio_client import MinioClient
 from app.src.mineru_client import MinerUClient
 from app.config.settings import settings
 from app.src.reranker_client import RerankerClient
+from app.src.schemas.reranker import Message
 from app.src.utils.data_model import QuestionResponse, QuestionRequest, UploadedFileInfo, UploadedFilesListResponse, CollectionCreateRequest, CollectionInfo, CollectionsListResponse
 
 # Import document index service for Neo4j graph creation
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 minio_client = MinioClient(logger)
 mineru_client = MinerUClient(base_url=f"{settings.mineru.MINERU_HOST}:{settings.mineru.MINERU_PORT}")
 emb_client = EmbeddingClient(base_url=settings.embedding.EMBEDDING_BASE_URL)
-reranker_client = RerankerClient(base_url=settings.embedding.EMBEDDING_BASE_URL)
+reranker_client = RerankerClient(base_url=settings.reranker.RERANKER_BASE_URL)
 qdrant_client = get_qdrant_client()
 llm_client = LLMClient(base_url=settings.llm.LLM_BASE_URL)
 
@@ -1263,22 +1264,29 @@ def ask_document(request: QuestionRequest):
             ]
         )
 
-        # Search for relevant chunks
+        # Search for relevant chunks (retrieve more candidates for reranking)
+        rerank_top_n = settings.reranker.RERANKER_TOP_N if hasattr(settings.reranker, 'RERANKER_TOP_N') else limit
+        search_limit = max(limit * 3, rerank_top_n)  # Get more candidates for reranking
+
         search_results = client.search(
             query_vector=question_embedding.messages[0].embedding,
-            limit=limit,
+            limit=search_limit,
             filter_condition=filter_condition
         )
 
         # Format results
         answers = []
-        for result in search_results.points:
+        documents_to_rerank = []
+        search_results_map = {}
+
+        for idx, result in enumerate(search_results.points):
             payload = result.payload
             element_type = payload.get("element_type", "")
             original_element = payload.get("original_element", {})
-
+            text = payload.get("text", "")
+            message = Message()
             answer = {
-                "text": payload.get("text", ""),
+                "text": text,
                 "score": result.score,
                 "element_type": element_type,
                 "element_index": payload.get("element_index", 0),
@@ -1289,17 +1297,47 @@ def ask_document(request: QuestionRequest):
             }
 
             # Download image data for image and table elements
-            if element_type in ("image", "table") and answer["img_path"]:
+            if element_type in ("image") and answer["img_path"]:
                 try:
                     image_data = minio_client.get_object(
                         bucket_name=minio_client.bucket_name,
                         object_name=answer["img_path"]
                     )
                     answer["image_base64"] = base64.b64encode(image_data).decode('utf-8')
+                    message.add_img_content_base64(answer["image_base64"])
                 except Exception as e:
                     logger.error(f"Failed to download image {answer['img_path']}: {e}")
+            else:
+                message.add_text_content(text)
 
             answers.append(answer)
+            documents_to_rerank.append(message)
+            search_results_map[idx] = answer
+
+        # Apply reranking if enabled and we have documents
+        use_reranker = getattr(request, 'use_reranker', False)
+        if use_reranker and documents_to_rerank:
+            try:
+                rerank_result = reranker_client.rerank(
+                    query_text=question,
+                    messages=documents_to_rerank
+                )
+
+                # Reorder answers based on reranker scores
+                reranked_answers = []
+                for res in rerank_result.messages:
+                    if 0 <= res.message_id < limit:
+                        answer_copy = answers[res.message_id].copy()
+                        answer_copy["reranker_score"] = res.score
+                        answer_copy["original_score"] = answer_copy["score"]
+                        answer_copy["score"] = res.score  # Use reranker score as primary
+                        reranked_answers.append(answer_copy)
+
+                answers = reranked_answers
+                logger.info(f"Reranking applied: {len(answers)} results reordered")
+            except Exception as e:
+                logger.warning(f"Reranking failed: {e}. Using original search results.")
+
         # Generate LLM answer if requested
         llm_answer = None
         if use_llm and answers:
@@ -1315,7 +1353,7 @@ def ask_document(request: QuestionRequest):
                     element_type = ans.get("element_type", "")
 
                     # Add image if available (for both image and table elements)
-                    if element_type in ("image", "table") and ans.get("image_base64"):
+                    if element_type in ("image") and ans.get("image_base64"):
                         message.add_img_content_base64(ans["image_base64"])
 
                     # Add text content

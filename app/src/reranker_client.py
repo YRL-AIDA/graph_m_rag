@@ -24,9 +24,9 @@ class RerankerClient:
 
     def rerank(
         self,
-        instruction: str,
         query_text: str,
-        messages: List[Message]
+        messages: List[Message],
+        instruction: str = "Retrieve images or text relevant to the user's query."
     ) -> RerankResponse:
         """
         Send a reranking request to the service.

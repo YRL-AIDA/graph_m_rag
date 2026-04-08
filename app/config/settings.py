@@ -64,6 +64,15 @@ class EmbeddingSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+
+class RerankerSettings(BaseSettings):
+    """Reranker service configuration."""
+    RERANKER_BASE_URL: str = Field(default="http://192.168.19.127:10115/reranker", description="Reranker service URL")
+    RERANKER_TIMEOUT: int = Field(default=30, description="Request timeout in seconds")
+    RERANKER_TOP_N: int = Field(default=50, description="Default number of top results to return")
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
 class LLMSettings(BaseSettings):
     """LLM service configuration."""
     LLM_BASE_URL: str = Field(default="http://192.168.19.127:8888/v1", description="LLM service URL")
@@ -103,6 +112,7 @@ class Settings(BaseSettings):
     qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    reranker: RerankerSettings = Field(default_factory=RerankerSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     app: AppSettings = Field(default_factory=AppSettings)
 

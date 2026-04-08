@@ -29,6 +29,7 @@ from app.src.qwen3_emb_client import EmbeddingClient
 from app.src.minio_client import MinioClient
 from app.src.mineru_client import MinerUClient
 from app.config.settings import settings
+from app.src.reranker_client import RerankerClient
 from app.src.utils.data_model import QuestionResponse, QuestionRequest, UploadedFileInfo, UploadedFilesListResponse, CollectionCreateRequest, CollectionInfo, CollectionsListResponse
 
 # Import document index service for Neo4j graph creation
@@ -49,6 +50,7 @@ logger = logging.getLogger(__name__)
 minio_client = MinioClient(logger)
 mineru_client = MinerUClient(base_url=f"{settings.mineru.MINERU_HOST}:{settings.mineru.MINERU_PORT}")
 emb_client = EmbeddingClient(base_url=settings.embedding.EMBEDDING_BASE_URL)
+reranker_client = RerankerClient(base_url=settings.embedding.EMBEDDING_BASE_URL)
 qdrant_client = get_qdrant_client()
 llm_client = LLMClient(base_url=settings.llm.LLM_BASE_URL)
 

@@ -44,10 +44,10 @@ class RerankerClient:
             ValueError: If the response cannot be parsed into RerankResponse.
         """
         # Build the request payload using the RerankRequest model
-        query = Query(text=query_text)
+
         request_payload = RerankRequest(
             instruction=instruction,
-            query=query,
+            query={'text': query_text},
             messages=messages
         ).model_dump()
 
@@ -98,7 +98,7 @@ if __name__ == "__main__":
     ]
 
     # Initialize the client (point to your actual service URL)
-    client = RerankerClient(base_url="http://192.168.19.127:10114/reranker")
+    client = RerankerClient(base_url="http://192.168.19.127:10115/reranker")
 
     try:
         result = client.rerank(
@@ -107,7 +107,7 @@ if __name__ == "__main__":
             messages=messages
         )
         print("Reranking results:")
-        for res in result.results:
+        for res in result.messages:
             print(f"  Message ID: {res.message_id}, Score: {res.score}")
     except Exception as e:
         print(f"Error: {e}")

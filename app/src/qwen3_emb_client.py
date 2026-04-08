@@ -2,7 +2,7 @@ import requests
 from typing import List, Union, Optional
 from pydantic import BaseModel, ConfigDict
 
-from app.src.utils.emb_utils import Message, EmbedRequest, EmbedSuccessResponse
+from app.src.schemas.embeddings import EmbedSuccessResponse, Message, EmbedRequest
 
 
 # ========== Client ==========

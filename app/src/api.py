@@ -1326,6 +1326,78 @@ def ask_document(request: QuestionRequest):
                     if related_context and (related_context.get("parent_element") or related_context.get("sibling_captions") or related_context.get("sibling_footnotes")):
                         answer["neo4j_context"] = related_context
                         logger.debug(f"Added Neo4j context for {element_type}: {related_context}")
+
+                        # Create separate answers from Neo4j context
+                        # Add parent element as a separate answer if available
+                        parent_element = related_context.get("parent_element")
+                        if parent_element:
+                            parent_answer = {
+                                "text": parent_element.get("text", ""),
+                                "score": result.score * 0.9,  # Slightly lower score as it's related context
+                                "element_type": parent_element.get("type", "unknown"),
+                                "element_index": payload.get("element_index", 0),
+                                "page_idx": original_element.get("page_idx", 0) if original_element else 0,
+                                "img_path": parent_element.get("image", None),
+                                "image_base64": None,
+                                "bbox": parent_element.get("bbox", None),
+                                "neo4j_context": None,
+                                "is_related_context": True,
+                                "related_to_element_type": element_type
+                            }
+
+                            # Download image for parent element if it's an image/table
+                            if parent_element.get("type") in ("image", "table") and parent_element.get("image"):
+                                try:
+                                    image_data = minio_client.get_object(
+                                        bucket_name=minio_client.bucket_name,
+                                        object_name=parent_element["image"]
+                                    )
+                                    parent_answer["image_base64"] = base64.b64encode(image_data).decode('utf-8')
+                                except Exception as e:
+                                    logger.warning(f"Failed to download parent image {parent_element.get('image')}: {e}")
+
+                            answers.append(parent_answer)
+                            logger.debug(f"Added parent element answer: {parent_element.get('type')}")
+
+                        # Add sibling captions as separate answers
+                        for caption in related_context.get("sibling_captions", []):
+                            caption_text = caption.get("text", "")
+                            if caption_text:
+                                caption_answer = {
+                                    "text": caption_text,
+                                    "score": result.score * 0.85,
+                                    "element_type": f"{element_type}_caption",
+                                    "element_index": payload.get("element_index", 0),
+                                    "page_idx": original_element.get("page_idx", 0) if original_element else 0,
+                                    "img_path": original_element.get("img_path", None),
+                                    "image_base64": None,
+                                    "bbox": original_element.get("bbox", None),
+                                    "neo4j_context": None,
+                                    "is_related_context": True,
+                                    "related_to_element_type": element_type
+                                }
+                                answers.append(caption_answer)
+                                logger.debug(f"Added sibling caption answer: {caption_text[:50]}...")
+
+                        # Add sibling footnotes as separate answers
+                        for footnote in related_context.get("sibling_footnotes", []):
+                            footnote_text = footnote.get("text", "")
+                            if footnote_text:
+                                footnote_answer = {
+                                    "text": footnote_text,
+                                    "score": result.score * 0.85,
+                                    "element_type": f"{element_type}_footnote",
+                                    "element_index": payload.get("element_index", 0),
+                                    "page_idx": original_element.get("page_idx", 0) if original_element else 0,
+                                    "img_path": original_element.get("img_path", None),
+                                    "image_base64": None,
+                                    "bbox": original_element.get("bbox", None),
+                                    "neo4j_context": None,
+                                    "is_related_context": True,
+                                    "related_to_element_type": element_type
+                                }
+                                answers.append(footnote_answer)
+                                logger.debug(f"Added sibling footnote answer: {footnote_text[:50]}...")
                 except Exception as e:
                     logger.warning(f"Failed to get Neo4j context for {element_type}: {e}")
 

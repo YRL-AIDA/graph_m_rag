@@ -202,6 +202,128 @@ class Manager:
             logger.error(f"Error deleting all documents: {e}")
             return False
 
+    def get_related_context(self, file_hash: str, element_type: str, text: str) -> Dict[str, Any]:
+        """Get related context from Neo4j for a given element.
+
+        For image_caption/image_footnote, returns the parent image node.
+        For table_caption/table_footnote, returns the parent table node.
+        For image/table, returns associated caption and footnote nodes.
+
+        Args:
+            file_hash: Document identifier
+            element_type: Type of the element (image_caption, image_footnote, table_caption, table_footnote, image, table)
+            text: Text content of the element to match
+
+        Returns:
+            Dictionary with related context information
+        """
+        try:
+            # Escape single quotes in text
+            text_escaped = text.replace("'", "\\'")
+
+            related_context = {
+                "parent_element": None,
+                "sibling_captions": [],
+                "sibling_footnotes": []
+            }
+
+            # For caption/footnote elements, find the parent image/table
+            if element_type in ("image_caption", "image_footnote"):
+                # Find the image that this caption/footnote belongs to
+                # Look for an image node that comes before this caption/footnote in ORDER
+                query = f"""
+                   MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (caption:Region:{element_type} {{text: '{text_escaped}'}})
+                   OPTIONAL MATCH (img:Region:image) -[:ORDER*]-> (caption)
+                   WHERE img.image IS NOT NULL AND img.image <> ''
+                   WITH img, caption
+                   ORDER BY caption.order - img.order ASC
+                   LIMIT 1
+                   RETURN img.text as text, img.image as image, img.bbox as bbox, img.element_data as element_data
+                   """
+                result = self.query(query)
+                if result and result[0].data().get('text'):
+                    data = result[0].data()
+                    related_context["parent_element"] = {
+                        "type": "image",
+                        "text": data.get('text', ''),
+                        "image": data.get('image', ''),
+                        "bbox": data.get('bbox', '{}'),
+                        "element_data": data.get('element_data', '')
+                    }
+
+            elif element_type in ("table_caption", "table_footnote"):
+                # Find the table that this caption/footnote belongs to
+                query = f"""
+                   MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (caption:Region:{element_type} {{text: '{text_escaped}'}})
+                   OPTIONAL MATCH (tbl:Region:table) -[:ORDER*]-> (caption)
+                   WHERE tbl.image IS NOT NULL AND tbl.image <> ''
+                   WITH tbl, caption
+                   ORDER BY caption.order - tbl.order ASC
+                   LIMIT 1
+                   RETURN tbl.text as text, tbl.image as image, tbl.bbox as bbox, tbl.element_data as element_data
+                   """
+                result = self.query(query)
+                if result and result[0].data().get('text'):
+                    data = result[0].data()
+                    related_context["parent_element"] = {
+                        "type": "table",
+                        "text": data.get('text', ''),
+                        "image": data.get('image', ''),
+                        "bbox": data.get('bbox', '{}'),
+                        "element_data": data.get('element_data', '')
+                    }
+
+            # For image/table elements, find associated captions and footnotes
+            elif element_type == "image":
+                # Find image_caption and image_footnote nodes that follow this image
+                query = f"""
+                   MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (img:Region:image {{text: '{text_escaped}'}})
+                   OPTIONAL MATCH (img) -[:ORDER*]-> (cap:Region:image_caption)
+                   OPTIONAL MATCH (img) -[:ORDER*]-> (fn:Region:image_footnote)
+                   RETURN
+                       collect(DISTINCT {{text: cap.text, element_data: cap.element_data}}) as captions,
+                       collect(DISTINCT {{text: fn.text, element_data: fn.element_data}}) as footnotes
+                   """
+                result = self.query(query)
+                if result:
+                    data = result[0].data()
+                    related_context["sibling_captions"] = [
+                        {"text": c.get('text', ''), "element_data": c.get('element_data', '')}
+                        for c in data.get('captions', []) if c.get('text')
+                    ]
+                    related_context["sibling_footnotes"] = [
+                        {"text": f.get('text', ''), "element_data": f.get('element_data', '')}
+                        for f in data.get('footnotes', []) if f.get('text')
+                    ]
+
+            elif element_type == "table":
+                # Find table_caption and table_footnote nodes that follow this table
+                query = f"""
+                   MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (tbl:Region:table {{text: '{text_escaped}'}})
+                   OPTIONAL MATCH (tbl) -[:ORDER*]-> (cap:Region:table_caption)
+                   OPTIONAL MATCH (tbl) -[:ORDER*]-> (fn:Region:table_footnote)
+                   RETURN
+                       collect(DISTINCT {{text: cap.text, element_data: cap.element_data}}) as captions,
+                       collect(DISTINCT {{text: fn.text, element_data: fn.element_data}}) as footnotes
+                   """
+                result = self.query(query)
+                if result:
+                    data = result[0].data()
+                    related_context["sibling_captions"] = [
+                        {"text": c.get('text', ''), "element_data": c.get('element_data', '')}
+                        for c in data.get('captions', []) if c.get('text')
+                    ]
+                    related_context["sibling_footnotes"] = [
+                        {"text": f.get('text', ''), "element_data": f.get('element_data', '')}
+                        for f in data.get('footnotes', []) if f.get('text')
+                    ]
+
+            return related_context
+
+        except Exception as e:
+            logger.error(f"Error getting related context for {element_type}: {e}")
+            return {"parent_element": None, "sibling_captions": [], "sibling_footnotes": []}
+
     def query(self, query: str) -> list:
         """Execute a Cypher query on the database.
 

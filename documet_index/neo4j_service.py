@@ -162,6 +162,23 @@ class DocumentIndexService:
             logger.error(f"Failed to delete all graphs: {e}")
             raise
 
+    def get_related_context(self, file_hash: str, element_type: str, text: str) -> Dict[str, Any]:
+        """Get related context from Neo4j for a given element.
+
+        For image_caption/image_footnote, returns the parent image node.
+        For table_caption/table_footnote, returns the parent table node.
+        For image/table, returns associated caption and footnote nodes.
+
+        Args:
+            file_hash: Document identifier
+            element_type: Type of the element (image_caption, image_footnote, table_caption, table_footnote, image, table)
+            text: Text content of the element to match
+
+        Returns:
+            Dictionary with related context information
+        """
+        return self.manager.get_related_context(file_hash, element_type, text)
+
 # Convenience function for creating graph from MinerU result
 def create_neo4j_graph(mineru_result: Dict[str, Any], file_hash: str) -> bool:
     """Create a Neo4j graph from MinerU result.

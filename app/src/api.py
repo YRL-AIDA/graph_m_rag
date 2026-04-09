@@ -13,7 +13,6 @@ from datetime import datetime
 from operator import itemgetter
 from typing import Dict, List, Optional, Any
 
-import logger
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -34,6 +33,10 @@ from app.src.reranker_client import RerankerClient
 from app.src.schemas.reranker import Message
 from app.src.utils.data_model import QuestionResponse, QuestionRequest, UploadedFileInfo, UploadedFilesListResponse, CollectionCreateRequest, CollectionInfo, CollectionsListResponse
 
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Import document index service for Neo4j graph creation
 try:
     from documet_index import DocumentIndexService, create_neo4j_graph
@@ -43,10 +46,6 @@ except ImportError as e:
     NEO4J_AVAILABLE = False
     DocumentIndexService = None
     create_neo4j_graph = None
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Initialize clients
 minio_client = MinioClient(logger)
@@ -1292,6 +1291,16 @@ def ask_document(request: QuestionRequest):
         documents_to_rerank = []
         search_results_map = {}
 
+        # Initialize Neo4j service for context enrichment (if available)
+        neo4j_service = None
+        if NEO4J_AVAILABLE:
+            try:
+                neo4j_service = DocumentIndexService()
+                logger.info("Neo4j service initialized for context enrichment")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Neo4j service: {e}")
+                neo4j_service = None
+
         for idx, result in enumerate(search_results.points):
             payload = result.payload
             element_type = payload.get("element_type", "")
@@ -1306,8 +1315,19 @@ def ask_document(request: QuestionRequest):
                 "page_idx": original_element.get("page_idx", 0) if original_element else 0,
                 "img_path": original_element.get("img_path", None),  # Store img_path for images and tables
                 "image_base64": None,  # Will be populated for image and table elements
-                "bbox": original_element.get("bbox", None)  # Store bbox for visualization
+                "bbox": original_element.get("bbox", None),  # Store bbox for visualization
+                "neo4j_context": None  # Will store related context from Neo4j
             }
+
+            # Enrich with Neo4j context for image/table related elements
+            if neo4j_service and element_type in ("image", "table", "image_caption", "image_footnote", "table_caption", "table_footnote"):
+                try:
+                    related_context = neo4j_service.get_related_context(file_hash, element_type, text)
+                    if related_context and (related_context.get("parent_element") or related_context.get("sibling_captions") or related_context.get("sibling_footnotes")):
+                        answer["neo4j_context"] = related_context
+                        logger.debug(f"Added Neo4j context for {element_type}: {related_context}")
+                except Exception as e:
+                    logger.warning(f"Failed to get Neo4j context for {element_type}: {e}")
 
             # Download image data for image and table elements
             if element_type in ("image") and answer["img_path"]:
@@ -1338,6 +1358,13 @@ def ask_document(request: QuestionRequest):
             answers.append(answer)
             documents_to_rerank.append(message)
             search_results_map[idx] = answer
+
+        # Close Neo4j service connection
+        if neo4j_service:
+            try:
+                neo4j_service.close()
+            except Exception as e:
+                logger.warning(f"Error closing Neo4j service: {e}")
 
         # Apply reranking if enabled and we have documents
         use_reranker = getattr(request, 'use_reranker', False)
@@ -1374,7 +1401,7 @@ def ask_document(request: QuestionRequest):
                 system_prompt = "Вы помощник, который отвечает на вопросы на основе предоставленного контекста. Если ответ не найден в контексте, скажите об этом."
                 message.add_text_content(system_prompt)
 
-                # Build context with text and images
+                # Build context with text, images, and Neo4j-enriched context
                 context_parts = []
                 for ans in answers:
                     element_type = ans.get("element_type", "")
@@ -1383,15 +1410,38 @@ def ask_document(request: QuestionRequest):
                     if element_type in ("image") and ans.get("image_base64"):
                         message.add_img_content_base64(ans["image_base64"])
 
-                    # Add text content
+                    # Add text content from the main answer
                     if ans.get("text"):
                         context_parts.append(ans["text"])
+
+                    # Add Neo4j context if available (for caption/footnote enrichment)
+                    neo4j_context = ans.get("neo4j_context")
+                    if neo4j_context:
+                        # For caption/footnote elements, add parent image/table context
+                        parent_element = neo4j_context.get("parent_element")
+                        if parent_element:
+                            parent_text = parent_element.get("text", "")
+                            if parent_text:
+                                context_parts.append(f"Related {parent_element.get('type', 'element')}: {parent_text}")
+
+                        # For image/table elements, add caption/footnote context
+                        sibling_captions = neo4j_context.get("sibling_captions", [])
+                        for cap in sibling_captions:
+                            cap_text = cap.get("text", "")
+                            if cap_text:
+                                context_parts.append(f"Caption: {cap_text}")
+
+                        sibling_footnotes = neo4j_context.get("sibling_footnotes", [])
+                        for fn in sibling_footnotes:
+                            fn_text = fn.get("text", "")
+                            if fn_text:
+                                context_parts.append(f"Footnote: {fn_text}")
 
                 # Combine all text context
                 if context_parts:
                     context = "\n\n".join(context_parts)
                     message.add_text_content(context)
-                    user_prompt = f"Вопрос: {question} Ответьте на вопрос, используя только информацию из контекста (текст и изображения)."""
+                    user_prompt = f"Вопрос: {question} Ответьте на вопрос, используя только информацию из контекста (текст и изображения)."
                     message.add_text_content(user_prompt)
 
                 # Call LLM

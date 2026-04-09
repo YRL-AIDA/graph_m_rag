@@ -207,7 +207,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 image_base64 = base64.b64encode(image_data).decode('utf-8')
 
                 # Compute embedding for the image
-                embedding = emb_client.get_image_embedding_base64(image_base64).messages[0]
+                embedding = emb_client.get_image_embedding_base64(image_base64)
 
                 # Prepare data for Qdrant
                 embeddings_list.append(embedding)
@@ -2031,6 +2031,220 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
         raise HTTPException(
             status_code=500,
             detail=f"Error getting bboxes: {str(e)}"
+        )
+
+@app.delete("/documents/{file_hash}", response_model=Dict[str, Any])
+def delete_document(file_hash: str):
+    """
+    Delete a document and all its related data from Qdrant, Neo4j, and MinIO
+
+    This endpoint removes:
+    - All points from Qdrant with matching file_hash
+    - Document graph from Neo4j
+    - All related files from MinIO (PDF, MinerU results, embeddings)
+
+    Args:
+        file_hash: Hash of the PDF file to delete
+
+    Returns:
+        Status of deletion operations
+    """
+    try:
+        results = {
+            "file_hash": file_hash,
+            "qdrant_deleted": False,
+            "neo4j_deleted": False,
+            "minio_deleted": False,
+            "minio_files_removed": 0
+        }
+
+        # Delete from Qdrant
+        try:
+            qdrant_success = qdrant_client.delete_points_by_file_hash(file_hash)
+            results["qdrant_deleted"] = qdrant_success
+            logger.info(f"Qdrant deletion for {file_hash}: {'success' if qdrant_success else 'failed'}")
+        except Exception as e:
+            logger.error(f"Error deleting from Qdrant: {e}")
+            results["qdrant_deleted"] = False
+
+        # Delete from Neo4j
+        if NEO4J_AVAILABLE:
+            try:
+                neo4j_service = DocumentIndexService()
+                neo4j_success = neo4j_service.delete_graph(file_hash)
+                neo4j_service.close()
+                results["neo4j_deleted"] = neo4j_success
+                logger.info(f"Neo4j deletion for {file_hash}: {'success' if neo4j_success else 'failed'}")
+            except Exception as e:
+                logger.error(f"Error deleting from Neo4j: {e}")
+                results["neo4j_deleted"] = False
+        else:
+            logger.warning("Neo4j not available, skipping Neo4j deletion")
+            results["neo4j_deleted"] = None
+
+        # Delete from MinIO
+        try:
+            # Remove PDF file
+            pdf_prefix = f"pdfs/{file_hash}"
+            minio_files_removed = 0
+
+            # Try to remove PDF
+            existing_pdf_objects = minio_client.list_objects(
+                bucket_name=minio_client.bucket_name,
+                prefix=pdf_prefix
+            )
+            for obj_path in existing_pdf_objects:
+                try:
+                    minio_client.remove_object(bucket_name=minio_client.bucket_name, object_name=obj_path)
+                    minio_files_removed += 1
+                    logger.info(f"Removed PDF object: {obj_path}")
+                except Exception as e:
+                    logger.warning(f"Could not remove PDF object {obj_path}: {e}")
+
+            # Remove MinerU results
+            mineru_prefix = f"mineru_results/{file_hash}"
+            existing_mineru_objects = minio_client.list_objects(
+                bucket_name=minio_client.bucket_name,
+                prefix=mineru_prefix
+            )
+            for obj_path in existing_mineru_objects:
+                try:
+                    minio_client.remove_object(bucket_name=minio_client.bucket_name, object_name=obj_path)
+                    minio_files_removed += 1
+                    logger.info(f"Removed MinerU result object: {obj_path}")
+                except Exception as e:
+                    logger.warning(f"Could not remove MinerU object {obj_path}: {e}")
+
+            # Remove embeddings
+            embeddings_prefix = f"embeddings/{file_hash}"
+            existing_embeddings_objects = minio_client.list_objects(
+                bucket_name=minio_client.bucket_name,
+                prefix=embeddings_prefix
+            )
+            for obj_path in existing_embeddings_objects:
+                try:
+                    minio_client.remove_object(bucket_name=minio_client.bucket_name, object_name=obj_path)
+                    minio_files_removed += 1
+                    logger.info(f"Removed embedding object: {obj_path}")
+                except Exception as e:
+                    logger.warning(f"Could not remove embedding object {obj_path}: {e}")
+
+            results["minio_deleted"] = minio_files_removed > 0
+            results["minio_files_removed"] = minio_files_removed
+            logger.info(f"MinIO deletion for {file_hash}: removed {minio_files_removed} files")
+        except Exception as e:
+            logger.error(f"Error deleting from MinIO: {e}")
+            results["minio_deleted"] = False
+
+        # Check overall success
+        all_success = (
+            results["qdrant_deleted"] and
+            (results["neo4j_deleted"] is None or results["neo4j_deleted"]) and
+            results["minio_deleted"]
+        )
+
+        results["status"] = "success" if all_success else "partial"
+
+        return results
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting document {file_hash}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error deleting document: {str(e)}"
+        )
+
+
+@app.delete("/documents/all", response_model=Dict[str, Any])
+def delete_all_documents():
+    """
+    Delete ALL documents and their related data from Qdrant, Neo4j, and MinIO
+
+    WARNING: This is a destructive operation that will remove all indexed documents!
+
+    This endpoint removes:
+    - All points from Qdrant collection
+    - All document graphs from Neo4j
+    - All files from MinIO (PDFs, MinerU results, embeddings)
+
+    Returns:
+        Status of deletion operations
+    """
+    try:
+        results = {
+            "qdrant_deleted": False,
+            "neo4j_deleted": False,
+            "minio_deleted": False,
+            "minio_files_removed": 0,
+            "warning": "This operation deleted ALL documents from the system"
+        }
+
+        # Delete all from Qdrant
+        try:
+            qdrant_success = qdrant_client.delete_all_points()
+            results["qdrant_deleted"] = qdrant_success
+            logger.info(f"Qdrant delete all: {'success' if qdrant_success else 'failed'}")
+        except Exception as e:
+            logger.error(f"Error deleting all from Qdrant: {e}")
+            results["qdrant_deleted"] = False
+
+        # Delete all from Neo4j
+        if NEO4J_AVAILABLE:
+            try:
+                neo4j_service = DocumentIndexService()
+                neo4j_success = neo4j_service.delete_all_graphs()
+                neo4j_service.close()
+                results["neo4j_deleted"] = neo4j_success
+                logger.info(f"Neo4j delete all: {'success' if neo4j_success else 'failed'}")
+            except Exception as e:
+                logger.error(f"Error deleting all from Neo4j: {e}")
+                results["neo4j_deleted"] = False
+        else:
+            logger.warning("Neo4j not available, skipping Neo4j deletion")
+            results["neo4j_deleted"] = None
+
+        # Delete all from MinIO - remove all objects
+        try:
+            all_objects = minio_client.list_objects(bucket_name=minio_client.bucket_name)
+            minio_files_removed = 0
+
+            for obj_path in all_objects:
+                try:
+                    # Only remove objects in our managed prefixes
+                    if obj_path.startswith("pdfs/") or obj_path.startswith("mineru_results/") or obj_path.startswith("embeddings/"):
+                        minio_client.remove_object(bucket_name=minio_client.bucket_name, object_name=obj_path)
+                        minio_files_removed += 1
+                        logger.info(f"Removed object: {obj_path}")
+                except Exception as e:
+                    logger.warning(f"Could not remove object {obj_path}: {e}")
+
+            results["minio_deleted"] = minio_files_removed > 0
+            results["minio_files_removed"] = minio_files_removed
+            logger.info(f"MinIO delete all: removed {minio_files_removed} files")
+        except Exception as e:
+            logger.error(f"Error deleting all from MinIO: {e}")
+            results["minio_deleted"] = False
+
+        # Check overall success
+        all_success = (
+            results["qdrant_deleted"] and
+            (results["neo4j_deleted"] is None or results["neo4j_deleted"]) and
+            results["minio_deleted"]
+        )
+
+        results["status"] = "success" if all_success else "partial"
+
+        return results
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting all documents: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error deleting all documents: {str(e)}"
         )
 
 

@@ -161,6 +161,31 @@ class Manager:
             logger.error(f"Error deleting document '{name}': {e}")
             return False
 
+    def delete_all_documents(self) -> bool:
+        """Delete all documents and all related nodes from the database.
+
+        Returns:
+            True if all documents were deleted, False otherwise
+        """
+        try:
+            query = """
+               MATCH (d:Document) -[:ORDER*]-> (n), () -[r:PARENT]-> (n)
+               WITH d, n, r, relationships(path) AS order_rels
+               FOREACH (rel IN order_rels | DELETE rel)
+               DELETE r, d, n
+               """
+            # Alternative simpler approach - delete everything
+            query = """
+               MATCH (n)
+               DETACH DELETE n
+               """
+            self.query(query)
+            logger.info("Deleted all documents from database")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting all documents: {e}")
+            return False
+
     def query(self, query: str) -> list:
         """Execute a Cypher query on the database.
 

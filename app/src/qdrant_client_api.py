@@ -261,6 +261,74 @@ class QdrantClientWrapper:
             logger.error(f"Error saving embeddings to Qdrant: {e}")
             return False
 
+    def delete_points_by_filter(self, filter_condition: models.Filter) -> bool:
+        """
+        Удаляет точки по фильтру (например, по file_hash)
+
+        Args:
+            filter_condition: Фильтр для выбора точек на удаление
+
+        Returns:
+            True если успешно, False иначе
+        """
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.FilterSelector(
+                    filter=filter_condition
+                )
+            )
+            logger.info(f"Deleted points by filter from collection {self.collection_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting points by filter: {e}")
+            return False
+
+    def delete_points_by_file_hash(self, file_hash: str) -> bool:
+        """
+        Удаляет все точки, связанные с документом по его hash
+
+        Args:
+            file_hash: Hash файла документа
+
+        Returns:
+            True если успешно, False иначе
+        """
+        filter_condition = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="file_hash",
+                    match=models.MatchValue(value=file_hash)
+                )
+            ]
+        )
+        return self.delete_points_by_filter(filter_condition)
+
+    def delete_all_points(self) -> bool:
+        """
+        Удаляет все точки из коллекции
+
+        Returns:
+            True если успешно, False иначе
+        """
+        try:
+            # Создаем фильтр, который соответствует всем точкам
+            filter_condition = models.Filter(
+                must=[],
+                must_not=[]
+            )
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.FilterSelector(
+                    filter=filter_condition
+                )
+            )
+            logger.info(f"Deleted all points from collection {self.collection_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting all points: {e}")
+            return False
+
 
 def get_qdrant_client(collection_name: Optional[str] = None) -> QdrantClientWrapper:
     """
@@ -270,6 +338,7 @@ def get_qdrant_client(collection_name: Optional[str] = None) -> QdrantClientWrap
         collection_name: Имя коллекции для использования. Если не указано, используется коллекция по умолчанию.
     """
     return QdrantClientWrapper(collection_name=collection_name)
+
 
 
 # Пример использования

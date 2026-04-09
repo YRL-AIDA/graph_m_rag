@@ -30,8 +30,9 @@ class Style:
 
 
 class Region:
-    def __init__(self, text:str, bbox:BBox, style:Style, order:int, label:str, element_data:str):
+    def __init__(self, text:str, image: str, bbox:BBox, style:Style, order:int, label:str, element_data:str):
         self.text = text
+        self.image = image
         self.bbox = bbox
         self.style = style
         self.order = order
@@ -46,5 +47,6 @@ class Region:
         return {
             "label": self.label,
             "text": self.text,
+            "image_path": self.image,
             "element_data": self.element_data
         }

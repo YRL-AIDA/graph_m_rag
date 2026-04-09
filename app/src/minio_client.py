@@ -222,3 +222,31 @@ class MinioClient:
         except S3Error as e:
             self.logger.error(f"Error generating presigned URL for {object_name}: {e}")
             raise
+
+    def remove_objects_by_prefix(self, bucket_name: str = None, prefix: str = None) -> int:
+        """Remove all objects with a given prefix from bucket
+
+        Args:
+            bucket_name: Bucket name (default: self.bucket_name)
+            prefix: Prefix to filter objects
+
+        Returns:
+            Number of objects removed
+        """
+        if bucket_name is None:
+            bucket_name = self.bucket_name
+
+        if prefix is None:
+            raise ValueError("prefix is required")
+
+        try:
+            objects = self.client.list_objects(bucket_name, prefix=prefix, recursive=True)
+            count = 0
+            for obj in objects:
+                self.client.remove_object(bucket_name, obj.object_name)
+                count += 1
+            self.logger.info(f"Removed {count} objects with prefix '{prefix}' from {bucket_name}")
+            return count
+        except S3Error as e:
+            self.logger.error(f"Error removing objects with prefix {prefix} from {bucket_name}: {e}")
+            raise

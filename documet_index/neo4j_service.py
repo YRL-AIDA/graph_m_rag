@@ -145,6 +145,22 @@ class DocumentIndexService:
         """Context manager exit."""
         self.close()
 
+    def delete_all_graphs(self) -> bool:
+        """Delete all document graphs from Neo4j.
+
+        Returns:
+            True if all graphs were deleted successfully, False otherwise
+        """
+        try:
+            success = self.manager.delete_all_documents()
+            if success:
+                logger.info("Successfully deleted all graphs from database")
+            else:
+                logger.warning("Failed to delete all graphs from database")
+            return success
+        except Exception as e:
+            logger.error(f"Failed to delete all graphs: {e}")
+            raise
 
 # Convenience function for creating graph from MinerU result
 def create_neo4j_graph(mineru_result: Dict[str, Any], file_hash: str) -> bool:

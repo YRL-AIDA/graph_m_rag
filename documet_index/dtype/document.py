@@ -159,12 +159,15 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
 
         # Handle text elements - check for text_level to determine if it's a title
         if element_type == "text":
+            if element.get("text") == "":
+                continue
             text_level = element.get("text_level")
             if text_level == 1:
                 # This is a title
                 text = element.get("text", "")
                 regions.append(Region(
                     text=f"Title: {text}",
+                    image="",
                     bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
                     style=Style(-1),
                     order=element_index,
@@ -178,6 +181,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                 if text.strip():
                     regions.append(Region(
                         text=f"Text: {text}",
+                        image="",
                         bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
                         style=Style(-1),
                         order=element_index,
@@ -194,7 +198,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
 
             # Main image node
             regions.append(Region(
-                text=f"Image: {img_path}",
+                text=f"",
+                image=img_path,
                 bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
                 style=Style(-1),
                 order=element_index,
@@ -208,6 +213,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                 caption_text = " ".join(image_captions)
                 regions.append(Region(
                     text=f"Image Caption: {caption_text}",
+                    image=img_path,
                     bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
                     style=Style(-1),
                     order=element_index,
@@ -221,6 +227,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                 footnote_text = " ".join(image_footnotes)
                 regions.append(Region(
                     text=f"Image Footnote: {footnote_text}",
+                    image=img_path,
                     bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
                     style=Style(-1),
                     order=element_index,
@@ -237,11 +244,16 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
             table_body = element.get("table_body", "")
 
             # Main table node
-            table_text = f"Table: {img_path}"
+            table_text = f"Table: "
+            if table_captions:
+                table_text += f" | {table_captions}"
             if table_body:
-                table_text += f" | {table_body[:200]}"
+                table_text += f" | {table_body}"
+            if table_footnotes:
+                table_text += f" | {table_footnotes}"
             regions.append(Region(
                 text=table_text,
+                image=img_path,
                 bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
                 style=Style(-1),
                 order=element_index,
@@ -255,6 +267,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                 caption_text = " ".join(table_captions)
                 regions.append(Region(
                     text=f"Table Caption: {caption_text}",
+                    image=img_path,
                     bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
                     style=Style(-1),
                     order=element_index,
@@ -268,6 +281,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                 footnote_text = " ".join(table_footnotes)
                 regions.append(Region(
                     text=f"Table Footnote: {footnote_text}",
+                    image=img_path,
                     bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
                     style=Style(-1),
                     order=element_index,
@@ -282,6 +296,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
             if text.strip():
                 regions.append(Region(
                     text=f"Equation: {text}",
+                    image="",
                     bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
                     style=Style(-1),
                     order=element_index,
@@ -296,6 +311,7 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
             if text.strip():
                 regions.append(Region(
                     text=f"{element_type}: {text}",
+                    image="",
                     bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
                     style=Style(-1),
                     order=element_index,

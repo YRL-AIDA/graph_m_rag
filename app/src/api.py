@@ -1355,6 +1355,21 @@ def ask_document(request: QuestionRequest):
                                     parent_answer["image_base64"] = base64.b64encode(image_data).decode('utf-8')
                                 except Exception as e:
                                     logger.warning(f"Failed to download parent image {parent_element.get('image')}: {e}")
+                                    # Download image for caption if parent element has image
+                                    parent_element_for_caption = related_context.get("parent_element")
+                                    if parent_element_for_caption and parent_element_for_caption.get(
+                                            "type") == "image" and parent_element_for_caption.get("image"):
+                                        try:
+                                            image_data = minio_client.get_object(
+                                                bucket_name=minio_client.bucket_name,
+                                                object_name=parent_element_for_caption["image"]
+                                            )
+                                            caption_answer["image_base64"] = base64.b64encode(image_data).decode(
+                                                'utf-8')
+                                            caption_answer["img_path"] = parent_element_for_caption["image"]
+                                        except Exception as e:
+                                            logger.warning(
+                                                f"Failed to download image for caption {parent_element_for_caption.get('image')}: {e}")
 
                             answers.append(parent_answer)
                             logger.debug(f"Added parent element answer: {parent_element.get('type')}")

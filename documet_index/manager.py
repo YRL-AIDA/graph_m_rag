@@ -1,6 +1,7 @@
 from neo4j import GraphDatabase
 from typing import Optional, Dict, Any
 import logging
+import json
 
 from .dtype import Document
 
@@ -99,9 +100,24 @@ class Manager:
             for id, reg in graph['nodes']['regions'].items():
                 label = reg['label']
                 text = reg['text']
-                # Escape single quotes in text
-                text_escaped = text.replace("'", "\\'")
-                query += f"CREATE (reg{id}:Region:{label} {{text: '{text_escaped}'}})\n"
+                image = reg.get('image', '')
+                bbox = reg.get('bbox', {})
+                style = reg.get('style', {})
+                order = reg.get('order', 0)
+                element_data = reg.get('element_data', '')
+
+                # Escape single quotes in text fields
+                text_escaped = text.replace("'", "\\'") if text else ''
+                image_escaped = image.replace("'", "\\'") if image else ''
+                element_data_escaped = str(element_data).replace("'", "\\'") if element_data else ''
+
+                # Convert bbox and style to JSON strings for storage
+                bbox_json = json.dumps(bbox) if bbox else '{}'
+                style_json = json.dumps(style) if style else '{}'
+
+                query += (f"CREATE (reg{id}:Region:{label} {{text: '{text_escaped}', image: '{image_escaped}', "
+                          f"bbox: '{bbox_json}', style: '{style_json}', order: {order}, element_data: "
+                          f"'{element_data_escaped}'}})\n")
 
             for order in graph['edges']['order']:
                 n1, n2 = order

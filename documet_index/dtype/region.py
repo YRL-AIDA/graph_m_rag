@@ -47,6 +47,17 @@ class Region:
         return {
             "label": self.label,
             "text": self.text,
-            "image_path": self.image,
+            "image": self.image,
+            "bbox": {
+                "x1": self.bbox.x1,
+                "y1": self.bbox.y1,
+                "x2": self.bbox.x2,
+                "y2": self.bbox.y2
+            } if self.bbox else {},
+            "style": {
+                "font_size": self.style.font_size,
+                "error_rate": self.style.error_rate
+            } if self.style else {},
+            "order": self.order,
             "element_data": self.element_data
         }

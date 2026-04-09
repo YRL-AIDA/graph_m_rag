@@ -61,6 +61,20 @@ class EmbeddingClient:
         except Exception as e:
             raise ValueError(f"Invalid response format: {e}") from e
 
+    def get_image_text_embedding_base64(self, text, image_base64: str) -> EmbedSuccessResponse:
+        image_base64 = f"data:image/jpeg;base64,{image_base64}"
+        message = Message(type="image/text", text=text, image=image_base64)
+        request_payload = EmbedRequest(messages=[message]).model_dump()  # or .dict() for older Pydantic
+        url = f"{self.base_url}/embed"  # adjust the endpoint path as needed
+        response = requests.post(url, json=request_payload, timeout=self.timeout)
+        response.raise_for_status()  # raise exception for HTTP errors
+        result = EmbedSuccessResponse.model_validate(response.json()).messages[0].embedding
+
+        try:
+            return result  # or .parse_obj() for older Pydantic
+        except Exception as e:
+            raise ValueError(f"Invalid response format: {e}") from e
+
     def get_image_embedding_base64(self, image_base64: str) -> EmbedSuccessResponse:
         image_base64 = f"data:image/jpeg;base64,{image_base64}"
         message = Message(type="image", image=image_base64)

@@ -15,6 +15,11 @@ class Message(BaseModel):
         self.text = text
         return self
 
+    def set_type(self, type: str)-> 'Message':
+        self.type = 'text'
+        return self
+
+
     def add_img_content(self, source: str = 'image_url', path_to_img: str = None, url: str = None)-> 'Message':
         match source:
             case 'image_url':

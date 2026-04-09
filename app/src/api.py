@@ -205,9 +205,15 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
 
                 # Get image as bytes
                 image_base64 = base64.b64encode(image_data).decode('utf-8')
-
+                caption_text = " ".join(image_captions) if image_captions else ""
+                footnote_text = " ".join(image_footnotes) if image_footnotes else ""
+                text = f'Figure | Image:'
+                if caption_text:
+                    text = f'{text} | {caption_text}'
+                if footnote_text:
+                    text = f'{text} | {footnote_text}'
                 # Compute embedding for the image
-                embedding = emb_client.get_image_embedding_base64(image_base64)
+                embedding = emb_client.get_image_text_embedding_base64(text, image_base64)
 
                 # Prepare data for Qdrant
                 embeddings_list.append(embedding)
@@ -1310,8 +1316,20 @@ def ask_document(request: QuestionRequest):
                         bucket_name=minio_client.bucket_name,
                         object_name=answer["img_path"]
                     )
+                    image_captions = original_element.get("image_caption", [])
+                    image_footnotes = original_element.get("image_footnote", [])
+                    caption_text = " ".join(image_captions) if image_captions else ""
+                    footnote_text = " ".join(image_footnotes) if image_footnotes else ""
+                    text = f'Figure | Image:'
+                    if caption_text:
+                        text = f'{text} | {caption_text}'
+                    if footnote_text:
+                        text = f'{text} | {footnote_text}'
                     answer["image_base64"] = base64.b64encode(image_data).decode('utf-8')
                     message.add_img_content_base64(answer["image_base64"])
+                    message.add_text_content(text)
+                    message.set_type('image/text')
+
                 except Exception as e:
                     logger.error(f"Failed to download image {answer['img_path']}: {e}")
             else:

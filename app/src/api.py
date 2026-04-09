@@ -1316,7 +1316,8 @@ def ask_document(request: QuestionRequest):
                 "img_path": original_element.get("img_path", None),  # Store img_path for images and tables
                 "image_base64": None,  # Will be populated for image and table elements
                 "bbox": original_element.get("bbox", None),  # Store bbox for visualization
-                "neo4j_context": None  # Will store related context from Neo4j
+                "neo4j_context": None,  # Will store related context from Neo4j
+                "is_related_context": False  # Flag to indicate if this is a related context answer
             }
 
             # Enrich with Neo4j context for image/table related elements
@@ -1355,21 +1356,6 @@ def ask_document(request: QuestionRequest):
                                     parent_answer["image_base64"] = base64.b64encode(image_data).decode('utf-8')
                                 except Exception as e:
                                     logger.warning(f"Failed to download parent image {parent_element.get('image')}: {e}")
-                                    # Download image for caption if parent element has image
-                                    parent_element_for_caption = related_context.get("parent_element")
-                                    if parent_element_for_caption and parent_element_for_caption.get(
-                                            "type") == "image" and parent_element_for_caption.get("image"):
-                                        try:
-                                            image_data = minio_client.get_object(
-                                                bucket_name=minio_client.bucket_name,
-                                                object_name=parent_element_for_caption["image"]
-                                            )
-                                            caption_answer["image_base64"] = base64.b64encode(image_data).decode(
-                                                'utf-8')
-                                            caption_answer["img_path"] = parent_element_for_caption["image"]
-                                        except Exception as e:
-                                            logger.warning(
-                                                f"Failed to download image for caption {parent_element_for_caption.get('image')}: {e}")
 
                             answers.append(parent_answer)
                             logger.debug(f"Added parent element answer: {parent_element.get('type')}")
@@ -1378,14 +1364,45 @@ def ask_document(request: QuestionRequest):
                         for caption in related_context.get("sibling_captions", []):
                             caption_text = caption.get("text", "")
                             if caption_text:
+                                # Get image from parent element if available
+                                img_path_for_caption = None
+                                image_base64_for_caption = None
+
+                                # Try to get image from the original element or parent element
+                                if element_type in ("image_caption", "image_footnote"):
+                                    # For caption/footnote, get image from parent_element
+                                    if parent_element and parent_element.get("type") == "image":
+                                        img_path_for_caption = parent_element.get("image")
+                                elif element_type in ("table_caption", "table_footnote"):
+                                    # For table caption/footnote, get image from parent_element
+                                    if parent_element and parent_element.get("type") == "table":
+                                        img_path_for_caption = parent_element.get("image")
+                                elif element_type == "image":
+                                    # For image element, use its own img_path
+                                    img_path_for_caption = original_element.get("img_path")
+                                elif element_type == "table":
+                                    # For table element, use its own img_path
+                                    img_path_for_caption = original_element.get("img_path")
+
+                                # Download image if we have a path
+                                if img_path_for_caption:
+                                    try:
+                                        image_data = minio_client.get_object(
+                                            bucket_name=minio_client.bucket_name,
+                                            object_name=img_path_for_caption
+                                        )
+                                        image_base64_for_caption = base64.b64encode(image_data).decode('utf-8')
+                                    except Exception as e:
+                                        logger.warning(f"Failed to download image {img_path_for_caption} for caption: {e}")
+
                                 caption_answer = {
                                     "text": caption_text,
                                     "score": result.score * 0.85,
-                                    "element_type": f"{element_type}_caption",
+                                    "element_type": "image_caption" if element_type.startswith("image") else "table_caption",
                                     "element_index": payload.get("element_index", 0),
                                     "page_idx": original_element.get("page_idx", 0) if original_element else 0,
-                                    "img_path": original_element.get("img_path", None),
-                                    "image_base64": None,
+                                    "img_path": img_path_for_caption,
+                                    "image_base64": image_base64_for_caption,
                                     "bbox": original_element.get("bbox", None),
                                     "neo4j_context": None,
                                     "is_related_context": True,
@@ -1398,14 +1415,45 @@ def ask_document(request: QuestionRequest):
                         for footnote in related_context.get("sibling_footnotes", []):
                             footnote_text = footnote.get("text", "")
                             if footnote_text:
+                                # Get image from parent element if available
+                                img_path_for_footnote = None
+                                image_base64_for_footnote = None
+
+                                # Try to get image from the original element or parent element
+                                if element_type in ("image_caption", "image_footnote"):
+                                    # For caption/footnote, get image from parent_element
+                                    if parent_element and parent_element.get("type") == "image":
+                                        img_path_for_footnote = parent_element.get("image")
+                                elif element_type in ("table_caption", "table_footnote"):
+                                    # For table caption/footnote, get image from parent_element
+                                    if parent_element and parent_element.get("type") == "table":
+                                        img_path_for_footnote = parent_element.get("image")
+                                elif element_type == "image":
+                                    # For image element, use its own img_path
+                                    img_path_for_footnote = original_element.get("img_path")
+                                elif element_type == "table":
+                                    # For table element, use its own img_path
+                                    img_path_for_footnote = original_element.get("img_path")
+
+                                # Download image if we have a path
+                                if img_path_for_footnote:
+                                    try:
+                                        image_data = minio_client.get_object(
+                                            bucket_name=minio_client.bucket_name,
+                                            object_name=img_path_for_footnote
+                                        )
+                                        image_base64_for_footnote = base64.b64encode(image_data).decode('utf-8')
+                                    except Exception as e:
+                                        logger.warning(f"Failed to download image {img_path_for_footnote} for footnote: {e}")
+
                                 footnote_answer = {
                                     "text": footnote_text,
                                     "score": result.score * 0.85,
-                                    "element_type": f"{element_type}_footnote",
+                                    "element_type": "image_footnote" if element_type.startswith("image") else "table_footnote",
                                     "element_index": payload.get("element_index", 0),
                                     "page_idx": original_element.get("page_idx", 0) if original_element else 0,
-                                    "img_path": original_element.get("img_path", None),
-                                    "image_base64": None,
+                                    "img_path": img_path_for_footnote,
+                                    "image_base64": image_base64_for_footnote,
                                     "bbox": original_element.get("bbox", None),
                                     "neo4j_context": None,
                                     "is_related_context": True,
@@ -1416,8 +1464,8 @@ def ask_document(request: QuestionRequest):
                 except Exception as e:
                     logger.warning(f"Failed to get Neo4j context for {element_type}: {e}")
 
-            # Download image data for image and table elements
-            if element_type in ("image") and answer["img_path"]:
+            # Download image data for image and table elements, or for caption/footnote with image reference
+            if element_type in ("image", "table") and answer["img_path"]:
                 try:
                     image_data = minio_client.get_object(
                         bucket_name=minio_client.bucket_name,
@@ -1439,6 +1487,20 @@ def ask_document(request: QuestionRequest):
 
                 except Exception as e:
                     logger.error(f"Failed to download image {answer['img_path']}: {e}")
+            elif element_type in ("image_caption", "image_footnote", "table_caption", "table_footnote") and answer.get("img_path"):
+                # For caption/footnote elements that have an associated image
+                try:
+                    image_data = minio_client.get_object(
+                        bucket_name=minio_client.bucket_name,
+                        object_name=answer["img_path"]
+                    )
+                    answer["image_base64"] = base64.b64encode(image_data).decode('utf-8')
+                    message.add_img_content_base64(answer["image_base64"])
+                    message.add_text_content(text)
+                    message.set_type('image/text')
+                except Exception as e:
+                    logger.warning(f"Failed to download image {answer['img_path']} for {element_type}: {e}")
+                    message.add_text_content(text)
             else:
                 message.add_text_content(text)
 
@@ -1493,8 +1555,8 @@ def ask_document(request: QuestionRequest):
                 for ans in answers:
                     element_type = ans.get("element_type", "")
 
-                    # Add image if available (for both image and table elements)
-                    if element_type in ("image") and ans.get("image_base64"):
+                    # Add image if available (for image, table, and caption/footnote elements)
+                    if element_type in ("image", "table", "image_caption", "image_footnote") and ans.get("image_base64"):
                         message.add_img_content_base64(ans["image_base64"])
 
                     # Add text content from the main answer

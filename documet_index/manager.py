@@ -233,7 +233,7 @@ class Manager:
                 # Look for an image node that comes before this caption/footnote in ORDER
                 query = f"""
                    MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (caption:Region:{element_type} {{text: '{text_escaped}'}})
-                   OPTIONAL MATCH (img:Region:image) -[:ORDER*]-> (caption)
+                   OPTIONAL MATCH (img:Region:image) -[:PARENT]-> (caption)
                    WHERE img.image IS NOT NULL AND img.image <> ''
                    WITH img, caption
                    ORDER BY caption.order - img.order ASC
@@ -254,7 +254,7 @@ class Manager:
             elif element_type in ("table_caption", "table_footnote"):
                 # Find the table that this caption/footnote belongs to
                 query = f"""
-                   MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (caption:Region:{element_type} {{text: '{text_escaped}'}})
+                   MATCH (d:Document {{name: '{file_hash}'}}) -[:PARENT*]-> (caption:Region:{element_type} {{text: '{text_escaped}'}})
                    OPTIONAL MATCH (tbl:Region:table) -[:ORDER*]-> (caption)
                    WHERE tbl.image IS NOT NULL AND tbl.image <> ''
                    WITH tbl, caption

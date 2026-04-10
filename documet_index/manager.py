@@ -232,16 +232,15 @@ class Manager:
                 # Find the image that this caption/footnote belongs to
                 # Look for an image node that comes before this caption/footnote in ORDER
                 query = f"""
-                   MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (caption:Region:{element_type} {{text: '{text_escaped}'}})
-                   OPTIONAL MATCH (img:Region:image) -[:PARENT]-> (caption)
-                   WHERE img.image IS NOT NULL AND img.image <> ''
-                   WITH img, caption
-                   ORDER BY caption.order - img.order ASC
-                   LIMIT 1
-                   RETURN img.text as text, img.image as image, img.bbox as bbox, img.element_data as element_data
-                   """
+                        MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (caption:Region:{element_type} {{text: '{text_escaped}'}})
+                        OPTIONAL MATCH (d) -[:ORDER*]-> (img:Region:image) -[:ORDER*]-> (caption)
+                        WITH img, caption
+                        ORDER BY caption.order - img.order ASC
+                        LIMIT 1
+                        RETURN img.text as text, img.image as image, img.bbox as bbox, img.element_data as element_data
+                        """
                 result = self.query(query)
-                if result and result[0].data().get('text'):
+                if result:
                     data = result[0].data()
                     related_context["parent_element"] = {
                         "type": "image",

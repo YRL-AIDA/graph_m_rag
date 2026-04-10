@@ -1321,7 +1321,9 @@ def ask_document(request: QuestionRequest):
             }
 
             # Enrich with Neo4j context for image/table related elements
-            if neo4j_service and element_type in ("image", "table", "image_caption", "image_footnote", "table_caption", "table_footnote"):
+            if neo4j_service and element_type in ("image", "table", "image_caption", "image_footnote", "table_caption",
+                                                  "table_footnote"):
+            #if neo4j_service and element_type in ("image_caption", "image_footnote"):
                 try:
                     related_context = neo4j_service.get_related_context(file_hash, element_type, text)
                     if related_context and (related_context.get("parent_element") or related_context.get("sibling_captions") or related_context.get("sibling_footnotes")):
@@ -1465,7 +1467,7 @@ def ask_document(request: QuestionRequest):
                     logger.warning(f"Failed to get Neo4j context for {element_type}: {e}")
 
             # Download image data for image and table elements, or for caption/footnote with image reference
-            if element_type in ("image", "table") and answer["img_path"]:
+            if element_type in ("image") and answer["img_path"]:
                 try:
                     image_data = minio_client.get_object(
                         bucket_name=minio_client.bucket_name,

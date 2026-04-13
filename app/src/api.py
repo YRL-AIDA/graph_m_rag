@@ -206,7 +206,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 image_base64 = base64.b64encode(image_data).decode('utf-8')
                 caption_text = " ".join(image_captions) if image_captions else ""
                 footnote_text = " ".join(image_footnotes) if image_footnotes else ""
-                text = f'Figure | Image:'
+                text = f'Figure | Image | Chart:'
                 if caption_text:
                     text = f'{text} | {caption_text}'
                 if footnote_text:
@@ -1547,23 +1547,53 @@ def ask_document(request: QuestionRequest):
         llm_answer = None
         if use_llm and answers:
             try:
-                # Create messages for LLM with system prompt
-                message = ModelMessageDict(role='user')
-                system_prompt = "Вы помощник, который отвечает на вопросы на основе предоставленного контекста. Если ответ не найден в контексте, скажите об этом."
-                message.add_text_content(system_prompt)
+                # Create messages for LLM with proper structure for Qwen3VL-32B
+                # System message with detailed instructions
+                system_message = ModelMessageDict(role='system')
+                system_prompt = """Вы — интеллектуальный ассистент для анализа документов. Ваша задача — отвечать на вопросы пользователя, основываясь ИСКЛЮЧИТЕЛЬНО на предоставленном контексте (текст и изображения).
+
+ПРАВИЛА ОТВЕТА:
+1. Используйте ТОЛЬКО информацию из предоставленного контекста
+2. Если ответ не найден в контексте, честно сообщите: «В предоставленном контексте нет информации для ответа на этот вопрос»
+3. Для изображений, таблиц и диаграмм внимательно анализируйте визуальную информацию вместе с подписями
+4. Цитируйте конкретные фрагменты контекста при формулировке ответа
+5. Будьте точны и лаконичны
+6. Если контекст содержит противоречивую информацию, укажите на это
+7. Сохраняйте язык ответа таким же, как язык вопроса"""
+                system_message.add_text_content(system_prompt)
+
+                # User message with context and question
+                user_message = ModelMessageDict(role='user')
 
                 # Build context with text, images, and Neo4j-enriched context
                 context_parts = []
-                for ans in answers:
+
+                # First, add all images at the beginning for better model attention
+                for idx, ans in enumerate(answers):
                     element_type = ans.get("element_type", "")
 
                     # Add image if available (for image, table, and caption/footnote elements)
                     if element_type in ("image", "table", "image_caption", "image_footnote") and ans.get("image_base64"):
-                        message.add_img_content_base64(ans["image_base64"])
+                        user_message.add_img_content_base64(ans["image_base64"])
+                        # Add marker for image reference
+                        img_ref = f"[ИЗОБРАЖЕНИЕ | CHART | FIGURE | IMAGE {idx+1}: тип={element_type}]"
+                        if ans.get("text"):
+                            img_ref += f" | {ans['text']}"
+                        context_parts.append(img_ref)
+
+                # Add separator before text context
+                context_parts.append("--- КОНТЕКСТ ДОКУМЕНТА ---")
+
+                # Now add all text content with structured formatting
+                for idx, ans in enumerate(answers):
+                    element_type = ans.get("element_type", "")
 
                     # Add text content from the main answer
                     if ans.get("text"):
-                        context_parts.append(ans["text"])
+                        text_marker = f"[БЛОК {idx+1}]"
+                        if element_type:
+                            text_marker += f" (тип: {element_type})"
+                        context_parts.append(f"{text_marker}\n{ans['text']}")
 
                     # Add Neo4j context if available (for caption/footnote enrichment)
                     neo4j_context = ans.get("neo4j_context")
@@ -1573,31 +1603,48 @@ def ask_document(request: QuestionRequest):
                         if parent_element:
                             parent_text = parent_element.get("text", "")
                             if parent_text:
-                                context_parts.append(f"Related {parent_element.get('type', 'element')}: {parent_text}")
+                                context_parts.append(f"→ СВЯЗАННЫЙ ЭЛЕМЕНТ ({parent_element.get('type', 'element')}): {parent_text}")
 
                         # For image/table elements, add caption/footnote context
                         sibling_captions = neo4j_context.get("sibling_captions", [])
                         for cap in sibling_captions:
                             cap_text = cap.get("text", "")
                             if cap_text:
-                                context_parts.append(f"Caption: {cap_text}")
+                                context_parts.append(f"→ ПОДПИСЬ: {cap_text}")
 
                         sibling_footnotes = neo4j_context.get("sibling_footnotes", [])
                         for fn in sibling_footnotes:
                             fn_text = fn.get("text", "")
                             if fn_text:
-                                context_parts.append(f"Footnote: {fn_text}")
+                                context_parts.append(f"→ СНОСКА: {fn_text}")
+
+                # Add end marker
+                context_parts.append("--- КОНЕЦ КОНТЕКСТА ---")
 
                 # Combine all text context
                 if context_parts:
                     context = "\n\n".join(context_parts)
-                    message.add_text_content(context)
-                    user_prompt = f"Вопрос: {question} Ответьте на вопрос, используя только информацию из контекста (текст и изображения)."
-                    message.add_text_content(user_prompt)
+                    user_message.add_text_content(context)
 
-                # Call LLM
+                    # Formulate clear question with instructions
+                    user_prompt = f"""
+--- ВОПРОС ПОЛЬЗОВАТЕЛЯ ---
+{question}
+
+--- ИНСТРУКЦИЯ ---
+Проанализируйте предоставленные выше изображения и текстовый контекст.
+Дайте полный, точный ответ на вопрос, используя ТОЛЬКО информацию из контекста.
+Если в контексте есть изображения/таблицы, относящиеся к вопросу, обязательно учтите их при формировании ответа.
+
+ОТВЕТ:"""
+                    user_message.add_text_content(user_prompt)
+
+                # Call LLM with optimized parameters for Qwen3VL-32B
                 success, llm_responses = llm_client.send_message(
-                    messages=[message]
+                    messages=[system_message, user_message],
+                    max_tokens=9182,
+                    temperature=0.3,
+                    top_p=0.9
                 )
 
                 if success and llm_responses:

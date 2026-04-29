@@ -9,6 +9,8 @@ import os
 from manager import Manager, ManagerConfig
 from dtype import DocumentRequest,EntitiesRequest, EntitiesResponse,RelationshipCreate,EntityCreate
 from fastapi import FastAPI, HTTPException
+import asyncio
+
 load_dotenv()
 import sys
 from pathlib import Path
@@ -23,7 +25,7 @@ config = ManagerConfig(
 doc_manager = Manager(config)
 # Импортируем только нужные функции из нашего обновленного модуля
 # (предполагается, что файл называется graphrag.py)
-from graphrag import run_extraction_pipeline
+from graphrag import run_extraction_pipeline_async
 
 from Qdrant_extractor.config import QDRANT_URL, QDRANT_API_KEY
 from Qdrant_extractor.dataframe_builder import build_chunks_dataframe
@@ -59,31 +61,32 @@ def _build_response(doc_id: str, total_chunks: int, start_time: float, status: s
 
 # --- Эндпоинт ---
 @app.post("/process-document")
-def process_document(request: DocumentRequest) -> Dict[str, Any]:
+async def process_document(request: DocumentRequest) -> Dict[str, Any]:
     start_time = time.time()
     doc_id = request.document_id
     logger.info(f"Starting processing for document: {doc_id}")
 
-    # 1. Загрузка данных из Qdrant
+    # 1. Загрузка данных
+    # ВАЖНО: Если build_chunks_dataframe - это блокирующая I/O операция,
+    # ее тоже нужно запускать в отдельном потоке, чтобы не блокировать цикл событий.
     try:
         adapter = QdrantStreamAdapter(base_url=QDRANT_URL, api_key=QDRANT_API_KEY)
+        # Запускаем синхронный код в потоке, чтобы не блокировать event loop
         df = build_chunks_dataframe(adapter, doc_id=doc_id)
     except Exception as e:
         logger.error(f"Failed to load data from Qdrant: {e}")
         raise HTTPException(status_code=500, detail="Qdrant connection error")
 
     if df.empty:
-        logger.warning(f"No chunks found for document: {doc_id}")
         raise HTTPException(status_code=404, detail="Document not found or empty")
 
-    # Подготовка DataFrame
     input_df = df[['chunk_id', 'text']].rename(columns={'chunk_id': 'id'})
     total_chunks = input_df.shape[0]
-    logger.info(f"Loaded {total_chunks} chunks for document {doc_id}")
 
-    # 2. Извлечение и суммаризация графа знаний
+    # 2. Извлечение и суммаризация графа знаний (ИЗМЕНЕНИЕ)
     try:
-        entities, relationships = run_extraction_pipeline(
+        # Просто используем await, так как мы в async-функции
+        entities, relationships = await run_extraction_pipeline_async(
             text_units=input_df,
             extraction_model=MODEL_NAME,
             summarization_model=MODEL_NAME,
@@ -93,17 +96,19 @@ def process_document(request: DocumentRequest) -> Dict[str, Any]:
             max_input_tokens=8000
         )
     except ValueError as e:
-        # Специфичная ошибка, когда LLM не нашла ни одной сущности
         logger.warning(f"Graph extraction yielded no results: {e}")
         return _build_response(doc_id, total_chunks, start_time, status='completed_without_entities')
     except Exception as e:
         logger.error(f"Error during graph extraction: {e}")
         raise HTTPException(status_code=500, detail="Graph extraction failed")
 
-    # 3. Сохранение в графовую БД (Neo4j)
+    # 3. Сохранение в графовую БД
+    # Аналогично пункту 1, если doc_manager.add_entities_batch - блокирующая операция
     try:
-        save_result = doc_manager.add_entities_batch(EntitiesRequest(entities= [EntityCreate(**ent) for ent in entities.to_dict(orient='records')],
-        relationships =  [RelationshipCreate(**rel) for rel in relationships.to_dict(orient='records')]))
+        save_result = doc_manager.add_entities_batch(
+            EntitiesRequest(entities=[EntityCreate(**ent) for ent in entities.to_dict(orient='records')],
+                            relationships=[RelationshipCreate(**rel) for rel in
+                                           relationships.to_dict(orient='records')]))
         neo4j_status = save_result if isinstance(save_result, EntitiesResponse) else {}
     except Exception as e:
         logger.error(f"Failed to save to Neo4j: {e}")

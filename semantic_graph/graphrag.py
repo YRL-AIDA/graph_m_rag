@@ -1,17 +1,17 @@
+import asyncio
 import html
 import json
 import logging
 import re
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
-
-import pandas as pd
+from typing import Any, Coroutine, Dict, List, Optional, Tuple, Union
 import requests
-from openai import OpenAI
+import aiohttp
+import pandas as pd
+from openai import AsyncOpenAI
 
 # --- Настройки логирования ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 # --- Константы и Промпты ---
 TOKENIZER_URL = "http://192.168.19.127:9886/tokenize"
 LLM_URL = 'http://192.168.19.127:9886/v1'
@@ -183,19 +183,39 @@ def remove_think_tags(text: str) -> str:
         logger.error(f"Error removing <think> tags: {e}")
     return text.strip()
 
-# --- Клиент LLM и Токенизатор ---
 
-class LLMClient:
-    """Обертка над OpenAI API и VLLM токенизатором для удобной работы."""
+class AsyncLLMClient:
+    """Асинхронная обертка над AsyncOpenAI и aiohttp для токенизатора."""
+
     def __init__(self, base_url: str = LLM_URL, tokenizer_url: str = TOKENIZER_URL, api_key: str = 'EMPTY'):
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.tokenizer_url = tokenizer_url
+        self._session: Optional[aiohttp.ClientSession] = None
 
-    def generate(self, messages: List[Dict[str, str]], model: str, **kwargs) -> Optional[str]:
-        """Отправляет запрос к LLM и возвращает очищенный текстовый ответ."""
+    async def __aenter__(self):
+        self._session = aiohttp.ClientSession()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._session:
+            await self._session.close()
+
+    @property
+    def session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            raise RuntimeError("AsyncLLMClient session not started. Use 'async with'.")
+        return self._session
+
+    async def generate(
+            self,
+            messages: List[Dict[str, str]],
+            model: str,
+            **kwargs
+    ) -> Optional[str]:
+        """Асинхронный вызов LLM. Принимает любые доп. параметры (как в твоем примере)."""
         try:
             logger.info(f"Generating content with model: {model}")
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 messages=messages,
                 model=model,
                 **kwargs
@@ -206,182 +226,193 @@ class LLMClient:
             logger.error(f"Failed to call LLM: {e}")
             return None
 
-    def count_tokens(self, text: str, model: str) -> int:
-        """Подсчитывает токены через удаленный endpoint."""
+    async def count_tokens(self, text: str, model: str) -> int:
+        """Асинхронный подсчет токенов."""
         try:
-            response = requests.post(
-                self.tokenizer_url,
-                json={"model": model, "prompt": text},
-                timeout=10
-            )
-            return response.json().get('count', len(text) // 4)
+            async with self.session.post(
+                    self.tokenizer_url,
+                    json={"model": model, "prompt": text},
+                    timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+                return data.get('count', len(text) // 4)
         except Exception as e:
             logger.warning(f"Token counting failed, using fallback. Error: {e}")
             return len(text) // 4 + 1
-
 # --- Извлечение Графа (Extraction) ---
+class AsyncGraphExtractor:
+    """Асинхронный класс для извлечения сущностей и связей из сырого текста."""
 
-class GraphExtractor:
-    """Класс для извлечения сущностей и связей из сырого текста."""
-    def __init__(self, llm_client: LLMClient, model: str, max_gleanings: int):
+    def __init__(self, llm_client: AsyncLLMClient, model: str, max_gleanings: int):
         self.llm = llm_client
         self.model = model
         self.max_gleanings = max_gleanings
 
-    def extract(self, text: str, entity_types: List[str], source_id: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    async def extract(self, text: str, entity_types: List[str], source_id: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         logger.info(f"Extracting graph for document ID: {source_id}")
-        
-        # 1. Основной запрос
+
         prompt = GRAPH_EXTRACTION_PROMPT.format(
             input_text=text,
             entity_types=",".join(entity_types)
         )
         messages = [{"role": "user", "content": prompt}]
-        
-        response_text = self.llm.generate(messages, self.model)
+
+        response_text = await self.llm.generate(messages, self.model)
         if not response_text:
             return self._empty_dfs()
 
         full_result = response_text
         messages.append({"role": "assistant", "content": response_text})
 
-        # 2. Gleaning (дополнительный сбор упущенных данных)
         for _ in range(self.max_gleanings):
             messages.append({"role": "user", "content": CONTINUE_PROMPT})
-            continuation = self.llm.generate(messages, self.model)
-            if not continuation:
+            continuation = await self.llm.generate(messages, self.model)
+            if not continuation or COMPLETION_DELIMITER in continuation:
+                full_result += continuation
                 break
-            
+
             full_result += continuation
             messages.append({"role": "assistant", "content": continuation})
-            
-            # Спрашиваем, нужно ли продолжать
+
             messages.append({"role": "user", "content": LOOP_PROMPT})
-            loop_decision = self.llm.generate(messages, self.model)
+            loop_decision = await self.llm.generate(messages, self.model, max_tokens=5)
             if not loop_decision or loop_decision.strip().upper() != "Y":
                 break
-        print(full_result)
+
         return self._parse_result(full_result, source_id)
 
+    # Методы _parse_result и _empty_dfs не выполняют I/O и остаются синхронными
     def _parse_result(self, result: str, source_id: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         entities, relationships = [], []
         records = [r.strip() for r in result.split(RECORD_DELIMITER)]
 
         for raw_record in records:
-            record = re.sub(r"^\(|\)$", "", raw_record.strip())
-            if not record or record == COMPLETION_DELIMITER:
+            record = re.sub(r"^$$|$$$", "", raw_record.strip())
+            if not record or COMPLETION_DELIMITER in record:
                 continue
 
-            record_attributes = record.split(TUPLE_DELIMITER)
+            # Убираем кавычки вокруг типов записей
+            record_attributes = [attr.strip().strip('"') for attr in record.split(TUPLE_DELIMITER)]
             record_type = record_attributes[0]
 
-            if record_type == '"entity"' and len(record_attributes) >= 4:
-                entity_name = clean_str(record_attributes[1].upper())
-                entity_type = clean_str(record_attributes[2].upper())
-                entity_description = clean_str(record_attributes[3])
+            if record_type == 'entity' and len(record_attributes) >= 4:
                 entities.append({
-                    "title": entity_name,
-                    "type": entity_type,
-                    "description": entity_description,
+                    "title": clean_str(record_attributes[1].upper()),
+                    "type": clean_str(record_attributes[2].upper()),
+                    "description": clean_str(record_attributes[3]),
                     "source_id": source_id,
                 })
-
-            if record_type == '"relationship"' and len(record_attributes) >= 5:
-                source = clean_str(record_attributes[1].upper())
-                target = clean_str(record_attributes[2].upper())
-                edge_description = clean_str(record_attributes[3])
+            elif record_type == 'relationship' and len(record_attributes) >= 5:
                 try:
                     weight = float(record_attributes[-1])
-                except ValueError:
+                except (ValueError, IndexError):
                     weight = 1.0
-
                 relationships.append({
-                    "source": source,
-                    "target": target,
-                    "description": edge_description,
+                    "source": clean_str(record_attributes[1].upper()),
+                    "target": clean_str(record_attributes[2].upper()),
+                    "description": clean_str(record_attributes[3]),
                     "source_id": source_id,
                     "weight": weight,
                 })
 
         entities_df = pd.DataFrame(entities) if entities else self._empty_dfs()[0]
         relationships_df = pd.DataFrame(relationships) if relationships else self._empty_dfs()[1]
-        
-        # Формируем составные ключи для связей
+
         if not entities_df.empty and not relationships_df.empty:
             entity_map = dict(zip(entities_df['title'], entities_df['type']))
             mask = relationships_df["source"].isin(entity_map) & relationships_df["target"].isin(entity_map)
             relationships_df = relationships_df[mask].reset_index(drop=True)
-            
-            relationships_df['source'] = relationships_df['source'].apply(lambda x: f"{x}|{entity_map[x]}")
-            relationships_df['target'] = relationships_df['target'].apply(lambda x: f"{x}|{entity_map[x]}")
-        print(entities_df,relationships_df)
+
+            relationships_df['source'] = relationships_df['source'].apply(lambda x: f"{x}|{entity_map.get(x, '')}")
+            relationships_df['target'] = relationships_df['target'].apply(lambda x: f"{x}|{entity_map.get(x, '')}")
+
         return entities_df, relationships_df
-    
+
     def _empty_dfs(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Возвращает пустые датафреймы нужной структуры."""
         return (
             pd.DataFrame(columns=["title", "type", "description", "source_id"]),
             pd.DataFrame(columns=["source", "target", "weight", "description", "source_id"])
         )
 
 
-# --- Суммаризация Описаний (Summarization) ---
+# --- АСИНХРОННАЯ Суммаризация Описаний ---
 
-class GraphSummarizer:
-    """Класс для объединения и суммаризации множественных описаний одной сущности/связи."""
-    def __init__(self, llm_client: LLMClient, model: str, max_summary_length: int, max_input_tokens: int):
+class AsyncGraphSummarizer:
+    """Асинхронный класс для объединения и суммаризации описаний."""
+
+    def __init__(self, llm_client: AsyncLLMClient, model: str, max_summary_length: int, max_input_tokens: int):
         self.llm = llm_client
         self.model = model
         self.max_summary_length = max_summary_length
         self.max_input_tokens = max_input_tokens
 
-    def summarize_all(self, entities_df: pd.DataFrame, relationships_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        logger.info("Starting summarization process...")
-        
-        node_descriptions = [
-            {"title": row.title, "description": self._summarize_item(row.title, list(set(row.description)))}
-            for row in entities_df.itertuples(index=False)
+    async def summarize_all(self, entities_df: pd.DataFrame, relationships_df: pd.DataFrame) -> Tuple[
+        pd.DataFrame, pd.DataFrame]:
+        logger.info("Starting async summarization process...")
+
+        # Создаем задачи для параллельной суммаризации
+        node_tasks = [
+            self._summarize_item(row.title, list(set(row.description)))
+            for row in entities_df.itertuples()
         ]
-        
-        edge_descriptions = [
-            {"source": row.source, "target": row.target, "description": self._summarize_item((row.source, row.target), list(set(row.description)))}
-            for row in relationships_df.itertuples(index=False)
+        edge_tasks = [
+            self._summarize_item((row.source, row.target), list(set(row.description)))
+            for row in relationships_df.itertuples()
         ]
 
-        return pd.DataFrame(node_descriptions), pd.DataFrame(edge_descriptions)
+        # Выполняем задачи параллельно
+        node_summary_list = await asyncio.gather(*node_tasks)
+        edge_summary_list = await asyncio.gather(*edge_tasks)
 
-    def _summarize_item(self, item_id: Union[str, Tuple[str, str]], descriptions: List[str]) -> str:
+        # Собираем результаты
+        summarized_entities = entities_df[['title']].copy()
+        summarized_entities['description'] = node_summary_list
+
+        summarized_relationships = relationships_df[['source', 'target']].copy()
+        summarized_relationships['description'] = edge_summary_list
+
+        return summarized_entities, summarized_relationships
+
+    async def _summarize_item(self, item_id: Union[str, Tuple[str, str]], descriptions: List[str]) -> str:
         if not descriptions:
             return ""
         if len(descriptions) == 1:
             return descriptions[0]
 
         descriptions = sorted(descriptions)
-        prompt_cost = self.llm.count_tokens(SUMMARIZE_PROMPT, self.model)
+        prompt_cost = await self.llm.count_tokens(SUMMARIZE_PROMPT, self.model)
         usable_tokens = self.max_input_tokens - prompt_cost
-        
+
         buffer = []
         result = ""
 
         for i, desc in enumerate(descriptions):
-            usable_tokens -= self.llm.count_tokens(desc, self.model)
+            usable_tokens -= await self.llm.count_tokens(desc, self.model)
             buffer.append(desc)
 
+            # Если токены закончились или это последняя итерация
             if (usable_tokens < 0 and len(buffer) > 1) or i == len(descriptions) - 1:
-                result = self._call_llm_summarize(item_id, buffer)
-                if i != len(descriptions) - 1:
-                    buffer = [result]
-                    usable_tokens = self.max_input_tokens - prompt_cost - self.llm.count_tokens(result, self.model)
+                # Если в буффере только один элемент после предыдущей суммаризации
+                current_text = buffer[0] if len(buffer) == 1 else await self._call_llm_summarize(item_id, buffer)
+
+                # Если это не конец, готовимся к следующему циклу
+                if i < len(descriptions) - 1:
+                    buffer = [current_text]
+                    token_cost = await self.llm.count_tokens(current_text, self.model)
+                    usable_tokens = self.max_input_tokens - prompt_cost - token_cost
+                else:  # Если это конец, то это и есть финальный результат
+                    result = current_text
 
         return result
 
-    def _call_llm_summarize(self, item_id: Union[str, Tuple[str, str]], descriptions: List[str]) -> str:
+    async def _call_llm_summarize(self, item_id: Union[str, Tuple[str, str]], descriptions: List[str]) -> str:
         prompt = SUMMARIZE_PROMPT.format(
             entity_name=json.dumps(item_id, ensure_ascii=False),
             description_list=json.dumps(descriptions, ensure_ascii=False),
             max_length=self.max_summary_length,
         )
-        response = self.llm.generate([{"role": "user", "content": prompt}], self.model)
+        response = await self.llm.generate([{"role": "user", "content": prompt}], self.model)
         return response or ""
 
 # --- Основной Пайплайн и Функции обработки данных ---
@@ -419,59 +450,83 @@ def filter_orphan_relationships(relationships: pd.DataFrame, entities: pd.DataFr
         logger.warning(f"Dropped {dropped} relationship(s) referencing non-existent entities.")
     return filtered
 
-def run_extraction_pipeline(
-    text_units: pd.DataFrame,
-    extraction_model: str,
-    summarization_model: str,
-    entity_types: List[str],
-    max_gleanings: int = 1,
-    max_summary_length: int = 500,
-    max_input_tokens: int = 4000,
+
+async def run_extraction_pipeline_async(
+        text_units: pd.DataFrame,
+        extraction_model: str,
+        summarization_model: str,
+        entity_types: List[str],
+        max_gleanings: int = 1,
+        max_summary_length: int = 500,
+        max_input_tokens: int = 4000,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Главная функция для запуска всего процесса извлечения и суммаризации графа."""
-    llm_client = LLMClient()
-    extractor = GraphExtractor(llm_client, extraction_model, max_gleanings)
-    summarizer = GraphSummarizer(llm_client, summarization_model, max_summary_length, max_input_tokens)
+    """
+    Асинхронная версия основного пайплайна.
 
-    entity_dfs, relationship_dfs = [], []
+    Последовательность действий сохранена:
+    1. Извлечение графа (параллельно по чанкам)
+    2. Слияние результатов
+    3. Суммаризация (параллельно по сущностям/связям)
+    4. Формирование финальных датафреймов
+    """
 
-    # 1. Извлечение графа для каждого документа
-    for _, row in text_units.iterrows():
-        entities, relationships = extractor.extract(row['text'], entity_types, row['id'])
-        entity_dfs.append(entities)
-        relationship_dfs.append(relationships)
+    async with AsyncLLMClient() as llm_client:
+        extractor = AsyncGraphExtractor(llm_client, extraction_model, max_gleanings)
+        summarizer = AsyncGraphSummarizer(
+            llm_client, summarization_model, max_summary_length, max_input_tokens
+        )
 
-    # 2. Слияние результатов
-    merged_entities = merge_entities(entity_dfs)
-    merged_relationships = merge_relationships(relationship_dfs)
-    valid_relationships = filter_orphan_relationships(merged_relationships, merged_entities)
+        # ═══ Этап 1: Извлечение графа для каждого документа (параллельно) ═══
+        logger.info(f"Stage 1: Extracting graph from {len(text_units)} text units...")
+        extraction_tasks = [
+            extractor.extract(row['text'], entity_types, row['id'])
+            for _, row in text_units.iterrows()
+        ]
+        extraction_results = await asyncio.gather(*extraction_tasks)
+        logger.info("Stage 1 complete: All extractions finished.")
 
-    if merged_entities.empty or valid_relationships.empty:
-        raise ValueError("Graph Extraction failed: No valid entities or relationships detected.")
+        entity_dfs = [res[0] for res in extraction_results]
+        relationship_dfs = [res[1] for res in extraction_results]
 
-    # 3. Суммаризация описаний
-    entity_summaries, relationship_summaries = summarizer.summarize_all(merged_entities, valid_relationships)
+        # ═══ Этап 2: Слияние результатов ═══
+        logger.info("Stage 2: Merging extraction results...")
+        merged_entities = merge_entities(entity_dfs)
+        merged_relationships = merge_relationships(relationship_dfs)
+        valid_relationships = filter_orphan_relationships(merged_relationships, merged_entities)
 
-    # 4. Обновление финальных датафреймов
-    final_entities = merged_entities.drop(columns=["description"]).merge(entity_summaries, on="title", how="left")
-    final_relationships = valid_relationships.drop(columns=["description"]).merge(relationship_summaries, on=["source", "target"], how="left")
+        if merged_entities.empty:
+            raise ValueError("Graph Extraction failed: No valid entities detected.")
 
-    return final_entities, final_relationships
+        logger.info(
+            f"Stage 2 complete: {len(merged_entities)} entities, "
+            f"{len(valid_relationships)} relationships"
+        )
 
-# --- Экспорт в Neo4j (Утилита из оригинального кода) ---
-def save_nodes_to_neo4j_api(entity: pd.DataFrame, relations: pd.DataFrame, api_base_url: str, timeout: int = 30) -> Optional[Dict]:
-    """Отправляет узлы и связи в API графовой базы (например, Neo4j)."""
-    payload = {
-        'entities': entity.to_dict(orient='records'),
-        'relationships': relations.to_dict(orient='records')
-    }
-    try:
-        response = requests.post(f"{api_base_url.rstrip('/')}/entities", json=payload, timeout=timeout)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        logger.error(f"Failed to save to Neo4j API: {e}")
-        return None
+        # ═══ Этап 3: Суммаризация описаний (параллельно) ═══
+        logger.info("Stage 3: Summarizing descriptions...")
+        entity_summaries, relationship_summaries = await summarizer.summarize_all(
+            merged_entities, valid_relationships
+        )
+        logger.info("Stage 3 complete: All descriptions summarized.")
+
+        # ═══ Этап 4: Формирование финальных датафреймов ═══
+        logger.info("Stage 4: Building final DataFrames...")
+        final_entities = merged_entities.drop(columns=["description"]).merge(
+            entity_summaries, on="title", how="left"
+        )
+
+        if not valid_relationships.empty:
+            final_relationships = valid_relationships.drop(columns=["description"]).merge(
+                relationship_summaries, on=["source", "target"], how="left"
+            )
+        else:
+            final_relationships = pd.DataFrame(
+                columns=["source", "target", "weight", "description", "source_id", "text_unit_ids"]
+            )
+
+        logger.info("Stage 4 complete: Pipeline finished successfully!")
+        return final_entities, final_relationships
+
 
 
 

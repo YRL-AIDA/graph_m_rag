@@ -10,7 +10,7 @@ class Document:
             pass
         else:
             raise ValueError('mode in ("mineru", ...)')
-        self.json_data = json_data["results"]["result"]["results"]
+        self.json_data = json_data
 
 
     @property
@@ -136,196 +136,25 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
         Graph structure with nodes and edges
     """
     # Extract content_list from mineru_result
-    content_list = []
-
-    if "content_list" in mineru_result:
-        content_list = mineru_result["content_list"]
-
+    
     # Build regions for all element types
     regions = []
     element_index = 0
 
-    for i, element in enumerate(content_list):
+    for element in mineru_result:
         if not isinstance(element, dict):
             continue
-
-        element_type = element.get("type", "unknown")
-        bbox = element.get("bbox", [0, 0, 0, 0])
-        page_idx = element.get("page_idx", 0)
-
-        # Skip discarded elements
-        if element_type == "discarded":
-            continue
-
-        # Handle text elements - check for text_level to determine if it's a title
-        if element_type == "text":
-            if element.get("text") == "":
-                continue
-            text_level = element.get("text_level")
-            if text_level == 1:
-                # This is a title
-                text = element.get("text", "")
-                regions.append(Region(
-                    text=f"Title: {text}",
-                    image="",
-                    bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
-                    style=Style(-1),
-                    order=element_index,
-                    label="title",
-                    element_data=text
-                ))
-                element_index += 1
-            else:
-                # Regular text
-                text = element.get("text", "")
-                if text.strip():
-                    regions.append(Region(
-                        text=f"Text: {text}",
-                        image="",
-                        bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
-                        style=Style(-1),
-                        order=element_index,
-                        label="text",
-                        element_data=text
-                    ))
-                    element_index += 1
-
-        # Handle image elements - create main image node plus caption/footnote nodes
-        elif element_type == "image":
-            img_path = element.get("img_path", "")
-            image_captions = element.get("image_caption", [])
-            image_footnotes = element.get("image_footnote", [])
-
-            # Main image node
-            regions.append(Region(
-                text=f"",
-                image=img_path,
-                bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
-                style=Style(-1),
-                order=element_index,
-                label="image",
-                element_data=img_path
-            ))
-            element_index += 1
-
-            # Image caption node(s)
-            if image_captions:
-                caption_text = " ".join(image_captions)
-                regions.append(Region(
-                    text=f"Image Caption: {caption_text}",
-                    image=img_path,
-                    bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
-                    style=Style(-1),
-                    order=element_index,
-                    label="image_caption",
-                    element_data=caption_text
-                ))
-                element_index += 1
-
-            # Image footnote node(s)
-            if image_footnotes:
-                footnote_text = " ".join(image_footnotes)
-                regions.append(Region(
-                    text=f"Image Footnote: {footnote_text}",
-                    image=img_path,
-                    bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
-                    style=Style(-1),
-                    order=element_index,
-                    label="image_footnote",
-                    element_data=footnote_text
-                ))
-                element_index += 1
-
-        # Handle table elements - create main table node plus caption/footnote nodes
-        elif element_type == "table":
-            img_path = element.get("img_path", "")
-            table_captions = element.get("table_caption", [])
-            table_footnotes = element.get("table_footnote", [])
-            table_body = element.get("table_body", "")
-
-            # Main table node
-            table_text = f"Table: "
-            if table_captions:
-                table_text += f" | {table_captions}"
-            if table_body:
-                table_text += f" | {table_body}"
-            if table_footnotes:
-                table_text += f" | {table_footnotes}"
-            regions.append(Region(
-                text=table_text,
-                image=img_path,
-                bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
-                style=Style(-1),
-                order=element_index,
-                label="table",
-                element_data=table_text
-            ))
-            element_index += 1
-
-            # Table caption node(s)
-            if table_captions:
-                caption_text = " ".join(table_captions)
-                regions.append(Region(
-                    text=f"Table Caption: {caption_text}",
-                    image=img_path,
-                    bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
-                    style=Style(-1),
-                    order=element_index,
-                    label="table_caption",
-                    element_data=caption_text
-                ))
-                element_index += 1
-
-            # Table footnote node(s)
-            if table_footnotes:
-                footnote_text = " ".join(table_footnotes)
-                regions.append(Region(
-                    text=f"Table Footnote: {footnote_text}",
-                    image=img_path,
-                    bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
-                    style=Style(-1),
-                    order=element_index,
-                    label="table_footnote",
-                    element_data=footnote_text
-                ))
-                element_index += 1
-
-        # Handle equation elements
-        elif element_type == "equation":
-            text = element.get("text", "")
-            if text.strip():
-                regions.append(Region(
-                    text=f"Equation: {text}",
-                    image="",
-                    bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
-                    style=Style(-1),
-                    order=element_index,
-                    label="equation",
-                    element_data=element_type
-                ))
-                element_index += 1
-
-        # Handle any other element types as generic text
-        else:
-            text = element.get("text", "")
-            if text.strip():
-                regions.append(Region(
-                    text=f"{element_type}: {text}",
-                    image="",
-                    bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
-                    style=Style(-1),
-                    order=element_index,
-                    label=element_type,
-                    element_data=text
-                ))
-                element_index += 1
+        regs = metadata2regions(element, element_index)
+        element_index += len(regs)
+        regions += regs
+        
 
     # Sort regions by order
     regions.sort(key=lambda x: x.order)
 
     # Build graph edges
-    N = len(regions)
-    order_edges = [(-1, 0)] + [(i, i+1) for i in range(N-1)] if N > 0 else []
+    # N = len(regions)
+    # order_edges = [(-1, 0)] + [(i, i+1) for i in range(N-1)] if N > 0 else []
     parent_edges = []
 
     tmp_parent_list_id = [-1]  # -1 is id Document
@@ -351,4 +180,201 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
         parent_edges.append((test_parent_id, id_reg))
         tmp_parent_list_id.append(id_reg)
 
+    return regions
+
+
+def metadata2regions(metadata, element_index):
+    """
+    Args:
+    element - мета-информация из qwadrant
+    element_index - текущий индекс элемента (для определения порядка чтения)
+
+    Возращает массив регионов (например в таблице и рисунках отдельными регионами является его caption).
+
+    Если элемент имеет некорректный тип, то возвращает пустой массив
+
+    """
+    element = metadata['original_element']
+    
+    element_type = element.get("type", "unknown")
+    bbox = element.get("bbox", [0, 0, 0, 0])
+    # page_idx = element.get("page_idx", 0)
+    regions = []
+    # Skip discarded elements
+    if element_type == "discarded":
+        return []
+
+    # Handle text elements - check for text_level to determine if it's a title
+    if element_type == "text":
+        if element.get("text") == "":
+            return []
+        text_level = element.get("text_level")
+        if text_level == 1:
+            # This is a title
+            text = element.get("text", "")
+            regions.append(Region(
+                text=f"Title: {text}",
+                image="",
+                bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
+                style=Style(-1),
+                order=element_index,
+                label="title",
+                element_data=text,
+                metadata=metadata
+            ))
+            element_index += 1
+        else:
+            # Regular text
+            text = element.get("text", "")
+            if text.strip():
+                regions.append(Region(
+                    text=f"Text: {text}",
+                    image="",
+                    bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
+                    style=Style(-1),
+                    order=element_index,
+                    label="text",
+                    element_data=text,
+                    metadata=metadata
+                ))
+                element_index += 1
+
+    # Handle image elements - create main image node plus caption/footnote nodes
+    elif element_type == "image":
+        img_path = element.get("img_path", "")
+        image_captions = element.get("image_caption", [])
+        image_footnotes = element.get("image_footnote", [])
+
+        # Main image node
+        regions.append(Region(
+            text=f"",
+            image=img_path,
+            bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
+            style=Style(-1),
+            order=element_index,
+            label="image",
+            element_data=img_path,
+            metadata=metadata
+        ))
+        element_index+=1
+
+        # Image caption node(s)
+        if image_captions:
+            caption_text = " ".join(image_captions)
+            regions.append(Region(
+                text=f"Image Caption: {caption_text}",
+                image=img_path,
+                bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
+                style=Style(-1),
+                order=element_index,
+                label="image_caption",
+                element_data=caption_text,
+                metadata={}
+            ))
+            element_index+=1 
+
+        # Image footnote node(s)
+        if image_footnotes:
+            footnote_text = " ".join(image_footnotes)
+            regions.append(Region(
+                text=f"Image Footnote: {footnote_text}",
+                image=img_path,
+                bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
+                style=Style(-1),
+                order=element_index,
+                label="image_footnote",
+                element_data=footnote_text,
+                metadata={}
+            ))
+            element_index+=1
+
+    # Handle table elements - create main table node plus caption/footnote nodes
+    elif element_type == "table":
+        img_path = element.get("img_path", "")
+        table_captions = element.get("table_caption", [])
+        table_footnotes = element.get("table_footnote", [])
+        table_body = element.get("table_body", "")
+
+        # Main table node
+        table_text = f"Table: "
+        if table_captions:
+            table_text += f" | {table_captions}"
+        if table_body:
+            table_text += f" | {table_body}"
+        if table_footnotes:
+            table_text += f" | {table_footnotes}"
+        regions.append(Region(
+            text=table_text,
+            image=img_path,
+            bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
+            style=Style(-1),
+            order=element_index,
+            label="table",
+            element_data=table_text,
+            metadata=metadata
+        ))
+        element_index+=1
+
+        # Table caption node(s)
+        if table_captions:
+            caption_text = " ".join(table_captions)
+            regions.append(Region(
+                text=f"Table Caption: {caption_text}",
+                image=img_path,
+                bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
+                style=Style(-1),
+                order=element_index,
+                label="table_caption",
+                element_data=caption_text,
+                metadata={}
+            ))
+            element_index+=1
+
+        # Table footnote node(s)
+        if table_footnotes:
+            footnote_text = " ".join(table_footnotes)
+            regions.append(Region(
+                text=f"Table Footnote: {footnote_text}",
+                image=img_path,
+                bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
+                style=Style(-1),
+                order=element_index,
+                label="table_footnote",
+                element_data=footnote_text,
+                metadata={}
+            ))
+            element_index+=1
+
+    # Handle equation elements
+    elif element_type == "equation":
+        text = element.get("text", "")
+        if text.strip():
+            regions.append(Region(
+                text=f"Equation: {text}",
+                image="",
+                bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
+                style=Style(-1),
+                order=element_index,
+                label="equation",
+                element_data=element_type,
+                metadata=metadata
+            ))
+            element_index+=1
+
+    # Handle any other element types as generic text
+    else:
+        # TODO: Может лучше вырабатывать исключения?
+        text = element.get("text", "")
+        if text.strip():
+            regions.append(Region(
+                text=f"{element_type}: {text}",
+                image="",
+                bbox=BBox(*bbox) if len(bbox) == 4 else BBox(0, 0, 0, 0),
+                style=Style(-1),
+                order=element_index,
+                label=element_type,
+                element_data=text,
+                metadata=metadata
+            ))
+            element_index+=1
     return regions

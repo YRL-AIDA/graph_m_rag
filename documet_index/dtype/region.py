@@ -30,7 +30,7 @@ class Style:
 
 
 class Region:
-    def __init__(self, text:str, image: str, bbox:BBox, style:Style, order:int, label:str, element_data:str):
+    def __init__(self, text:str, image: str, bbox:BBox, style:Style, order:int, label:str, element_data:str, metadata:dict):
         self.text = text
         self.image = image
         self.bbox = bbox
@@ -38,6 +38,7 @@ class Region:
         self.order = order
         self.label = label
         self.element_data = element_data
+        self.metadata=metadata
 
 
     def is_content(self):
@@ -59,5 +60,6 @@ class Region:
                 "error_rate": self.style.error_rate
             } if self.style else {},
             "order": self.order,
-            "element_data": self.element_data
+            "element_data": self.element_data,
+            "metadata": self.metadata
         }

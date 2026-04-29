@@ -556,7 +556,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
     except Exception as e:
         logger.error(f"Error saving embeddings to Qdrant: {e}")
 
-    return processed_count
+    return processed_count, metadata_list
 
 
 def process_with_mineru(file_path: str) -> Dict[str, Any]:
@@ -1028,7 +1028,8 @@ async def upload_pdf(file: UploadFile = File(...)):
             logger.warning(f"No content elements found in MinerU result for file {file_hash}")
 
         # Compute embeddings synchronously
-        embeddings_count = compute_embeddings_for_elements(elements, file_hash)
+        metadata_list = compute_embeddings_for_elements(elements, file_hash)
+        embeddings_count=len(metadata_list)
         logger.info(f"Completed embedding computation: {embeddings_count} elements processed for file {file_hash}")
 
         # Create Neo4j graph from MinerU result
@@ -1036,7 +1037,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         if NEO4J_AVAILABLE:
             try:
                 logger.info(f"Creating Neo4j graph for document '{file_hash}'")
-                neo4j_graph_created = create_neo4j_graph(mineru_result, file_hash)
+                neo4j_graph_created = create_neo4j_graph(metadata_list, file_hash)
                 if neo4j_graph_created:
                     logger.info(f"Successfully created Neo4j graph for document '{file_hash}'")
                 else:
@@ -1193,7 +1194,8 @@ def index_document_by_hash(file_hash: str, client=None) -> bool:
             return False
 
         # Compute embeddings for elements
-        embeddings_count = compute_embeddings_for_elements(elements, file_hash)
+        metadata_list = compute_embeddings_for_elements(elements, file_hash)
+        embeddings_count=len(metadata_list)
         logger.info(f"Indexed {embeddings_count} elements for file_hash: {file_hash}")
 
         # Restore original collection name

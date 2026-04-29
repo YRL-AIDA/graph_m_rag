@@ -105,6 +105,7 @@ class Manager:
                 style = reg.get('style', {})
                 order = reg.get('order', 0)
                 element_data = reg.get('element_data', '')
+                metadata=reg.get(metadata, {})
 
                 # Escape single quotes in text fields
                 text_escaped = text.replace("'", "\\'") if text else ''
@@ -112,12 +113,13 @@ class Manager:
                 element_data_escaped = str(element_data).replace("'", "\\'") if element_data else ''
 
                 # Convert bbox and style to JSON strings for storage
-                bbox_json = json.dumps(bbox) if bbox else '{}'
-                style_json = json.dumps(style) if style else '{}'
+                bbox_json = json.dumps(bbox)
+                style_json = json.dumps(style)
+                metadata_json = json.dumps(metadata).replace("'", "\\'")
 
                 query += (f"CREATE (reg{id}:Region:{label} {{text: '{text_escaped}', image: '{image_escaped}', "
                           f"bbox: '{bbox_json}', style: '{style_json}', order: {order}, element_data: "
-                          f"'{element_data_escaped}'}})\n")
+                          f"'{element_data_escaped}', 'metadata': '{metadata_json}'}})\n")
 
             for order in graph['edges']['order']:
                 n1, n2 = order

@@ -56,7 +56,7 @@ class DocumentIndexService:
 
     def create_graph_from_mineru_result(
         self,
-        mineru_result: Dict[str, Any],
+        metadata_list: List[Dict[str, Any]],
         file_hash: str
     ) -> bool:
         """Create a graph in Neo4j from MinerU processing result.
@@ -74,7 +74,7 @@ class DocumentIndexService:
 
             # Create Document object from MinerU result
             document = Document(
-                json_data=mineru_result,
+                json_data=metadata_list,
                 name=file_hash,
                 mode='mineru'
             )
@@ -180,7 +180,7 @@ class DocumentIndexService:
         return self.manager.get_related_context(file_hash, element_type, text)
 
 # Convenience function for creating graph from MinerU result
-def create_neo4j_graph(mineru_result: Dict[str, Any], file_hash: str) -> bool:
+def create_neo4j_graph(metadata_list: List[Dict[str, Any]], file_hash: str) -> bool:
     """Create a Neo4j graph from MinerU result.
 
     This is a convenience function that creates a DocumentIndexService
@@ -195,6 +195,6 @@ def create_neo4j_graph(mineru_result: Dict[str, Any], file_hash: str) -> bool:
     """
     service = DocumentIndexService()
     try:
-        return service.create_graph_from_mineru_result(mineru_result, file_hash)
+        return service.create_graph_from_mineru_result(metadata_list, file_hash)
     finally:
         service.close()

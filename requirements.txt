@@ -39,3 +39,4 @@ doclayout_yolo==0.0.4
 ultralytics==8.4.12
 tokenizers==0.22.2
 addict==2.3.0
+pandas==2.3.3

@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 from pathlib import Path
-
+import requests
 from starlette.responses import HTMLResponse, FileResponse
 
 from app.src.llm_client import ModelMessageDict, LLMClient
@@ -1045,6 +1045,20 @@ async def upload_pdf(file: UploadFile = File(...)):
                 logger.error(f"Failed to create Neo4j graph for document '{file_hash}': {neo4j_error}")
                 # Don't fail the entire process if Neo4j graph creation fails
                 # The document is still available in MinIO and Qdrant
+        else:
+            logger.info("Neo4j document index not available, skipping graph creation")
+
+        # Make semantic graph
+        if NEO4J_AVAILABLE:
+            url = "https://localhost:9595/process-document"
+            data = {
+                "document_id": file_hash
+            }
+
+            response = requests.post(url, json=data)
+
+            print(response.status_code)
+            print(response.json())
         else:
             logger.info("Neo4j document index not available, skipping graph creation")
 

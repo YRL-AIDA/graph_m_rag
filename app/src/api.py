@@ -157,6 +157,10 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
     texts_list = []
     metadata_list = []
 
+    # Use region_id counter similar to Neo4j's create_graph_from_mineru_result
+    # to ensure matching IDs between Qdrant and Neo4j
+    region_id = 0
+
     # Process each element according to its type
     for i, element in enumerate(elements):
         if not isinstance(element, dict):
@@ -214,11 +218,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 # Compute embedding for the image
                 embedding = emb_client.get_image_text_embedding_base64(text, image_base64)
 
-                # Prepare data for Qdrant
+                # Prepare data for Qdrant with region_id matching Neo4j
                 embeddings_list.append(embedding)
                 texts_list.append(f"Image: {img_path}")  # Text representation for Qdrant
 
                 metadata = {
+                    "region_id": region_id,
                     "element_index": i,
                     "element_type": element_type,
                     "file_hash": file_hash,
@@ -231,11 +236,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
 
                 metadata_list.append(metadata)
                 # Save embedding to S3 with a specific naming convention
-                embedding_key = f"embeddings/{file_hash}/element_{i}.json"
+                embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                 embedding_data = {
                     "original_element": element,
                     "img_path": img_path,
                     "embedding": embedding,
+                    "region_id": region_id,
                     "element_index": i,
                     "element_type": element_type,
                     "file_hash": file_hash,
@@ -252,7 +258,8 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 )
 
                 processed_count += 1
-                logger.info(f"Computed embedding for image element {i} (type: {element_type}, path: {img_path})")
+                region_id += 1
+                logger.info(f"Computed embedding for image element {i} (region_id: {region_id-1}, type: {element_type}, path: {img_path})")
 
                 # Create text embeddings from image captions if available
                 caption_text = " ".join(image_captions) if image_captions else ""
@@ -264,11 +271,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     try:
                         caption_embedding = emb_client.get_text_embedding(caption_content)
 
-                        # Prepare data for Qdrant
+                        # Prepare data for Qdrant with region_id matching Neo4j
                         embeddings_list.append(caption_embedding)
                         texts_list.append(caption_content)
 
                         caption_metadata = {
+                            "region_id": region_id,
                             "element_index": i,
                             "element_type": f"{element_type}_caption",
                             "file_hash": file_hash,
@@ -281,12 +289,13 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         metadata_list.append(caption_metadata)
 
                         # Save caption embedding to S3
-                        caption_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
+                        caption_embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                         caption_embedding_data = {
                             "original_element": element,
                             "img_path": img_path,
                             "text": caption_content,
                             "embedding": caption_embedding,
+                            "region_id": region_id,
                             "element_index": i,
                             "element_type": f"{element_type}_caption",
                             "file_hash": file_hash,
@@ -302,7 +311,8 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         )
 
                         processed_count += 1
-                        logger.info(f"Computed text embedding for image caption element {i} (type: {element_type}_caption)")
+                        region_id += 1
+                        logger.info(f"Computed text embedding for image caption (region_id: {region_id-1}, type: {element_type}_caption)")
 
                     except Exception as e:
                         logger.error(f"Failed to compute text embedding for image caption element {i}: {e}")
@@ -313,11 +323,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     try:
                         footnote_embedding = emb_client.get_text_embedding(footnote_content)
 
-                        # Prepare data for Qdrant
+                        # Prepare data for Qdrant with region_id matching Neo4j
                         embeddings_list.append(footnote_embedding)
                         texts_list.append(footnote_content)
 
                         footnote_metadata = {
+                            "region_id": region_id,
                             "element_index": i,
                             "element_type": f"{element_type}_footnote",
                             "file_hash": file_hash,
@@ -330,14 +341,15 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         metadata_list.append(footnote_metadata)
 
                         # Save caption embedding to S3
-                        footnote_embedding_key = f"embeddings/{file_hash}/element_{i}_footnote.json"
+                        footnote_embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                         footnote_embedding_data = {
                             "original_element": element,
                             "img_path": img_path,
                             "text": footnote_text,
                             "embedding": footnote_embedding,
+                            "region_id": region_id,
                             "element_index": i,
-                            "element_type": f"{element_type}_caption",
+                            "element_type": f"{element_type}_footnote",
                             "file_hash": file_hash,
                             "created_at": datetime.now().isoformat()
                         }
@@ -351,10 +363,11 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         )
 
                         processed_count += 1
-                        logger.info(f"Computed text embedding for image caption element {i} (type: {element_type}_footnote)")
+                        region_id += 1
+                        logger.info(f"Computed text embedding for image footnote (region_id: {region_id-1}, type: {element_type}_footnote)")
 
                     except Exception as e:
-                        logger.error(f"Failed to compute text embedding for image caption element {i}: {e}")
+                        logger.error(f"Failed to compute text embedding for image footnote element {i}: {e}")
 
                 continue
 
@@ -379,11 +392,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 try:
                     caption_embedding = emb_client.get_text_embedding(caption_content)
 
-                    # Prepare data for Qdrant
+                    # Prepare data for Qdrant with region_id matching Neo4j
                     embeddings_list.append(caption_embedding)
                     texts_list.append(caption_content)
 
                     caption_metadata = {
+                        "region_id": region_id,
                         "element_index": i,
                         "element_type": f"{element_type}_caption",
                         "file_hash": file_hash,
@@ -396,12 +410,13 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     metadata_list.append(caption_metadata)
 
                     # Save caption embedding to S3
-                    caption_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
+                    caption_embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                     caption_embedding_data = {
                         "original_element": element,
                         "img_path": img_path,
                         "text": caption_content,
                         "embedding": caption_embedding,
+                        "region_id": region_id,
                         "element_index": i,
                         "element_type": f"{element_type}_caption",
                         "file_hash": file_hash,
@@ -417,7 +432,8 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     )
 
                     processed_count += 1
-                    logger.info(f"Computed text embedding for table caption element {i} (type: {element_type}_caption)")
+                    region_id += 1
+                    logger.info(f"Computed text embedding for table caption (region_id: {region_id-1}, type: {element_type}_caption)")
 
                 except Exception as e:
                     logger.error(f"Failed to compute text embedding for table caption element {i}: {e}")
@@ -427,11 +443,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 try:
                     footnote_embedding = emb_client.get_text_embedding(footnote_content)
 
-                    # Prepare data for Qdrant
+                    # Prepare data for Qdrant with region_id matching Neo4j
                     embeddings_list.append(footnote_embedding)
                     texts_list.append(footnote_content)
 
                     footnote_metadata = {
+                        "region_id": region_id,
                         "element_index": i,
                         "element_type": f"{element_type}_footnote",
                         "file_hash": file_hash,
@@ -444,12 +461,13 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     metadata_list.append(footnote_metadata)
 
                     # Save caption embedding to S3
-                    footnote_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
+                    footnote_embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                     footnote_embedding_data = {
                         "original_element": element,
                         "img_path": img_path,
                         "text": footnote_content,
                         "embedding": footnote_embedding,
+                        "region_id": region_id,
                         "element_index": i,
                         "element_type": f"{element_type}_footnote",
                         "file_hash": file_hash,
@@ -465,10 +483,11 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     )
 
                     processed_count += 1
-                    logger.info(f"Computed text embedding for table caption element {i} (type: {element_type}_caption)")
+                    region_id += 1
+                    logger.info(f"Computed text embedding for table footnote (region_id: {region_id-1}, type: {element_type}_footnote)")
 
                 except Exception as e:
-                    logger.error(f"Failed to compute text embedding for table caption element {i}: {e}")
+                    logger.error(f"Failed to compute text embedding for table footnote element {i}: {e}")
 
             # Now process the full table content (body + captions + footnotes)
             text_content = "Table: "
@@ -497,11 +516,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 # Generate embedding using the embedding client
                 embedding = emb_client.get_text_embedding(text_content)
 
-                # Prepare data for Qdrant
+                # Prepare data for Qdrant with region_id matching Neo4j
                 embeddings_list.append(embedding)
                 texts_list.append(text_content)
 
                 metadata = {
+                    "region_id": region_id,
                     "element_index": i,
                     "element_type": element_type,
                     "file_hash": file_hash,
@@ -511,11 +531,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 metadata_list.append(metadata)
 
                 # Save embedding to S3 with a specific naming convention
-                embedding_key = f"embeddings/{file_hash}/element_{i}.json"
+                embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                 embedding_data = {
                     "original_element": element,
                     "text": text_content,
                     "embedding": embedding,
+                    "region_id": region_id,
                     "element_index": i,
                     "element_type": element_type,
                     "file_hash": file_hash,
@@ -532,7 +553,8 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 )
 
                 processed_count += 1
-                logger.info(f"Computed embedding for element {i} (type: {element_type})")
+                region_id += 1
+                logger.info(f"Computed embedding for element {i} (region_id: {region_id-1}, type: {element_type})")
 
             except Exception as e:
                 logger.error(f"Failed to compute embedding for element {i} (type: {element_type}): {e}")

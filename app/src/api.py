@@ -1050,7 +1050,7 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         # Make semantic graph
         if NEO4J_AVAILABLE:
-            url = "https://localhost:9595/process-document"
+            url = "http://localhost:9595/process-document"
             data = {
                 "document_id": file_hash
             }

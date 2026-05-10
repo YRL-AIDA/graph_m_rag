@@ -259,6 +259,9 @@ class AsyncGraphExtractor:
         messages = [{"role": "user", "content": prompt}]
 
         response_text = await self.llm.generate(messages, self.model)
+        logger.info(f"Response from LLM: len={len(response_text) if response_text else 0}, "
+                f"type={type(response_text).__name__}, "
+                f"first_100_chars={response_text if response_text else 'EMPTY'!r}")
         if not response_text:
             return self._empty_dfs()
 
@@ -279,8 +282,9 @@ class AsyncGraphExtractor:
             loop_decision = await self.llm.generate(messages, self.model, max_tokens=5)
             if not loop_decision or loop_decision.strip().upper() != "Y":
                 break
-
-        return self._parse_result(full_result, source_id)
+        out = self._parse_result(full_result, source_id)
+        logger.info(f"parsing out: len={out[0] if response_text else 0}, ")
+        return out
 
     # Методы _parse_result и _empty_dfs не выполняют I/O и остаются синхронными
     def _parse_result(self, result: str, source_id: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -288,45 +292,53 @@ class AsyncGraphExtractor:
         records = [r.strip() for r in result.split(RECORD_DELIMITER)]
 
         for raw_record in records:
-            record = re.sub(r"^$$|$$$", "", raw_record.strip())
-            if not record or COMPLETION_DELIMITER in record:
+            record = re.sub(r"^\(|\)$", "", raw_record.strip())
+            if not record or record == COMPLETION_DELIMITER:
                 continue
 
-            # Убираем кавычки вокруг типов записей
-            record_attributes = [attr.strip().strip('"') for attr in record.split(TUPLE_DELIMITER)]
+            record_attributes = record.split(TUPLE_DELIMITER)
             record_type = record_attributes[0]
 
-            if record_type == 'entity' and len(record_attributes) >= 4:
+            if record_type == '"entity"' and len(record_attributes) >= 4:
+                entity_name = clean_str(record_attributes[1].upper())
+                entity_type = clean_str(record_attributes[2].upper())
+                entity_description = clean_str(record_attributes[3])
                 entities.append({
-                    "title": clean_str(record_attributes[1].upper()),
-                    "type": clean_str(record_attributes[2].upper()),
-                    "description": clean_str(record_attributes[3]),
+                    "title": entity_name,
+                    "type": entity_type,
+                    "description": entity_description,
                     "source_id": source_id,
                 })
-            elif record_type == 'relationship' and len(record_attributes) >= 5:
+
+            if record_type == '"relationship"' and len(record_attributes) >= 5:
+                source = clean_str(record_attributes[1].upper())
+                target = clean_str(record_attributes[2].upper())
+                edge_description = clean_str(record_attributes[3])
                 try:
                     weight = float(record_attributes[-1])
-                except (ValueError, IndexError):
+                except ValueError:
                     weight = 1.0
+
                 relationships.append({
-                    "source": clean_str(record_attributes[1].upper()),
-                    "target": clean_str(record_attributes[2].upper()),
-                    "description": clean_str(record_attributes[3]),
+                    "source": source,
+                    "target": target,
+                    "description": edge_description,
                     "source_id": source_id,
                     "weight": weight,
                 })
 
         entities_df = pd.DataFrame(entities) if entities else self._empty_dfs()[0]
         relationships_df = pd.DataFrame(relationships) if relationships else self._empty_dfs()[1]
-
+        
+        # Формируем составные ключи для связей
         if not entities_df.empty and not relationships_df.empty:
             entity_map = dict(zip(entities_df['title'], entities_df['type']))
             mask = relationships_df["source"].isin(entity_map) & relationships_df["target"].isin(entity_map)
             relationships_df = relationships_df[mask].reset_index(drop=True)
-
-            relationships_df['source'] = relationships_df['source'].apply(lambda x: f"{x}|{entity_map.get(x, '')}")
-            relationships_df['target'] = relationships_df['target'].apply(lambda x: f"{x}|{entity_map.get(x, '')}")
-
+            
+            relationships_df['source'] = relationships_df['source'].apply(lambda x: f"{x}|{entity_map[x]}")
+            relationships_df['target'] = relationships_df['target'].apply(lambda x: f"{x}|{entity_map[x]}")
+        print(entities_df,relationships_df)
         return entities_df, relationships_df
 
     def _empty_dfs(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -484,10 +496,10 @@ async def run_extraction_pipeline_async(
         ]
         extraction_results = await asyncio.gather(*extraction_tasks)
         logger.info("Stage 1 complete: All extractions finished.")
-
+        logger.info(f"extraction results {extraction_results}")
         entity_dfs = [res[0] for res in extraction_results]
         relationship_dfs = [res[1] for res in extraction_results]
-
+        
         # ═══ Этап 2: Слияние результатов ═══
         logger.info("Stage 2: Merging extraction results...")
         merged_entities = merge_entities(entity_dfs)

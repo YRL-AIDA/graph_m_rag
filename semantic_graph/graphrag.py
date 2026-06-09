@@ -3,11 +3,14 @@ import html
 import json
 import logging
 import re
-from typing import Any, Coroutine, Dict, List, Optional, Tuple, Union
+from typing import Any, Coroutine, Dict, List, Optional, Tuple, Type, TypeVar, Union
 import requests
 import aiohttp
 import pandas as pd
 from openai import AsyncOpenAI
+from pydantic import BaseModel
+
+T = TypeVar("T", bound=BaseModel)
 
 # --- Настройки логирования ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -240,6 +243,33 @@ class AsyncLLMClient:
         except Exception as e:
             logger.warning(f"Token counting failed, using fallback. Error: {e}")
             return len(text) // 4 + 1
+
+    async def generate_structured(
+            self,
+            messages: List[Dict[str, str]],
+            model: str,
+            response_model: Type[T],
+            **kwargs,
+    ) -> Optional[T]:
+        """Асинхронный вызов LLM с парсингом JSON-ответа в Pydantic-модель."""
+        try:
+            logger.info(f"Generating structured content with model: {model}")
+            response = await self.client.chat.completions.create(
+                messages=messages,
+                model=model,
+                response_format={"type": "json_object"},
+                **kwargs,
+            )
+            raw_content = response.choices[0].message.content
+            if not raw_content:
+                return None
+            cleaned = remove_think_tags(raw_content)
+            json_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", cleaned, re.DOTALL)
+            json_text = json_match.group(1) if json_match else cleaned
+            return response_model.model_validate(json.loads(json_text))
+        except Exception as e:
+            logger.error(f"Failed to call LLM with structured output: {e}")
+            return None
 # --- Извлечение Графа (Extraction) ---
 class AsyncGraphExtractor:
     """Асинхронный класс для извлечения сущностей и связей из сырого текста."""

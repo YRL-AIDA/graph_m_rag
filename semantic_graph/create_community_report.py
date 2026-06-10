@@ -736,7 +736,27 @@ def finalize_community_reports(
 
 # --- Основной пайплайн ---
 
+from typing import Tuple
+import pandas as pd
+from semantic_graph.manager import Manager
 
+def prepare_community_reports_input_data(
+    manager: Manager
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Получает входные данные для генерации отчётов по сообществам,
+    используя функции из semantic_graph/manager.py.
+
+    Returns:
+        relationships: DataFrame with entity relationships
+        entities: DataFrame with all entities
+        communities: DataFrame with all communities
+    """
+    relationships = manager.get_entity_relationships()
+    entities = manager.get_entities()
+    communities = manager.get_community()
+    return relationships, entities, communities
+    
 async def run_community_reports_pipeline_async(
     relationships: pd.DataFrame,
     entities: pd.DataFrame,

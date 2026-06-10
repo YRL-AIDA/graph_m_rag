@@ -3,10 +3,10 @@ from typing import Optional, Dict, Any, List
 import logging
 import json
 from dtype import Document,  EntityCreate, RelationshipCreate,EntitiesRequest, EntitiesResponse
-
-
+import pandas as pd
+import hashlib
 logger = logging.getLogger(__name__)
-
+import uuid
 
 class Neo4jConnection:
     """Neo4j database connection wrapper."""
@@ -409,6 +409,137 @@ class Manager:
             nodes_updated=stats["nodes_updated"],
             relationships_added=stats["relationships_added"]
         )
+    def get_entities(self) -> pd.DataFrame:
+        """
+        Получить все сущности Entity из Neo4j.
+
+        Возвращает датафрейм с полями, соответствующими результату self._create_or_update_entity_tx:
+        id, title, type, description, data, updated_at, created_at
+        """
+        query = """
+        MATCH (e:Entity)
+        RETURN 
+            e.id AS id,
+            e.title AS title,
+            e.type AS type,
+            e.description AS description,
+            e.data AS data,
+            e.updated_at AS updated_at,
+            e.created_at AS created_at
+        """
+        results = self.query(query)
+        # Формируем DataFrame только по этим полям
+        return pd.DataFrame([{
+            "id": record["id"],
+            "title": record["title"],
+            "type": record["type"],
+            "description": record["description"],
+            "data": record["data"],
+            "updated_at": record["updated_at"],
+            "created_at": record["created_at"],
+        } for record in results])
+ 
+    def get_community(self) -> pd.DataFrame:
+        """
+        Получить все комьюнити из Neo4j.
+        """
+        query = "MATCH (c:Community) RETURN c.id AS id, c.title AS title, c.level AS level, c.parent AS parent, c.size AS size, c.period AS period"
+        results = self.query(query)
+        return pd.DataFrame([{
+            "id": record["id"],
+            "title": record["title"],
+            "level": record["level"],
+            "parent": record["parent"],
+            "size": record["size"],
+            "period": record["period"],
+        } for record in results])
+
+
+    def get_entity_relationships(self) -> pd.DataFrame:
+        """
+        Получить все связи типа RELATED между сущностями Entity из Neo4j.
+
+        Возвращает датафрейм с колонками:
+        - source_title, source_type: идентификаторы исходной сущности
+        - target_title, target_type: идентификаторы целевой сущности
+        - weight, description, text_unit_ids, updated_at: параметры связи
+        - created_at: дата создания связи (дополнительно)
+
+        Returns:
+            pd.DataFrame: Датафрейм с результатами запроса.
+                         При отсутствии результатов возвращает пустой DataFrame
+                         с полным набором колонок и корректными типами данных.
+        """
+        # Определяем схему выходных данных для пустого результата
+        columns_schema = {
+            "source": "string",
+            "target": "string",
+            "weight": "float64",
+            "id": "string",
+            "description": "string",
+            "text_unit_ids": "object",  # list[str] или None
+            "updated_at": "string",  # Neo4j datetime возвращается как строка или объект
+            "created_at": "string",
+        }
+
+        cypher_query = """
+        MATCH (source:Entity)-[r:RELATED]->(target:Entity)
+        RETURN 
+            source.title AS source_title,
+            source.type AS source_type,
+            target.title AS target_title,
+            target.type AS target_type,
+            r.id AS id, 
+            r.weight AS weight,
+            r.description AS description,
+            r.text_unit_ids AS text_unit_ids,
+            r.updated_at AS updated_at,
+            r.created_at AS created_at
+        """
+
+        try:
+            logger.info("Executing query to fetch all RELATED relationships between Entity nodes")
+            results = self.query(cypher_query)
+
+            # Если результатов нет — возвращаем пустой DataFrame с правильной схемой
+            if not results:
+                logger.info("No relationships found, returning empty DataFrame with schema")
+                return pd.DataFrame({col: pd.Series(dtype=dtype) for col, dtype in columns_schema.items()})
+
+            # Преобразуем результаты Neo4j в список словарей
+            rows = []
+            for record in results:
+                row = record.data()
+                # Нормализуем значения: Neo4j может возвращать None для отсутствующих полей
+                rows.append({
+                    "source": f'{row.get("source_title")}|{row.get("source_type")}',
+                    "target": f'{row.get("target_title")}|{row.get("target_type")}',
+                    "weight": float(row["weight"]) if row.get("weight") is not None else None,
+                    "description": row.get("description"),
+                    "id": row.get("id") or str(uuid.uuid4()),
+                    "text_unit_ids": row.get("text_unit_ids"),  # уже list[str] или None
+                    "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
+                    "created_at": str(row["created_at"]) if row.get("created_at") else None,
+                })
+
+            df = pd.DataFrame(rows)
+
+            # Приводим типы данных к ожидаемой схеме (безопасное приведение)
+            for col, dtype in columns_schema.items():
+                if col in df.columns:
+                    if dtype == "float64":
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                    elif dtype == "string":
+                        df[col] = df[col].astype("string")
+                    # 'object' оставляем как есть для text_unit_ids (списки)
+
+            logger.info(f"Successfully fetched {len(df)} relationships")
+            return df
+
+        except Exception as e:
+            logger.error(f"Error fetching entity relationships: {e}")
+            # При ошибке тоже возвращаем пустой DataFrame с корректной схемой
+            return pd.DataFrame({col: pd.Series(dtype=dtype) for col, dtype in columns_schema.items()})
 
 
     @staticmethod
@@ -450,7 +581,9 @@ class Manager:
     def _create_relationship_tx(tx, rel: RelationshipCreate):
         s_title, s_type = rel.source.split('|')
         t_title, t_type = rel.target.split('|')
-
+        stable_id = hashlib.sha256(
+            f"{rel.source}|{rel.target}|{rel.description or ''}".encode()
+        ).hexdigest()[:16]
         check_query = """
                 MATCH (s:Entity {title: $s_title, type: $s_type})-[r:RELATED]->(t:Entity {title: $t_title, type: $t_type})
                 RETURN r.text_unit_ids AS existing_tuis
@@ -464,7 +597,8 @@ class Manager:
         if record:
             query = """
                     MATCH (s:Entity {title: $s_title, type: $s_type})-[r:RELATED]->(t:Entity {title: $t_title, type: $t_type})
-                    SET r.weight = CASE WHEN $weight IS NOT NULL THEN COALESCE(r.weight, 0) + $weight ELSE r.weight END,
+                    SET r.id = $rel_id
+                        r.weight = CASE WHEN $weight IS NOT NULL THEN COALESCE(r.weight, 0) + $weight ELSE r.weight END,
                         r.description = CASE WHEN $description IS NOT NULL AND r.description IS NOT NULL THEN r.description + '; ' + $description
                                              WHEN $description IS NOT NULL THEN $description ELSE r.description END,
                         r.text_unit_ids = CASE WHEN $text_unit_ids IS NOT NULL AND r.text_unit_ids IS NOT NULL THEN apoc.coll.toSet(r.text_unit_ids + $text_unit_ids)
@@ -477,10 +611,140 @@ class Manager:
                     CREATE (s)-[r:RELATED]->(t)
                     SET r.weight = $weight, r.description = $description, r.text_unit_ids = $text_unit_ids, r.created_at = datetime()
                 """
-        tx.run(query, s_title=s_title, s_type=s_type, t_title=t_title, t_type=t_type,
+        tx.run(query, s_title=s_title, s_type=s_type, t_title=t_title, t_type=t_type,rel_id=stable_id,
                weight=rel.weight, description=rel.description, text_unit_ids=rel.text_unit_ids)
         return {"action": "updated" if record else "created"}
 
+    def insert_communities_to_neo4j(self, communities_rows: List[Dict[str, Any]], batch_size: int = 1000) -> Dict[
+        str, int]:
+        """
+        Двухэтапная массовая загрузка: сначала ВСЕ вершины, потом ВСЕ связи.
+        Оптимизировано для минимального потребления памяти (потоковая обработка батчами).
+        """
+        stats = {
+            "communities_created": 0,
+            "parent_relations_created": 0,
+            "entity_relations_created": 0
+        }
+
+        # =====================================================================
+        # ЭТАП 1: ЗАГРУЗКА ВСЕХ ВЕРШИН (NODES)
+        # =====================================================================
+        logger.info("Этап 1: Загрузка всех вершин Community...")
+        for i in range(0, len(communities_rows), batch_size):
+            batch = communities_rows[i:i + batch_size]
+            payload_nodes = []
+
+            for row in batch:
+                parent_id = row.get("parent")
+                # Нормализация parent_id
+                if parent_id is None or (isinstance(parent_id, float) and pd.isna(parent_id)) or parent_id == -1:
+                    parent_id = None
+                else:
+                    parent_id = str(int(parent_id))
+
+                payload_nodes.append({
+                    "community_id": str(int(row["community"])),
+                    "level": int(row["level"]),
+                    "parent_id": parent_id,  # Сохраняем как свойство для справки
+                    "title": str(row.get("title", "")),
+                    "size": int(row.get("size", 0)),
+                    "period": str(row.get("period", ""))
+                })
+
+            # Выполняем транзакцию только для узлов
+            with self.conn.graph.session(database=self.name_db) as session:
+                session.execute_write(self._insert_nodes_tx, payload_nodes)
+
+            stats["communities_created"] += len(payload_nodes)
+            logger.info(f"  [Этап 1] Загружено вершин: {stats['communities_created']}")
+
+        # =====================================================================
+        # ЭТАП 2: ЗАГРУЗКА ВСЕХ СВЯЗЕЙ (RELATIONSHIPS)
+        # =====================================================================
+        logger.info("Этап 2: Загрузка всех связей (IS_CHILD_OF и CONSISTS_OF)...")
+
+        # Мы снова проходим по communities_rows, но теперь извлекаем только данные для связей
+        for i in range(0, len(communities_rows), batch_size):
+            batch = communities_rows[i:i + batch_size]
+
+            payload_parents = []
+            payload_entities = []
+
+            for row in batch:
+                comm_id = str(int(row["community"]))
+                parent_id = row.get("parent")
+
+                # 2.1. Собираем связи IS_CHILD_OF
+                if parent_id is not None and not (
+                        isinstance(parent_id, float) and pd.isna(parent_id)) and parent_id != -1:
+                    payload_parents.append({
+                        "child_id": comm_id,
+                        "parent_id": str(int(parent_id))
+                    })
+
+                # 2.2. Собираем связи CONSISTS_OF (сплющиваем список entity_ids)
+                for entity_id_str in row.get("entity_ids", []):
+                    payload_entities.append({
+                        "community_id": comm_id,
+                        "entity_id_str": str(entity_id_str)
+                    })
+
+            # Выполняем транзакции для связей (каждая в своей сессии для чистоты)
+            with self.conn.graph.session(database=self.name_db) as session:
+                if payload_parents:
+                    session.execute_write(self._insert_parent_relations_tx, payload_parents)
+                    stats["parent_relations_created"] += len(payload_parents)
+
+                if payload_entities:
+                    session.execute_write(self._insert_entity_relations_tx, payload_entities)
+                    stats["entity_relations_created"] += len(payload_entities)
+
+            logger.info(
+                f"  [Этап 2] Обработано батч связей: родителей={len(payload_parents)}, сущностей={len(payload_entities)}")
+
+        logger.info(f"Загрузка завершена. Итоговая статистика: {stats}")
+        return stats
+
+    # ---------------------------------------------------------------------
+    # ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ТРАНЗАКЦИЙ (для чистоты кода)
+    # ---------------------------------------------------------------------
+    @staticmethod
+    def _insert_nodes_tx(tx, payload: List[Dict[str, Any]]):
+        query = """
+        UNWIND $payload AS row
+        MERGE (c:Community {community_id: row.community_id})
+        SET c.level = toInteger(row.level),
+            c.title = row.title,
+            c.parent_id = row.parent_id,
+            c.size = toInteger(row.size),
+            c.period = row.period
+        """
+        tx.run(query, payload=payload)
+
+    @staticmethod
+    def _insert_parent_relations_tx(tx, payload: List[Dict[str, Any]]):
+        # Используем MERGE для обоих узлов на случай, если родительское комьюнити
+        # еще не было создано (например, при частичной загрузке данных)
+        query = """
+        UNWIND $payload AS row
+        MERGE (child:Community {community_id: row.child_id})
+        MERGE (parent:Community {community_id: row.parent_id})
+        MERGE (child)-[:IS_CHILD_OF]->(parent)
+        """
+        tx.run(query, payload=payload)
+
+    @staticmethod
+    def _insert_entity_relations_tx(tx, payload: List[Dict[str, Any]]):
+        query = """
+        UNWIND $payload AS row
+        MATCH (c:Community {community_id: row.community_id}) // MATCH, т.к. на Этапе 1 мы гарантированно создали все Community
+        WITH c, row, split(toString(row.entity_id_str), '|') AS parts
+        WHERE size(parts) = 2
+        MERGE (e:Entity {title: parts[0], type: parts[1]})
+        MERGE (c)-[:CONSISTS_OF]->(e)
+        """
+        tx.run(query, payload=payload)
     # --- ВСПОМОГАТЕЛЬНЫЕ ЛОГИЧЕСКИЕ ФУНКЦИИ ---
     @staticmethod
     def _text_unit_ids_already_exist(existing: Optional[List[str]], new: Optional[List[str]]) -> bool:

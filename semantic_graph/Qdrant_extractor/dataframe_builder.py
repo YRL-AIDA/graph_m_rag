@@ -30,10 +30,10 @@ def build_chunks_dataframe(adapter, doc_id_field="file_hash",doc_id: Optional[st
             continue
 
         doc_id_val = payload.get(doc_id_field, "unknown_doc")
-
+        region_id = payload.get("region_id", "0")
         rows.append({
             "document_id": doc_id_val,
-            "chunk_id": f"{doc_id_val}_{point.get('id')}",
+            "chunk_id": f"{doc_id_val}|{region_id}",
             "collection": collection,
             "text": text,  # 👈 Теперь текст из original_element
             "page": original.get("page_idx"),

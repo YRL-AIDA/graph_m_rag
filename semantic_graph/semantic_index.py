@@ -10,11 +10,16 @@ from manager import Manager, ManagerConfig
 from dtype import DocumentRequest,EntitiesRequest, EntitiesResponse,RelationshipCreate,EntityCreate
 from fastapi import FastAPI, HTTPException
 import asyncio
-
+import json
 load_dotenv()
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
+
+MAX_CLUSTER_SIZE = 10
+USE_LCC = False
+
+
 config = ManagerConfig(
     uri='neo4j://' + os.environ['URL'],
     user=os.environ['USER_NEO4J'],
@@ -26,7 +31,7 @@ doc_manager = Manager(config)
 # Импортируем только нужные функции из нашего обновленного модуля
 # (предполагается, что файл называется graphrag.py)
 from graphrag import run_extraction_pipeline_async
-
+from clasterization import create_communities
 from Qdrant_extractor.config import QDRANT_URL, QDRANT_API_KEY
 from Qdrant_extractor.dataframe_builder import build_chunks_dataframe
 from Qdrant_extractor.qdrant_adapter import QdrantStreamAdapter
@@ -124,6 +129,22 @@ async def process_document(request: DocumentRequest) -> Dict[str, Any]:
         extra_stats=neo4j_status
     )
 
+@app.get("/clastrize_graph")
+async def clastrize_graph() -> Dict[str, Any]:
+    start_time = time.time()
+    logger.info(f"Starting clusterization for graph")
+    relations_df = doc_manager.get_entity_relationships()
+    examples = await create_communities(relations_df,max_cluster_size=MAX_CLUSTER_SIZE,use_lcc=USE_LCC,seed=256)
+    print(examples)
+    save_result = doc_manager.insert_communities_to_neo4j(examples)
+    neo4j_status = save_result if isinstance(save_result, EntitiesResponse) else {}
+    return _build_response(
+        doc_id='None',
+        total_chunks=0,
+        start_time=start_time,
+        status='completed',
+        extra_stats=neo4j_status
+    )
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=9595)

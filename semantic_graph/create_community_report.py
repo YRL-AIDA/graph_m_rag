@@ -103,7 +103,7 @@ def _prep_nodes(input: pd.DataFrame) -> pd.DataFrame:
     input.loc[:, schemas.NODE_DETAILS] = input.loc[
         :,
         [
-            schemas.SHORT_ID,
+            schemas.ID,
             schemas.TITLE,
             schemas.DESCRIPTION,
             schemas.NODE_DEGREE,
@@ -117,7 +117,7 @@ def _prep_edges(input: pd.DataFrame) -> pd.DataFrame:
     input.loc[:, schemas.EDGE_DETAILS] = input.loc[
         :,
         [
-            schemas.SHORT_ID,
+            schemas.ID,
             schemas.EDGE_SOURCE,
             schemas.EDGE_TARGET,
             schemas.DESCRIPTION,
@@ -130,15 +130,23 @@ def _prep_edges(input: pd.DataFrame) -> pd.DataFrame:
 # --- Построение контекста ---
 
 
+def _edge_key(
+    edge: dict,
+    source_column: str = schemas.EDGE_SOURCE,
+    target_column: str = schemas.EDGE_TARGET,
+) -> tuple[str, str]:
+    return (edge[source_column], edge[target_column])
+
+
 async def sort_context(
     local_context: list[dict],
     llm: AsyncLLMClient,
     model: str,
     sub_community_reports: list[dict] | None = None,
     max_context_tokens: int | None = None,
-    node_name_column: str = schemas.TITLE,
+    node_name_column: str = schemas.ID,
     node_details_column: str = schemas.NODE_DETAILS,
-    edge_id_column: str = schemas.SHORT_ID,
+    edge_id_column: str = schemas.ID,
     edge_details_column: str = schemas.EDGE_DETAILS,
     edge_degree_column: str = schemas.EDGE_DEGREE,
     edge_source_column: str = schemas.EDGE_SOURCE,
@@ -166,34 +174,35 @@ async def sort_context(
         return "\n\n".join(contexts)
 
     edges = [
-        {**e, schemas.SHORT_ID: int(e[schemas.SHORT_ID])}
+        e
         for record in local_context
         for e in record.get(edge_details_column, [])
         if isinstance(e, dict)
     ]
     node_details = {
-        record[node_name_column]: {
-            **record[node_details_column],
-            schemas.SHORT_ID: int(record[node_details_column][schemas.SHORT_ID]),
-        }
+        record[node_name_column]: record[node_details_column]
         for record in local_context
     }
 
     edges.sort(key=lambda x: (-x.get(edge_degree_column, 0), x.get(edge_id_column, "")))
 
-    edge_ids, nodes_ids = set(), set()
+    edge_keys: set[tuple[str, str]] = set()
+    node_ids: set[str] = set()
     sorted_edges, sorted_nodes = [], []
     context_string = ""
 
     for edge in edges:
         source, target = edge[edge_source_column], edge[edge_target_column]
         for node in [node_details.get(source), node_details.get(target)]:
-            if node and node[schemas.SHORT_ID] not in nodes_ids:
-                nodes_ids.add(node[schemas.SHORT_ID])
-                sorted_nodes.append(node)
+            if node:
+                node_id = node.get(schemas.ID, node.get(node_name_column))
+                if node_id not in node_ids:
+                    node_ids.add(node_id)
+                    sorted_nodes.append(node)
 
-        if edge[schemas.SHORT_ID] not in edge_ids:
-            edge_ids.add(edge[schemas.SHORT_ID])
+        edge_key = _edge_key(edge, edge_source_column, edge_target_column)
+        if edge_key not in edge_keys:
+            edge_keys.add(edge_key)
             sorted_edges.append(edge)
 
         new_context_string = _get_context_string(
@@ -299,11 +308,11 @@ async def _prepare_reports_at_level(
     llm: AsyncLLMClient,
     model: str,
     level: int,
-    max_context_tokens: int = 16_000,
+    max_context_tokens: int = 16000,
 ) -> pd.DataFrame:
     level_node_df = node_df[node_df[schemas.COMMUNITY_LEVEL] == level]
     logger.info("Number of nodes at level=%s => %s", level, len(level_node_df))
-    nodes_set = set(level_node_df[schemas.TITLE])
+    nodes_set = set(level_node_df[schemas.ID])
 
     level_edge_df = edge_df[
         edge_df.loc[:, schemas.EDGE_SOURCE].isin(nodes_set)
@@ -312,7 +321,7 @@ async def _prepare_reports_at_level(
     level_edge_df.loc[:, schemas.EDGE_DETAILS] = level_edge_df.loc[
         :,
         [
-            schemas.SHORT_ID,
+            schemas.ID,
             schemas.EDGE_SOURCE,
             schemas.EDGE_TARGET,
             schemas.DESCRIPTION,
@@ -325,19 +334,19 @@ async def _prepare_reports_at_level(
         .groupby(schemas.EDGE_SOURCE)
         .agg({schemas.EDGE_DETAILS: "first"})
         .reset_index()
-        .rename(columns={schemas.EDGE_SOURCE: schemas.TITLE})
+        .rename(columns={schemas.EDGE_SOURCE: schemas.ID})
     )
     target_edges = (
         level_edge_df
         .groupby(schemas.EDGE_TARGET)
         .agg({schemas.EDGE_DETAILS: "first"})
         .reset_index()
-        .rename(columns={schemas.EDGE_TARGET: schemas.TITLE})
+        .rename(columns={schemas.EDGE_TARGET: schemas.ID})
     )
 
     merged_node_df = level_node_df.merge(
-        source_edges, on=schemas.TITLE, how="left"
-    ).merge(target_edges, on=schemas.TITLE, how="left")
+        source_edges, on=schemas.ID, how="left"
+    ).merge(target_edges, on=schemas.ID, how="left")
 
     merged_node_df.loc[:, schemas.EDGE_DETAILS] = merged_node_df.loc[
         :, f"{schemas.EDGE_DETAILS}_x"
@@ -350,7 +359,7 @@ async def _prepare_reports_at_level(
     merged_node_df = (
         merged_node_df
         .groupby([
-            schemas.TITLE,
+            schemas.ID,
             schemas.COMMUNITY_ID,
             schemas.COMMUNITY_LEVEL,
             schemas.NODE_DEGREE,
@@ -365,7 +374,7 @@ async def _prepare_reports_at_level(
     merged_node_df[schemas.ALL_CONTEXT] = merged_node_df.loc[
         :,
         [
-            schemas.TITLE,
+            schemas.ID,
             schemas.NODE_DEGREE,
             schemas.NODE_DETAILS,
             schemas.EDGE_DETAILS,
@@ -389,7 +398,7 @@ async def build_local_context(
     edges: pd.DataFrame,
     llm: AsyncLLMClient,
     model: str,
-    max_context_tokens: int = 16_000,
+    max_context_tokens: int = 16000,
 ) -> pd.DataFrame:
     levels = get_levels(nodes, schemas.COMMUNITY_LEVEL)
     dfs = []
@@ -721,41 +730,22 @@ def finalize_community_reports(
     communities: pd.DataFrame,
 ) -> pd.DataFrame:
     community_reports = reports.merge(
-        communities.loc[:, ["community", "parent", "children", "size", "period"]],
+        communities.loc[:, ["id""community", "parent", "children", "size", "period"]],
         on="community",
         how="left",
         copy=False,
     )
     community_reports["community"] = community_reports["community"].astype(int)
     community_reports["human_readable_id"] = community_reports["community"]
-    community_reports["id"] = community_reports.apply(
-        lambda row: gen_sha512_hash(row, ["full_content"]), axis=1
-    )
+    #community_reports["id"] = community_reports.apply(
+    #    lambda row: gen_sha512_hash(row, ["full_content"]), axis=1
+    #)
     return community_reports.loc[:, schemas.COMMUNITY_REPORTS_FINAL_COLUMNS]
 
 
 # --- Основной пайплайн ---
 
-from typing import Tuple
-import pandas as pd
-from semantic_graph.manager import Manager
 
-def prepare_community_reports_input_data(
-    manager: Manager
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Получает входные данные для генерации отчётов по сообществам,
-    используя функции из semantic_graph/manager.py.
-
-    Returns:
-        relationships: DataFrame with entity relationships
-        entities: DataFrame with all entities
-        communities: DataFrame with all communities
-    """
-    relationships = manager.get_entity_relationships()
-    entities = manager.get_entities()
-    communities = manager.get_community()
-    return relationships, entities, communities
     
 async def run_community_reports_pipeline_async(
     relationships: pd.DataFrame,

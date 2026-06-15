@@ -43,7 +43,7 @@ Do not list more than 5 record ids in a single reference. Instead, list the top 
 For example:
 "Person X is the owner of Company Y and subject to many allegations of wrongdoing [Data: Reports (1), Entities (5, 7); Relationships (23); Claims (7, 2, 34, 64, 46, +more)]."
 
-where 1, 5, 7, 23, 2, 34, 46, and 64 represent the id (not the index) of the relevant data record.
+where id values represent the id (not the index) of the relevant data record.
 
 Do not include information where the supporting evidence for it is not provided.
 
@@ -55,19 +55,19 @@ Text:
 
 Entities
 
-human_readable_id,title,description
-5,VERDANT OASIS PLAZA,Verdant Oasis Plaza is the location of the Unity March
-6,HARMONY ASSEMBLY,Harmony Assembly is an organization that is holding a march at Verdant Oasis Plaza
+id,title,description
+VERDANT OASIS PLAZA|LOCATION,VERDANT OASIS PLAZA,Verdant Oasis Plaza is the location of the Unity March
+HARMONY ASSEMBLY|ORGANIZATION,HARMONY ASSEMBLY,Harmony Assembly is an organization that is holding a march at Verdant Oasis Plaza
 
 Relationships
 
-human_readable_id,source,target,description
-37,VERDANT OASIS PLAZA,UNITY MARCH,Verdant Oasis Plaza is the location of the Unity March
-38,VERDANT OASIS PLAZA,HARMONY ASSEMBLY,Harmony Assembly is holding a march at Verdant Oasis Plaza
-39,VERDANT OASIS PLAZA,UNITY MARCH,The Unity March is taking place at Verdant Oasis Plaza
-40,VERDANT OASIS PLAZA,TRIBUNE SPOTLIGHT,Tribune Spotlight is reporting on the Unity march taking place at Verdant Oasis Plaza
-41,VERDANT OASIS PLAZA,BAILEY ASADI,Bailey Asadi is speaking at Verdant Oasis Plaza about the march
-43,HARMONY ASSEMBLY,UNITY MARCH,Harmony Assembly is organizing the Unity March
+id,source,target,description
+rel-37,VERDANT OASIS PLAZA|LOCATION,UNITY MARCH|EVENT,Verdant Oasis Plaza is the location of the Unity March
+rel-38,VERDANT OASIS PLAZA|LOCATION,HARMONY ASSEMBLY|ORGANIZATION,Harmony Assembly is holding a march at Verdant Oasis Plaza
+rel-39,VERDANT OASIS PLAZA|LOCATION,UNITY MARCH|EVENT,The Unity March is taking place at Verdant Oasis Plaza
+rel-40,VERDANT OASIS PLAZA|LOCATION,TRIBUNE SPOTLIGHT|ORGANIZATION,Tribune Spotlight is reporting on the Unity march taking place at Verdant Oasis Plaza
+rel-41,VERDANT OASIS PLAZA|LOCATION,BAILEY ASADI|PERSON,Bailey Asadi is speaking at Verdant Oasis Plaza about the march
+rel-43,HARMONY ASSEMBLY|ORGANIZATION,UNITY MARCH|EVENT,Harmony Assembly is organizing the Unity March
 Output:
 {{
     "title": "Verdant Oasis Plaza and Unity March",
@@ -77,19 +77,19 @@ Output:
     "findings": [
         {{
             "summary": "Verdant Oasis Plaza as the central location",
-            "explanation": "Verdant Oasis Plaza is the central entity in this community, serving as the location for the Unity March. This plaza is the common link between all other entities, suggesting its significance in the community. The plaza's association with the march could potentially lead to issues such as public disorder or conflict, depending on the nature of the march and the reactions it provokes. [Data: Entities (5), Relationships (37, 38, 39, 40, 41,+more)]"
+            "explanation": "Verdant Oasis Plaza is the central entity in this community, serving as the location for the Unity March. This plaza is the common link between all other entities, suggesting its significance in the community. The plaza's association with the march could potentially lead to issues such as public disorder or conflict, depending on the nature of the march and the reactions it provokes. [Data: Entities (VERDANT OASIS PLAZA|LOCATION), Relationships (rel-37, rel-38, rel-39, rel-40, rel-41,+more)]"
         }},
         {{
             "summary": "Harmony Assembly's role in the community",
-            "explanation": "Harmony Assembly is another key entity in this community, being the organizer of the march at Verdant Oasis Plaza. The nature of Harmony Assembly and its march could be a potential source of threat, depending on their objectives and the reactions they provoke. The relationship between Harmony Assembly and the plaza is crucial in understanding the dynamics of this community. [Data: Entities(6), Relationships (38, 43)]"
+            "explanation": "Harmony Assembly is another key entity in this community, being the organizer of the march at Verdant Oasis Plaza. The nature of Harmony Assembly and its march could be a potential source of threat, depending on their objectives and the reactions they provoke. The relationship between Harmony Assembly and the plaza is crucial in understanding the dynamics of this community. [Data: Entities (HARMONY ASSEMBLY|ORGANIZATION), Relationships (rel-38, rel-43)]"
         }},
         {{
             "summary": "Unity March as a significant event",
-            "explanation": "The Unity March is a significant event taking place at Verdant Oasis Plaza. This event is a key factor in the community's dynamics and could be a potential source of threat, depending on the nature of the march and the reactions it provokes. The relationship between the march and the plaza is crucial in understanding the dynamics of this community. [Data: Relationships (39)]"
+            "explanation": "The Unity March is a significant event taking place at Verdant Oasis Plaza. This event is a key factor in the community's dynamics and could be a potential source of threat, depending on the nature of the march and the reactions it provokes. The relationship between the march and the plaza is crucial in understanding the dynamics of this community. [Data: Relationships (rel-39)]"
         }},
         {{
             "summary": "Role of Tribune Spotlight",
-            "explanation": "Tribune Spotlight is reporting on the Unity March taking place in Verdant Oasis Plaza. This suggests that the event has attracted media attention, which could amplify its impact on the community. The role of Tribune Spotlight could be significant in shaping public perception of the event and the entities involved. [Data: Relationships (40)]"
+            "explanation": "Tribune Spotlight is reporting on the Unity March taking place in Verdant Oasis Plaza. This suggests that the event has attracted media attention, which could amplify its impact on the community. The role of Tribune Spotlight could be significant in shaping public perception of the event and the entities involved. [Data: Relationships (rel-40)]"
         }}
     ]
 }}
@@ -138,7 +138,7 @@ Do not list more than 5 record ids in a single reference. Instead, list the top 
 For example:
 "Person X is the owner of Company Y and subject to many allegations of wrongdoing [Data: Reports (1), Entities (5, 7); Relationships (23); Claims (7, 2, 34, 64, 46, +more)]."
 
-where 1, 5, 7, 23, 2, 34, 46, and 64 represent the id (not the index) of the relevant data record.
+where id values represent the id (not the index) of the relevant data record.
 
 Do not include information where the supporting evidence for it is not provided.
 

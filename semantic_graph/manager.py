@@ -423,6 +423,7 @@ class Manager:
             e.title AS title,
             e.type AS type,
             e.description AS description,
+            e.degree AS degree,
             e.data AS data,
             e.updated_at AS updated_at,
             e.created_at AS created_at
@@ -430,10 +431,11 @@ class Manager:
         results = self.query(query)
         # Формируем DataFrame только по этим полям
         return pd.DataFrame([{
-            "id": record["id"],
+            "id": record["title"]+'|'+record["type"],
             "title": record["title"],
             "type": record["type"],
             "description": record["description"],
+            "degree": record["degree"],
             "data": record["data"],
             "updated_at": record["updated_at"],
             "created_at": record["created_at"],
@@ -443,16 +445,29 @@ class Manager:
         """
         Получить все комьюнити из Neo4j.
         """
-        query = "MATCH (c:Community) RETURN c.id AS id, c.title AS title, c.level AS level, c.parent AS parent, c.size AS size, c.period AS period"
+        query = "MATCH (c:Community) RETURN c.id AS id, c.title AS title, c.level AS level, c.parent_id AS parent, c.size AS size, c.period AS period"
         results = self.query(query)
-        return pd.DataFrame([{
-            "id": record["id"],
-            "title": record["title"],
-            "level": record["level"],
-            "parent": record["parent"],
-            "size": record["size"],
-            "period": record["period"],
-        } for record in results])
+        # Добавляем entity_ids как список id-сущностей, связанных отношений CONSISTS_OF
+        # Для каждой Community получаем связанные с ней Entity через CONSISTS_OF, формируем entity_ids = ['title|type', ...]
+        communities = []
+        for record in results:
+            community_id = record["id"]
+            entity_query = f"""
+                MATCH (c:Community {{id: '{community_id}'}})-[:CONSISTS_OF]->(e:Entity)
+                RETURN e.title AS title, e.type AS type
+            """
+            entities = self.query(entity_query)
+            entity_ids = [f"{entity['title']}|{entity['type']}" for entity in entities]
+            communities.append({
+                "id": record["id"],
+                "title": record["title"],
+                "level": record["level"],
+                "parent": record["parent"],
+                "size": record["size"],
+                "period": record["period"],
+                "entity_ids": entity_ids
+            })
+        return pd.DataFrame(communities)
 
 
     def get_entity_relationships(self) -> pd.DataFrame:
@@ -477,6 +492,7 @@ class Manager:
             "weight": "float64",
             "id": "string",
             "description": "string",
+            "degree": "int64",
             "text_unit_ids": "object",  # list[str] или None
             "updated_at": "string",  # Neo4j datetime возвращается как строка или объект
             "created_at": "string",
@@ -491,6 +507,7 @@ class Manager:
             target.type AS target_type,
             r.id AS id, 
             r.weight AS weight,
+            r.degree AS degree,
             r.description AS description,
             r.text_unit_ids AS text_unit_ids,
             r.updated_at AS updated_at,
@@ -516,6 +533,7 @@ class Manager:
                     "target": f'{row.get("target_title")}|{row.get("target_type")}',
                     "weight": float(row["weight"]) if row.get("weight") is not None else None,
                     "description": row.get("description"),
+                    "degree": int(row["degree"]) if row.get("degree") is not None else None,
                     "id": row.get("id") or str(uuid.uuid4()),
                     "text_unit_ids": row.get("text_unit_ids"),  # уже list[str] или None
                     "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
@@ -644,11 +662,14 @@ class Manager:
                     parent_id = str(int(parent_id))
 
                 payload_nodes.append({
-                    "community_id": str(int(row["community"])),
+                    "id": str(row["id"]),   # идентификатор комьюнити   (uuid4)
+                    #"human_readable_id": str(row["human_readable_id"]),
+                    "title": str(row.get("title", "")),
+                    "community": str(int(row["community"])),
                     "level": int(row["level"]),
                     "parent_id": parent_id,  # Сохраняем как свойство для справки
-                    "title": str(row.get("title", "")),
                     "size": int(row.get("size", 0)),
+                    "degree": int(row.get("degree", 0)),
                     "period": str(row.get("period", ""))
                 })
 
@@ -706,9 +727,90 @@ class Manager:
         logger.info(f"Загрузка завершена. Итоговая статистика: {stats}")
         return stats
 
+    def update_community_reports(
+        self,
+        community_reports: pd.DataFrame,
+        batch_size: int = 500,
+    ) -> Dict[str, int]:
+        """Добавляет поля отчётов к узлам Community в Neo4j по id.
+
+        Args:
+            community_reports: DataFrame — результат run_community_reports_pipeline_async
+            batch_size: размер батча для UNWIND-запроса
+
+        Returns:
+            Статистика: updated, skipped (нет id), not_found (id не найден в графе)
+        """
+        stats = {"updated": 0, "skipped": 0, "not_found": 0}
+
+        if community_reports is None or community_reports.empty:
+            logger.info("Пустой DataFrame отчётов — обновление пропущено")
+            return stats
+
+        report_fields = (
+            "title", "summary", "full_content", "rank",
+            "rating_explanation", "findings", "full_content_json",
+        )
+
+        for i in range(0, len(community_reports), batch_size):
+            batch = community_reports.iloc[i:i + batch_size]
+            payload: List[Dict[str, Any]] = []
+
+            for _, row in batch.iterrows():
+                community_id = row.get("id")
+                if community_id is None or (isinstance(community_id, float) and pd.isna(community_id)):
+                    stats["skipped"] += 1
+                    continue
+
+                record: Dict[str, Any] = {"id": str(community_id)}
+                for field in report_fields:
+                    value = row.get(field)
+                    if value is None or (isinstance(value, float) and pd.isna(value)):
+                        record[field] = None
+                    elif field == "findings" and hasattr(value, "tolist"):
+                        record[field] = value.tolist()
+                    elif field == "rank":
+                        record[field] = float(value)
+                    else:
+                        record[field] = str(value)
+                payload.append(record)
+
+            if not payload:
+                continue
+
+            with self.conn.graph.session(database=self.name_db) as session:
+                updated = session.execute_write(self._update_community_reports_tx, payload)
+                stats["updated"] += updated
+                stats["not_found"] += len(payload) - updated
+
+        logger.info(
+            "Обновление отчётов Community завершено: updated=%s, skipped=%s, not_found=%s",
+            stats["updated"], stats["skipped"], stats["not_found"],
+        )
+        return stats
+
     # ---------------------------------------------------------------------
     # ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ТРАНЗАКЦИЙ (для чистоты кода)
     # ---------------------------------------------------------------------
+    @staticmethod
+    def _update_community_reports_tx(tx, payload: List[Dict[str, Any]]) -> int:
+        query = """
+        UNWIND $payload AS row
+        MATCH (c:Community {id: row.id})
+        SET c.title = coalesce(row.title, c.title),
+            c.summary = row.summary,
+            c.full_content = row.full_content,
+            c.rank = row.rank,
+            c.rating_explanation = row.rating_explanation,
+            c.findings = row.findings,
+            c.full_content_json = row.full_content_json,
+            c.report_updated_at = datetime()
+        RETURN count(c) AS updated
+        """
+        result = tx.run(query, payload=payload)
+        record = result.single()
+        return int(record["updated"]) if record else 0
+
     @staticmethod
     def _insert_nodes_tx(tx, payload: List[Dict[str, Any]]):
         query = """

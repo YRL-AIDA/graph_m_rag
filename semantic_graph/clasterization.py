@@ -50,7 +50,7 @@ DOCUMENT_ID = "document_id"
 
 PERIOD = "period"
 SIZE = "size"
-
+DEGREE = "degree"
 
 COMMUNITIES_FINAL_COLUMNS = [
     ID,
@@ -59,10 +59,10 @@ COMMUNITIES_FINAL_COLUMNS = [
     COMMUNITY_LEVEL,
     COMMUNITY_PARENT,
     COMMUNITY_CHILDREN,
+    DEGREE,
     TITLE,
     ENTITY_IDS,
     RELATIONSHIP_IDS,
-    TEXT_UNIT_IDS,
     PERIOD,
     SIZE,
 ]
@@ -365,6 +365,11 @@ async def create_communities(
         list[dict[str, Any]]
             Sample of up to 5 community rows for logging.
     """
+    # clusters содержит список кортежей вида (level, community, parent, [title]), где:
+    # - level: уровень иерархии (int)
+    # - community: идентификатор комьюнити (int)
+    # - parent: идентификатор родительского комьюнити (int или None)
+    # - [title]: список id сущностей (или заголовков/nodes), входящих в сообщество на этом уровне
     clusters = cluster_graph(
         relationships,
         max_cluster_size,
@@ -382,6 +387,9 @@ async def create_communities(
     # aggregate entity ids for each community
     entity_map = communities[["community", "title"]].copy()
     entity_map["entity_id"] = entity_map["title"]
+    # entity_ids формируется как DataFrame со столбцами:
+    # - community: идентификатор комьюнити (int)
+    # - entity_ids: список id сущностей, входящих в данное комьюнити (list[str])
     entity_ids = (
         entity_map
         .dropna(subset=["entity_id"])
@@ -418,6 +426,20 @@ async def create_communities(
         )
         grouped["level"] = level
         level_results.append(grouped)
+    # level_results накапливает результаты для каждого уровня иерархии комьюнити. 
+    # Каждый элемент в level_results — это DataFrame (grouped), в котором присутствуют следующие столбцы:
+    # - community_x: идентификатор комьюнити, к которому относятся связи (int)
+    # - parent_x: идентификатор родительского комьюнити (int)
+    # - relationship_ids: список id связей (list[str]), входящих во внутрикомьюнити-ребра на этом уровне
+    # - text_unit_ids: объединённый список id всех text_unit из соответствующих связей (list[str])
+    # - level: уровень иерархии (int), для которого построены эти агрегации
+    #
+    # После конкатенации level_results превращается в единую таблицу (all_grouped) со столбцами:
+    # - community (ранее community_x): идентификатор комьюнити, к которому относятся данные
+    # - parent (ранее parent_x): идентификатор родителя комьюнити
+    # - relationship_ids: все id связи внутри этого комьюнити
+    # - text_unit_ids: все id text_unit для этих связей
+    # - level: уровень иерархии
 
     all_grouped = pd.concat(level_results, ignore_index=True).rename(
         columns={
@@ -433,6 +455,7 @@ async def create_communities(
     all_grouped["text_unit_ids"] = all_grouped["text_unit_ids"].apply(
         lambda x: sorted(set(x))
     )
+
 
     # join it all up and add some new fields
     final_communities = all_grouped.merge(entity_ids, on="community", how="inner")

@@ -1,20 +1,33 @@
-from neo4j_service import  DocumentIndexService
-
-
 import logging
-import time
-from typing import Dict, Any
-from dotenv import load_dotenv
 import os
-from manager import Manager, ManagerConfig
-from dtype import DocumentRequest,EntitiesRequest, EntitiesResponse,RelationshipCreate,EntityCreate
-from fastapi import FastAPI, HTTPException
-import asyncio
-import json
-load_dotenv()
 import sys
+import time
 from pathlib import Path
+from typing import Any, Dict
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+
 sys.path.insert(0, str(Path(__file__).parent))
+
+from clasterization import create_communities
+from config import MODEL_NAME
+from create_community_report import run_community_reports_pipeline_async
+from dtype import (
+    DocumentRequest,
+    EntitiesRequest,
+    EntitiesResponse,
+    EntityCreate,
+    RelationshipCreate,
+)
+from graphrag import run_extraction_pipeline_async
+from manager import Manager, ManagerConfig
+from prompts import COMMUNITY_REPORT_PROMPT
+from Qdrant_extractor.config import QDRANT_API_KEY, QDRANT_URL
+from Qdrant_extractor.dataframe_builder import build_chunks_dataframe
+from Qdrant_extractor.qdrant_adapter import QdrantStreamAdapter
+
+load_dotenv()
 
 MAX_CLUSTER_SIZE = 10
 USE_LCC = False
@@ -28,14 +41,6 @@ config = ManagerConfig(
 )
 
 doc_manager = Manager(config)
-# Импортируем только нужные функции из нашего обновленного модуля
-# (предполагается, что файл называется graphrag.py)
-from graphrag import run_extraction_pipeline_async
-from clasterization import create_communities
-from Qdrant_extractor.config import QDRANT_URL, QDRANT_API_KEY
-from Qdrant_extractor.dataframe_builder import build_chunks_dataframe
-from Qdrant_extractor.qdrant_adapter import QdrantStreamAdapter
-from config import MODEL_NAME
 
 # --- Настройка логирования ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -137,6 +142,30 @@ async def clastrize_graph() -> Dict[str, Any]:
     examples = await create_communities(relations_df,max_cluster_size=MAX_CLUSTER_SIZE,use_lcc=USE_LCC,seed=256)
     print(examples)
     save_result = doc_manager.insert_communities_to_neo4j(examples)
+    neo4j_status = save_result if isinstance(save_result, EntitiesResponse) else {}
+    return _build_response(
+        doc_id='None',
+        total_chunks=0,
+        start_time=start_time,
+        status='completed',
+        extra_stats=neo4j_status
+    )
+
+@app.get("/create_community_report")
+async def create_community_report() -> Dict[str, Any]:
+    start_time = time.time()
+    logger.info(f"Starting create community report")
+    community_reports = await run_community_reports_pipeline_async(
+        relationships=doc_manager.get_entity_relationships(),
+        entities=doc_manager.get_entities(),
+        communities=doc_manager.get_community(),
+        model=MODEL_NAME,
+        prompt=COMMUNITY_REPORT_PROMPT,
+        max_input_length=8000,
+        max_report_length=2000,
+        max_concurrent=4
+    )
+    save_result = doc_manager.update_community_reports(community_reports)
     neo4j_status = save_result if isinstance(save_result, EntitiesResponse) else {}
     return _build_response(
         doc_id='None',

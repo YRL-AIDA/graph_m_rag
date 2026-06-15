@@ -492,6 +492,74 @@ def filter_orphan_relationships(relationships: pd.DataFrame, entities: pd.DataFr
         logger.warning(f"Dropped {dropped} relationship(s) referencing non-existent entities.")
     return filtered
 
+def finalize_entities(
+    entities_table: pd.DataFrame,
+    degree_map: dict[str, int],
+) -> pd.DataFrame:
+    """
+    Дополняет датафрейм сущностей столбцами 'degree'.
+    Дедуплирует по title (сохраняет первую попавшуюся запись),
+    присваивает degree по карте degree_map, и human_readable_id по порядку.
+
+    Args:
+        entities_table (pd.DataFrame): Таблица сущностей.
+        degree_map (dict[str, int]): Карта степеней для сущностей.
+
+    Returns:
+        pd.DataFrame: Дедуплицированный и дополненный датафрейм.
+    """
+    df = entities_table.copy()
+    # Сброс индекса для надёжности
+    df = df.reset_index(drop=True)
+    # Удаляем дубликаты по title (оставляем первую запись)
+    df = df.drop_duplicates(subset=["title", "type"], keep="first").reset_index(drop=True)
+    # degree
+    df["degree"] = (df["title"] + "|" + df["type"]).map(degree_map).fillna(0).astype(int)
+    return df
+
+def finalize_relationships(
+    relationships_table: pd.DataFrame,
+    degree_map: dict[str, int],
+) -> pd.DataFrame:
+    """
+    Дополняет датафрейм связей столбцом 'combined_degree'.
+    Дедуплирует по паре (source, target), присваивает combined_degree как сумму степеней.
+    """
+    df = relationships_table.copy()
+    # Сброс индекса для надёжности
+    df = df.reset_index(drop=True)
+    # Удаляем дубликаты по (source, target) (оставляем первую запись)
+    df = df.drop_duplicates(subset=["source", "target"], keep="first").reset_index(drop=True)
+    # combined_degree
+    df["combined_degree"] = (
+        df["source"].map(degree_map).fillna(0).astype(int) +
+        df["target"].map(degree_map).fillna(0).astype(int)
+    )
+    # human_readable_id (можно добавить если необходимо, как по примеру с entities)
+    return df
+
+
+def _build_degree_map(
+    relationships_table: pd.DataFrame,
+) -> dict[str, int]:    
+    """
+    Строит карту степеней для связей.
+    Args:
+        relationships_table (pd.DataFrame): Таблица связей.
+
+    Returns:
+        dict[str, int]: Карта степеней для связей.
+    """
+
+    seen: set[tuple[str, str]] = set()
+    degree: dict[str, int] = {}
+    for row in relationships_table.itertuples():
+        lo, hi = sorted((row.source, row.target))
+        if (lo, hi) not in seen:
+            seen.add((lo, hi))
+            degree[lo] = degree.get(lo, 0) + 1
+            degree[hi] = degree.get(hi, 0) + 1
+    return degree
 
 async def run_extraction_pipeline_async(
         text_units: pd.DataFrame,
@@ -565,7 +633,9 @@ async def run_extraction_pipeline_async(
             final_relationships = pd.DataFrame(
                 columns=["source", "target", "weight", "description", "source_id", "text_unit_ids"]
             )
-
+        degree_map =  _build_degree_map(final_relationships)
+        final_entities = finalize_entities(final_entities, degree_map)
+        final_relationships = finalize_relationships(final_relationships, degree_map)
         logger.info("Stage 4 complete: Pipeline finished successfully!")
         return final_entities, final_relationships
 

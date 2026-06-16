@@ -6,7 +6,7 @@ class EntityCreate(BaseModel):
     text_unit_ids: Optional[List[str]] = []
     frequency: Optional[int] = 0
     description: Optional[str] = None
-    # любые дополнительные поля можно добавить через extra = "allow"
+    degree: Optional[int] = 0
 
 class RelationshipCreate(BaseModel):
     source: str
@@ -14,6 +14,7 @@ class RelationshipCreate(BaseModel):
     text_unit_ids: Optional[List[str]] = []
     weight: Optional[float] = 1.0
     description: Optional[str] = None
+    combined_degree: Optional[int] = 0
 
 class EntitiesRequest(BaseModel):
     entities: List[EntityCreate]

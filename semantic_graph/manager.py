@@ -580,6 +580,7 @@ class Manager:
                     e.description = CASE 
                     WHEN $description IS NOT NULL AND e.description IS NOT NULL THEN e.description + '; ' + $description
                     WHEN $description IS NOT NULL THEN $description ELSE e.description END,
+                    e.degree = CASE WHEN $degree IS NOT NULL THEN COALESCE(e.degree, 0) + $degree ELSE e.degree END,    
                     e.updated_at = datetime()
                 RETURN e.title AS title, e.type AS type
                 """
@@ -589,7 +590,7 @@ class Manager:
             query = """
                 CREATE (e:Entity {title: $title, type: $type})
                 SET e.text_unit_ids = $text_unit_ids, e.frequency = $frequency, 
-                    e.description = $description, e.created_at = datetime()
+                    e.description = $description, e.degree = $degree, e.created_at = datetime()
                 RETURN e.title AS title, e.type AS type
                 """
             result = tx.run(query, **entity.dict(exclude_unset=True)).single()
@@ -621,16 +622,17 @@ class Manager:
                                              WHEN $description IS NOT NULL THEN $description ELSE r.description END,
                         r.text_unit_ids = CASE WHEN $text_unit_ids IS NOT NULL AND r.text_unit_ids IS NOT NULL THEN apoc.coll.toSet(r.text_unit_ids + $text_unit_ids)
                                                WHEN $text_unit_ids IS NOT NULL THEN $text_unit_ids ELSE r.text_unit_ids END,
+                        r.combined_degree = CASE WHEN $combined_degree IS NOT NULL THEN COALESCE(r.combined_degree, 0) + $combined_degree ELSE r.combined_degree END,
                         r.updated_at = datetime()
                 """
         else:
             query = """
                     MATCH (s:Entity {title: $s_title, type: $s_type}), (t:Entity {title: $t_title, type: $t_type})
                     CREATE (s)-[r:RELATED]->(t)
-                    SET r.weight = $weight, r.description = $description, r.text_unit_ids = $text_unit_ids, r.created_at = datetime()
+                    SET r.weight = $weight, r.description = $description, r.text_unit_ids = $text_unit_ids, r.combined_degree = $combined_degree, r.created_at = datetime()
                 """
         tx.run(query, s_title=s_title, s_type=s_type, t_title=t_title, t_type=t_type,rel_id=stable_id,
-               weight=rel.weight, description=rel.description, text_unit_ids=rel.text_unit_ids)
+               weight=rel.weight, description=rel.description, text_unit_ids=rel.text_unit_ids, combined_degree=rel.combined_degree)
         return {"action": "updated" if record else "created"}
 
     def insert_communities_to_neo4j(self, communities_rows: List[Dict[str, Any]], batch_size: int = 1000) -> Dict[
@@ -669,7 +671,6 @@ class Manager:
                     "level": int(row["level"]),
                     "parent_id": parent_id,  # Сохраняем как свойство для справки
                     "size": int(row.get("size", 0)),
-                    "degree": int(row.get("degree", 0)),
                     "period": str(row.get("period", ""))
                 })
 
@@ -815,7 +816,7 @@ class Manager:
     def _insert_nodes_tx(tx, payload: List[Dict[str, Any]]):
         query = """
         UNWIND $payload AS row
-        MERGE (c:Community {community_id: row.community_id})
+        MERGE (c:Community {id: row.id})
         SET c.level = toInteger(row.level),
             c.title = row.title,
             c.parent_id = row.parent_id,
@@ -830,8 +831,8 @@ class Manager:
         # еще не было создано (например, при частичной загрузке данных)
         query = """
         UNWIND $payload AS row
-        MERGE (child:Community {community_id: row.child_id})
-        MERGE (parent:Community {community_id: row.parent_id})
+        MERGE (child:Community {id: row.child_id})
+        MERGE (parent:Community {id: row.parent_id})
         MERGE (child)-[:IS_CHILD_OF]->(parent)
         """
         tx.run(query, payload=payload)
@@ -840,7 +841,7 @@ class Manager:
     def _insert_entity_relations_tx(tx, payload: List[Dict[str, Any]]):
         query = """
         UNWIND $payload AS row
-        MATCH (c:Community {community_id: row.community_id}) // MATCH, т.к. на Этапе 1 мы гарантированно создали все Community
+        MATCH (c:Community {id: row.id}) // MATCH, т.к. на Этапе 1 мы гарантированно создали все Community
         WITH c, row, split(toString(row.entity_id_str), '|') AS parts
         WHERE size(parts) = 2
         MERGE (e:Entity {title: parts[0], type: parts[1]})

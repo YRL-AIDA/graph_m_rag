@@ -16,9 +16,10 @@ T = TypeVar("T", bound=BaseModel)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 # --- Константы и Промпты ---
-TOKENIZER_URL = "http://192.168.19.127:9886/tokenize"
-LLM_URL = 'http://192.168.19.127:9886/v1'
-
+#TOKENIZER_URL = "http://192.168.19.127:9886/tokenize"
+#LLM_URL = 'http://192.168.19.127:9886/v1'
+TOKENIZER_URL = "http://localhost:9886/tokenize"
+LLM_URL = 'http://localhost:9886/v1'
 TUPLE_DELIMITER = "<|>"
 RECORD_DELIMITER = "##"
 COMPLETION_DELIMITER = "<|COMPLETE|>"

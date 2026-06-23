@@ -465,10 +465,12 @@ async def create_communities(
     )
     final_communities["parent"] = final_communities["parent"].astype(int)
     # collect the children so we have a tree going both ways
-    parent_grouped = cast(
-        "pd.DataFrame",
-        final_communities.groupby("parent").agg(children=("community", "unique")),
-    )
+    #parent_grouped = cast(
+    #    "pd.DataFrame",
+    #    final_communities.groupby("parent").agg(children=("community", "unique")),
+    #)
+    parent_grouped = final_communities.groupby("parent").agg(children=("community", "unique"))
+
     final_communities = final_communities.merge(
         parent_grouped,
         left_on="community",

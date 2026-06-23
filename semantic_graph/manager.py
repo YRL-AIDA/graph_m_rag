@@ -445,7 +445,7 @@ class Manager:
         """
         Получить все комьюнити из Neo4j.
         """
-        query = "MATCH (c:Community) RETURN c.id AS id, c.title AS title, c.level AS level, c.parent_id AS parent, c.size AS size, c.period AS period"
+        query = "MATCH (c:Community) RETURN c.id AS id, c.title AS title, c.community AS community, c.human_readable_id AS human_readable_id, c.level AS level, c.parent AS parent, c.size AS size, c.period AS period"
         results = self.query(query)
         # Добавляем entity_ids как список id-сущностей, связанных отношений CONSISTS_OF
         # Для каждой Community получаем связанные с ней Entity через CONSISTS_OF, формируем entity_ids = ['title|type', ...]
@@ -456,16 +456,25 @@ class Manager:
                 MATCH (c:Community {{id: '{community_id}'}})-[:CONSISTS_OF]->(e:Entity)
                 RETURN e.title AS title, e.type AS type
             """
+            children_query = f"""
+                MATCH (c:Community {{id: '{community_id}'}})-[:Is_PARENT_OF]->(child:Community)
+                RETURN child.community AS child_community
+            """
             entities = self.query(entity_query)
+            children = self.query(children_query)
             entity_ids = [f"{entity['title']}|{entity['type']}" for entity in entities]
+            children_ids = [child['child_community'] for child in children]
             communities.append({
                 "id": record["id"],
                 "title": record["title"],
+                "community": record["community"],
+                "human_readable_id": record["human_readable_id"],
                 "level": record["level"],
                 "parent": record["parent"],
                 "size": record["size"],
                 "period": record["period"],
-                "entity_ids": entity_ids
+                "entity_ids": entity_ids,
+                "children": children_ids
             })
         return pd.DataFrame(communities)
 
@@ -477,8 +486,8 @@ class Manager:
         Возвращает датафрейм с колонками:
         - source_title, source_type: идентификаторы исходной сущности
         - target_title, target_type: идентификаторы целевой сущности
-        - weight, description, text_unit_ids, updated_at: параметры связи
-        - created_at: дата создания связи (дополнительно)
+        - weight, description, combined_degree, text_unit_ids, updated_at: параметры связи
+        - created_at: дата создания связи (дополнительно)  
 
         Returns:
             pd.DataFrame: Датафрейм с результатами запроса.
@@ -492,7 +501,7 @@ class Manager:
             "weight": "float64",
             "id": "string",
             "description": "string",
-            "degree": "int64",
+            "combined_degree": "int64",
             "text_unit_ids": "object",  # list[str] или None
             "updated_at": "string",  # Neo4j datetime возвращается как строка или объект
             "created_at": "string",
@@ -507,7 +516,7 @@ class Manager:
             target.type AS target_type,
             r.id AS id, 
             r.weight AS weight,
-            r.degree AS degree,
+            r.combined_degree AS combined_degree,
             r.description AS description,
             r.text_unit_ids AS text_unit_ids,
             r.updated_at AS updated_at,
@@ -533,7 +542,7 @@ class Manager:
                     "target": f'{row.get("target_title")}|{row.get("target_type")}',
                     "weight": float(row["weight"]) if row.get("weight") is not None else None,
                     "description": row.get("description"),
-                    "degree": int(row["degree"]) if row.get("degree") is not None else None,
+                    "combined_degree": int(row["combined_degree"]) if row.get("combined_degree") is not None else None,
                     "id": row.get("id") or str(uuid.uuid4()),
                     "text_unit_ids": row.get("text_unit_ids"),  # уже list[str] или None
                     "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
@@ -659,17 +668,15 @@ class Manager:
                 parent_id = row.get("parent")
                 # Нормализация parent_id
                 if parent_id is None or (isinstance(parent_id, float) and pd.isna(parent_id)) or parent_id == -1:
-                    parent_id = None
-                else:
-                    parent_id = str(int(parent_id))
-
+                    parent_id = -1
+                
                 payload_nodes.append({
                     "id": str(row["id"]),   # идентификатор комьюнити   (uuid4)
-                    #"human_readable_id": str(row["human_readable_id"]),
+                    "human_readable_id": str(row["community"]),
                     "title": str(row.get("title", "")),
-                    "community": str(int(row["community"])),
+                    "community": int(row["community"]),
                     "level": int(row["level"]),
-                    "parent_id": parent_id,  # Сохраняем как свойство для справки
+                    "parent": int(parent_id),  # Сохраняем как свойство для справки
                     "size": int(row.get("size", 0)),
                     "period": str(row.get("period", ""))
                 })
@@ -684,7 +691,7 @@ class Manager:
         # =====================================================================
         # ЭТАП 2: ЗАГРУЗКА ВСЕХ СВЯЗЕЙ (RELATIONSHIPS)
         # =====================================================================
-        logger.info("Этап 2: Загрузка всех связей (IS_CHILD_OF и CONSISTS_OF)...")
+        logger.info("Этап 2: Загрузка всех связей (IS_CHILD_OF, IS_PARENT_OF и CONSISTS_OF)...")
 
         # Мы снова проходим по communities_rows, но теперь извлекаем только данные для связей
         for i in range(0, len(communities_rows), batch_size):
@@ -694,21 +701,20 @@ class Manager:
             payload_entities = []
 
             for row in batch:
-                comm_id = str(int(row["community"]))
-                parent_id = row.get("parent")
+                comm = int(row["community"])
+                parent = int(row.get("parent"))
 
-                # 2.1. Собираем связи IS_CHILD_OF
-                if parent_id is not None and not (
-                        isinstance(parent_id, float) and pd.isna(parent_id)) and parent_id != -1:
+                # 2.1. Собираем связи IS_CHILD_OF / IS_PARENT_OF       
+                if parent is not None and parent != -1:
                     payload_parents.append({
-                        "child_id": comm_id,
-                        "parent_id": str(int(parent_id))
+                        "child": comm,    
+                        "parent": parent
                     })
 
                 # 2.2. Собираем связи CONSISTS_OF (сплющиваем список entity_ids)
                 for entity_id_str in row.get("entity_ids", []):
                     payload_entities.append({
-                        "community_id": comm_id,
+                        "community": comm,
                         "entity_id_str": str(entity_id_str)
                     })
 
@@ -799,6 +805,8 @@ class Manager:
         UNWIND $payload AS row
         MATCH (c:Community {id: row.id})
         SET c.title = coalesce(row.title, c.title),
+            c.community = toInteger(row.community),
+            c.human_readable_id = row.human_readable_id,
             c.summary = row.summary,
             c.full_content = row.full_content,
             c.rank = row.rank,
@@ -819,7 +827,9 @@ class Manager:
         MERGE (c:Community {id: row.id})
         SET c.level = toInteger(row.level),
             c.title = row.title,
-            c.parent_id = row.parent_id,
+            c.community = toInteger(row.community),
+            c.human_readable_id = row.human_readable_id,
+            c.parent = toInteger(row.parent),
             c.size = toInteger(row.size),
             c.period = row.period
         """
@@ -831,9 +841,10 @@ class Manager:
         # еще не было создано (например, при частичной загрузке данных)
         query = """
         UNWIND $payload AS row
-        MERGE (child:Community {id: row.child_id})
-        MERGE (parent:Community {id: row.parent_id})
+        MERGE (child:Community {community: row.child})
+        MERGE (parent:Community {community: row.parent})
         MERGE (child)-[:IS_CHILD_OF]->(parent)
+        MERGE (parent)-[:IS_PARENT_OF]->(child)
         """
         tx.run(query, payload=payload)
 
@@ -841,7 +852,7 @@ class Manager:
     def _insert_entity_relations_tx(tx, payload: List[Dict[str, Any]]):
         query = """
         UNWIND $payload AS row
-        MATCH (c:Community {id: row.id}) // MATCH, т.к. на Этапе 1 мы гарантированно создали все Community
+        MATCH (c:Community {community: row.community}) // MATCH, т.к. на Этапе 1 мы гарантированно создали все Community
         WITH c, row, split(toString(row.entity_id_str), '|') AS parts
         WHERE size(parts) = 2
         MERGE (e:Entity {title: parts[0], type: parts[1]})

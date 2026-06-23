@@ -730,7 +730,7 @@ def finalize_community_reports(
     communities: pd.DataFrame,
 ) -> pd.DataFrame:
     community_reports = reports.merge(
-        communities.loc[:, ["id""community", "parent", "children", "size", "period"]],
+        communities.loc[:, ["id","community", "parent", "children", "size", "period"]],
         on="community",
         how="left",
         copy=False,
@@ -784,6 +784,13 @@ async def run_community_reports_pipeline_async(
 
         # ═══ Этап 2: Построение локального контекста ═══
         logger.info("Stage 2: Building local context for communities...")
+        # Выводим все колонки по 4 строки (примеров) для nodes и edges: временно увеличиваем ширину вывода и число столбцов
+        with pd.option_context('display.max_columns', None, 'display.width', 0):
+            print("Nodes sample:")
+            print(nodes.head(4))
+            print("Edges sample:")
+            print(edges.head(4))
+ 
         local_contexts = await build_local_context(
             nodes, edges, llm_client, model, max_input_length
         )

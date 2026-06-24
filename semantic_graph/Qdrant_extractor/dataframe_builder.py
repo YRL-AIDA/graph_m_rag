@@ -2,7 +2,10 @@ import pandas as pd
 from collections import defaultdict
 from typing import Optional
 
-def build_chunks_dataframe(adapter, doc_id_field="file_hash",doc_id: Optional[str] = None):
+from config import DOCUMENT_ID_FIELD
+
+
+def build_chunks_dataframe(adapter, doc_id_field=DOCUMENT_ID_FIELD, doc_id: Optional[str] = None):
     rows = []
 
     # 🔥 Формируем фильтр Qdrant, если передан конкретный документ

@@ -5,6 +5,34 @@ import json
 from dtype import Document,  EntityCreate, RelationshipCreate,EntitiesRequest, EntitiesResponse
 import pandas as pd
 import hashlib
+from config import (
+    COMMUNITY_CHILDREN,
+    COMMUNITY_ID,
+    COMMUNITY_LEVEL,
+    COMMUNITY_PARENT,
+    DESCRIPTION,
+    EDGE_DEGREE,
+    EDGE_SOURCE,
+    EDGE_TARGET,
+    EDGE_WEIGHT,
+    ENTITY_IDS,
+    EXPLANATION,
+    FINDINGS,
+    FULL_CONTENT,
+    FULL_CONTENT_JSON,
+    ID,
+    NODE_DEGREE,
+    PERIOD,
+    RATING,
+    SHORT_ID,
+    SIZE,
+    SUMMARY,
+    TEXT,
+    TEXT_UNIT_IDS,
+    TITLE,
+    TYPE,
+    NODE_FREQUENCY,
+)
 logger = logging.getLogger(__name__)
 import uuid
 
@@ -372,8 +400,7 @@ class Manager:
         """Initializes database constraints and vector indexes."""
         with self.conn.graph.session(database=self.name_db) as session:
             # 2. Entity Title-Type constraint
-            session.run(
-                "CREATE CONSTRAINT entity_title_type_unique IF NOT EXISTS FOR (e:Entity) REQUIRE (e.title, e.type) IS UNIQUE")
+            session.run( f"CREATE CONSTRAINT entity_title_type_unique IF NOT EXISTS FOR (e:Entity) REQUIRE (e.{TITLE}, e.{TYPE}) IS UNIQUE")
 
 
 
@@ -387,7 +414,7 @@ class Manager:
             # Обработка сущностей
             for entity in req.entities:
                 result = session.execute_write(self._create_or_update_entity_tx, entity)
-                entity_map[result["id"]] = result["id"]
+                entity_map[result[ID]] = result[ID]
                 if result["action"] == "created":
                     stats["nodes_created"] += 1
                 elif result["action"] == "updated":
@@ -416,14 +443,14 @@ class Manager:
         Возвращает датафрейм с полями, соответствующими результату self._create_or_update_entity_tx:
         id, title, type, description, data, updated_at, created_at
         """
-        query = """
+        query = f"""
         MATCH (e:Entity)
         RETURN 
-            e.id AS id,
-            e.title AS title,
-            e.type AS type,
-            e.description AS description,
-            e.degree AS degree,
+            e.{ID} AS {ID},
+            e.{TITLE} AS {TITLE},
+            e.{TYPE} AS {TYPE},
+            e.{DESCRIPTION} AS {DESCRIPTION},
+            e.{NODE_DEGREE} AS {NODE_DEGREE},
             e.data AS data,
             e.updated_at AS updated_at,
             e.created_at AS created_at
@@ -431,11 +458,11 @@ class Manager:
         results = self.query(query)
         # Формируем DataFrame только по этим полям
         return pd.DataFrame([{
-            "id": record["title"]+'|'+record["type"],
-            "title": record["title"],
-            "type": record["type"],
-            "description": record["description"],
-            "degree": record["degree"],
+            ID: record[TITLE]+'|'+record[TYPE],
+            TITLE: record[TITLE],
+            TYPE: record[TYPE],
+            DESCRIPTION: record[DESCRIPTION],
+            NODE_DEGREE: record[NODE_DEGREE],
             "data": record["data"],
             "updated_at": record["updated_at"],
             "created_at": record["created_at"],
@@ -445,36 +472,41 @@ class Manager:
         """
         Получить все комьюнити из Neo4j.
         """
-        query = "MATCH (c:Community) RETURN c.id AS id, c.title AS title, c.community AS community, c.human_readable_id AS human_readable_id, c.level AS level, c.parent AS parent, c.size AS size, c.period AS period"
+        query = (
+            f"MATCH (c:Community) RETURN c.{ID} AS {ID}, c.{TITLE} AS {TITLE}, "
+            f"c.{COMMUNITY_ID} AS {COMMUNITY_ID}, c.{SHORT_ID} AS {SHORT_ID}, "
+            f"c.{COMMUNITY_LEVEL} AS {COMMUNITY_LEVEL}, c.{COMMUNITY_PARENT} AS {COMMUNITY_PARENT}, "
+            f"c.{SIZE} AS {SIZE}, c.{PERIOD} AS {PERIOD}"
+        )
         results = self.query(query)
         # Добавляем entity_ids как список id-сущностей, связанных отношений CONSISTS_OF
         # Для каждой Community получаем связанные с ней Entity через CONSISTS_OF, формируем entity_ids = ['title|type', ...]
         communities = []
         for record in results:
-            community_id = record["id"]
+            community_id = record[ID]
             entity_query = f"""
-                MATCH (c:Community {{id: '{community_id}'}})-[:CONSISTS_OF]->(e:Entity)
-                RETURN e.title AS title, e.type AS type
+                MATCH (c:Community {{{ID}: '{community_id}'}})-[:CONSISTS_OF]->(e:Entity)
+                RETURN e.{TITLE} AS {TITLE}, e.{TYPE} AS {TYPE}
             """
             children_query = f"""
-                MATCH (c:Community {{id: '{community_id}'}})-[:Is_PARENT_OF]->(child:Community)
-                RETURN child.community AS child_community
+                MATCH (c:Community {{{ID}: '{community_id}'}})-[:Is_PARENT_OF]->(child:Community)
+                RETURN child.{COMMUNITY_ID} AS child_community
             """
             entities = self.query(entity_query)
             children = self.query(children_query)
-            entity_ids = [f"{entity['title']}|{entity['type']}" for entity in entities]
+            entity_ids = [f"{entity[TITLE]}|{entity[TYPE]}" for entity in entities]
             children_ids = [child['child_community'] for child in children]
             communities.append({
-                "id": record["id"],
-                "title": record["title"],
-                "community": record["community"],
-                "human_readable_id": record["human_readable_id"],
-                "level": record["level"],
-                "parent": record["parent"],
-                "size": record["size"],
-                "period": record["period"],
-                "entity_ids": entity_ids,
-                "children": children_ids
+                ID: record[ID],
+                TITLE: record[TITLE],
+                COMMUNITY_ID: record[COMMUNITY_ID],
+                SHORT_ID: record[SHORT_ID],
+                COMMUNITY_LEVEL: record[COMMUNITY_LEVEL],
+                COMMUNITY_PARENT: record[COMMUNITY_PARENT],
+                SIZE: record[SIZE],
+                PERIOD: record[PERIOD],
+                ENTITY_IDS: entity_ids,
+                COMMUNITY_CHILDREN: children_ids
             })
         return pd.DataFrame(communities)
 
@@ -496,29 +528,29 @@ class Manager:
         """
         # Определяем схему выходных данных для пустого результата
         columns_schema = {
-            "source": "string",
-            "target": "string",
-            "weight": "float64",
-            "id": "string",
-            "description": "string",
-            "combined_degree": "int64",
-            "text_unit_ids": "object",  # list[str] или None
+            EDGE_SOURCE: "string",
+            EDGE_TARGET: "string",
+            EDGE_WEIGHT: "float64",
+            ID: "string",
+            DESCRIPTION: "string",
+            EDGE_DEGREE: "int64",
+            TEXT_UNIT_IDS: "object",  # list[str] или None
             "updated_at": "string",  # Neo4j datetime возвращается как строка или объект
             "created_at": "string",
         }
 
-        cypher_query = """
+        cypher_query = f"""
         MATCH (source:Entity)-[r:RELATED]->(target:Entity)
         RETURN 
-            source.title AS source_title,
-            source.type AS source_type,
-            target.title AS target_title,
-            target.type AS target_type,
-            r.id AS id, 
-            r.weight AS weight,
-            r.combined_degree AS combined_degree,
-            r.description AS description,
-            r.text_unit_ids AS text_unit_ids,
+            source.{TITLE} AS source_title,
+            source.{TYPE} AS source_type,
+            target.{TITLE} AS target_title,
+            target.{TYPE} AS target_type,
+            r.{ID} AS {ID}, 
+            r.{EDGE_WEIGHT} AS {EDGE_WEIGHT},
+            r.{EDGE_DEGREE} AS {EDGE_DEGREE},
+            r.{DESCRIPTION} AS {DESCRIPTION},
+            r.{TEXT_UNIT_IDS} AS {TEXT_UNIT_IDS},
             r.updated_at AS updated_at,
             r.created_at AS created_at
         """
@@ -538,13 +570,13 @@ class Manager:
                 row = record.data()
                 # Нормализуем значения: Neo4j может возвращать None для отсутствующих полей
                 rows.append({
-                    "source": f'{row.get("source_title")}|{row.get("source_type")}',
-                    "target": f'{row.get("target_title")}|{row.get("target_type")}',
-                    "weight": float(row["weight"]) if row.get("weight") is not None else None,
-                    "description": row.get("description"),
-                    "combined_degree": int(row["combined_degree"]) if row.get("combined_degree") is not None else None,
-                    "id": row.get("id") or str(uuid.uuid4()),
-                    "text_unit_ids": row.get("text_unit_ids"),  # уже list[str] или None
+                    EDGE_SOURCE: f'{row.get("source_title")}|{row.get("source_type")}',
+                    EDGE_TARGET: f'{row.get("target_title")}|{row.get("target_type")}',
+                    EDGE_WEIGHT: float(row[EDGE_WEIGHT]) if row.get(EDGE_WEIGHT) is not None else None,
+                    DESCRIPTION: row.get(DESCRIPTION),
+                    EDGE_DEGREE: int(row[EDGE_DEGREE]) if row.get(EDGE_DEGREE) is not None else None,
+                    ID: row.get(ID) or str(uuid.uuid4()),
+                    TEXT_UNIT_IDS: row.get(TEXT_UNIT_IDS),  # уже list[str] или None
                     "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
                     "created_at": str(row["created_at"]) if row.get("created_at") else None,
                 })
@@ -571,39 +603,42 @@ class Manager:
 
     @staticmethod
     def _create_or_update_entity_tx(tx, entity: EntityCreate):
-        check_query = "MATCH (e:Entity {title: $title, type: $type}) RETURN e.text_unit_ids AS existing_tuis"
+        check_query = (
+            f"MATCH (e:Entity {{{TITLE}: $title, {TYPE}: $type}}) "
+            f"RETURN e.{TEXT_UNIT_IDS} AS existing_tuis"
+        )
         record = tx.run(check_query, title=entity.title, type=entity.type).single()
         entity_id = f"{entity.title}|{entity.type}"
 
         new_tuis = entity.text_unit_ids or []
         if record:
             if Manager._text_unit_ids_already_exist(record["existing_tuis"], new_tuis):
-                return {"id": entity_id, "action": "skipped"}
+                return {ID: entity_id, "action": "skipped"}
 
-            query = """
-                MATCH (e:Entity {title: $title, type: $type})
-                SET e.text_unit_ids = CASE 
-                    WHEN $text_unit_ids IS NOT NULL AND e.text_unit_ids IS NOT NULL THEN apoc.coll.toSet(e.text_unit_ids + $text_unit_ids)
-                    WHEN $text_unit_ids IS NOT NULL THEN $text_unit_ids ELSE e.text_unit_ids END,
-                    e.frequency = CASE WHEN $frequency IS NOT NULL THEN COALESCE(e.frequency, 0) + $frequency ELSE e.frequency END,
-                    e.description = CASE 
-                    WHEN $description IS NOT NULL AND e.description IS NOT NULL THEN e.description + '; ' + $description
-                    WHEN $description IS NOT NULL THEN $description ELSE e.description END,
-                    e.degree = CASE WHEN $degree IS NOT NULL THEN COALESCE(e.degree, 0) + $degree ELSE e.degree END,    
+            query = f"""
+                MATCH (e:Entity {{{TITLE}: $title, {TYPE}: $type}})
+                SET e.{TEXT_UNIT_IDS} = CASE 
+                    WHEN $text_unit_ids IS NOT NULL AND e.{TEXT_UNIT_IDS} IS NOT NULL THEN apoc.coll.toSet(e.{TEXT_UNIT_IDS} + $text_unit_ids)
+                    WHEN $text_unit_ids IS NOT NULL THEN $text_unit_ids ELSE e.{TEXT_UNIT_IDS} END,
+                    e.{NODE_FREQUENCY} = CASE WHEN $frequency IS NOT NULL THEN COALESCE(e.{NODE_FREQUENCY}, 0) + $frequency ELSE e.{NODE_FREQUENCY} END,
+                    e.{DESCRIPTION} = CASE 
+                    WHEN $description IS NOT NULL AND e.{DESCRIPTION} IS NOT NULL THEN e.{DESCRIPTION} + '; ' + $description
+                    WHEN $description IS NOT NULL THEN $description ELSE e.{DESCRIPTION} END,
+                    e.{NODE_DEGREE} = CASE WHEN $degree IS NOT NULL THEN COALESCE(e.{NODE_DEGREE}, 0) + $degree ELSE e.{NODE_DEGREE} END,    
                     e.updated_at = datetime()
-                RETURN e.title AS title, e.type AS type
+                RETURN e.{TITLE} AS {TITLE}, e.{TYPE} AS {TYPE}
                 """
             tx.run(query, **entity.dict(exclude_unset=True))
-            return {"id": entity_id, "action": "updated"}
+            return {ID: entity_id, "action": "updated"}
         else:
-            query = """
-                CREATE (e:Entity {title: $title, type: $type})
-                SET e.text_unit_ids = $text_unit_ids, e.frequency = $frequency, 
-                    e.description = $description, e.degree = $degree, e.created_at = datetime()
-                RETURN e.title AS title, e.type AS type
+            query = f"""
+                CREATE (e:Entity {{{TITLE}: $title, {TYPE}: $type}})
+                SET e.{TEXT_UNIT_IDS} = $text_unit_ids, e.{NODE_FREQUENCY} = $frequency, 
+                    e.{DESCRIPTION} = $description, e.{NODE_DEGREE} = $degree, e.created_at = datetime()
+                RETURN e.{TITLE} AS {TITLE}, e.{TYPE} AS {TYPE}
                 """
             result = tx.run(query, **entity.dict(exclude_unset=True)).single()
-            return {"id": f"{result['title']}|{result['type']}", "action": "created"}
+            return {ID: f"{result[TITLE]}|{result[TYPE]}", "action": "created"}
 
     @staticmethod
     def _create_relationship_tx(tx, rel: RelationshipCreate):
@@ -612,9 +647,9 @@ class Manager:
         stable_id = hashlib.sha256(
             f"{rel.source}|{rel.target}|{rel.description or ''}".encode()
         ).hexdigest()[:16]
-        check_query = """
-                MATCH (s:Entity {title: $s_title, type: $s_type})-[r:RELATED]->(t:Entity {title: $t_title, type: $t_type})
-                RETURN r.text_unit_ids AS existing_tuis
+        check_query = f"""
+                MATCH (s:Entity {{{TITLE}: $s_title, {TYPE}: $s_type}})-[r:RELATED]->(t:Entity {{{TITLE}: $t_title, {TYPE}: $t_type}})
+                RETURN r.{TEXT_UNIT_IDS} AS existing_tuis
             """
         record = tx.run(check_query, s_title=s_title, s_type=s_type, t_title=t_title, t_type=t_type).single()
 
@@ -623,22 +658,22 @@ class Manager:
             return {"action": "skipped"}
 
         if record:
-            query = """
-                    MATCH (s:Entity {title: $s_title, type: $s_type})-[r:RELATED]->(t:Entity {title: $t_title, type: $t_type})
-                    SET r.id = $rel_id
-                        r.weight = CASE WHEN $weight IS NOT NULL THEN COALESCE(r.weight, 0) + $weight ELSE r.weight END,
-                        r.description = CASE WHEN $description IS NOT NULL AND r.description IS NOT NULL THEN r.description + '; ' + $description
-                                             WHEN $description IS NOT NULL THEN $description ELSE r.description END,
-                        r.text_unit_ids = CASE WHEN $text_unit_ids IS NOT NULL AND r.text_unit_ids IS NOT NULL THEN apoc.coll.toSet(r.text_unit_ids + $text_unit_ids)
-                                               WHEN $text_unit_ids IS NOT NULL THEN $text_unit_ids ELSE r.text_unit_ids END,
-                        r.combined_degree = CASE WHEN $combined_degree IS NOT NULL THEN COALESCE(r.combined_degree, 0) + $combined_degree ELSE r.combined_degree END,
+            query = f"""
+                    MATCH (s:Entity {{{TITLE}: $s_title, {TYPE}: $s_type}})-[r:RELATED]->(t:Entity {{{TITLE}: $t_title, {TYPE}: $t_type}})
+                    SET r.{ID} = $rel_id
+                        r.{EDGE_WEIGHT} = CASE WHEN $weight IS NOT NULL THEN COALESCE(r.{EDGE_WEIGHT}, 0) + $weight ELSE r.{EDGE_WEIGHT} END,
+                        r.{DESCRIPTION} = CASE WHEN $description IS NOT NULL AND r.{DESCRIPTION} IS NOT NULL THEN r.{DESCRIPTION} + '; ' + $description
+                                             WHEN $description IS NOT NULL THEN $description ELSE r.{DESCRIPTION} END,
+                        r.{TEXT_UNIT_IDS} = CASE WHEN $text_unit_ids IS NOT NULL AND r.{TEXT_UNIT_IDS} IS NOT NULL THEN apoc.coll.toSet(r.{TEXT_UNIT_IDS} + $text_unit_ids)
+                                               WHEN $text_unit_ids IS NOT NULL THEN $text_unit_ids ELSE r.{TEXT_UNIT_IDS} END,
+                        r.{EDGE_DEGREE} = CASE WHEN $combined_degree IS NOT NULL THEN COALESCE(r.{EDGE_DEGREE}, 0) + $combined_degree ELSE r.{EDGE_DEGREE} END,
                         r.updated_at = datetime()
                 """
         else:
-            query = """
-                    MATCH (s:Entity {title: $s_title, type: $s_type}), (t:Entity {title: $t_title, type: $t_type})
+            query = f"""
+                    MATCH (s:Entity {{{TITLE}: $s_title, {TYPE}: $s_type}}), (t:Entity {{{TITLE}: $t_title, {TYPE}: $t_type}})
                     CREATE (s)-[r:RELATED]->(t)
-                    SET r.weight = $weight, r.description = $description, r.text_unit_ids = $text_unit_ids, r.combined_degree = $combined_degree, r.created_at = datetime()
+                    SET r.{EDGE_WEIGHT} = $weight, r.{DESCRIPTION} = $description, r.{TEXT_UNIT_IDS} = $text_unit_ids, r.{EDGE_DEGREE} = $combined_degree, r.created_at = datetime()
                 """
         tx.run(query, s_title=s_title, s_type=s_type, t_title=t_title, t_type=t_type,rel_id=stable_id,
                weight=rel.weight, description=rel.description, text_unit_ids=rel.text_unit_ids, combined_degree=rel.combined_degree)
@@ -665,20 +700,20 @@ class Manager:
             payload_nodes = []
 
             for row in batch:
-                parent_id = row.get("parent")
+                parent_id = row.get(COMMUNITY_PARENT)
                 # Нормализация parent_id
                 if parent_id is None or (isinstance(parent_id, float) and pd.isna(parent_id)) or parent_id == -1:
                     parent_id = -1
                 
                 payload_nodes.append({
-                    "id": str(row["id"]),   # идентификатор комьюнити   (uuid4)
-                    "human_readable_id": str(row["community"]),
-                    "title": str(row.get("title", "")),
-                    "community": int(row["community"]),
-                    "level": int(row["level"]),
-                    "parent": int(parent_id),  # Сохраняем как свойство для справки
-                    "size": int(row.get("size", 0)),
-                    "period": str(row.get("period", ""))
+                    ID: str(row[ID]),   # идентификатор комьюнити   (uuid4)
+                    SHORT_ID: str(row[COMMUNITY_ID]),
+                    TITLE: str(row.get(TITLE, "")),
+                    COMMUNITY_ID: int(row[COMMUNITY_ID]),
+                    COMMUNITY_LEVEL: int(row[COMMUNITY_LEVEL]),
+                    COMMUNITY_PARENT: int(parent_id),  # Сохраняем как свойство для справки
+                    SIZE: int(row.get(SIZE, 0)),
+                    PERIOD: str(row.get(PERIOD, ""))
                 })
 
             # Выполняем транзакцию только для узлов
@@ -701,20 +736,20 @@ class Manager:
             payload_entities = []
 
             for row in batch:
-                comm = int(row["community"])
-                parent = int(row.get("parent"))
+                comm = int(row[COMMUNITY_ID])
+                parent = int(row.get(COMMUNITY_PARENT))
 
                 # 2.1. Собираем связи IS_CHILD_OF / IS_PARENT_OF       
                 if parent is not None and parent != -1:
                     payload_parents.append({
                         "child": comm,    
-                        "parent": parent
+                        COMMUNITY_PARENT: parent
                     })
 
                 # 2.2. Собираем связи CONSISTS_OF (сплющиваем список entity_ids)
-                for entity_id_str in row.get("entity_ids", []):
+                for entity_id_str in row.get(ENTITY_IDS, []):
                     payload_entities.append({
-                        "community": comm,
+                        COMMUNITY_ID: comm,
                         "entity_id_str": str(entity_id_str)
                     })
 
@@ -755,8 +790,8 @@ class Manager:
             return stats
 
         report_fields = (
-            "title", "summary", "full_content", "rank",
-            "rating_explanation", "findings", "full_content_json",
+            TITLE, SUMMARY, FULL_CONTENT, RATING,
+            EXPLANATION, FINDINGS, FULL_CONTENT_JSON,
         )
 
         for i in range(0, len(community_reports), batch_size):
@@ -764,19 +799,19 @@ class Manager:
             payload: List[Dict[str, Any]] = []
 
             for _, row in batch.iterrows():
-                community_id = row.get("id")
+                community_id = row.get(ID)
                 if community_id is None or (isinstance(community_id, float) and pd.isna(community_id)):
                     stats["skipped"] += 1
                     continue
 
-                record: Dict[str, Any] = {"id": str(community_id)}
+                record: Dict[str, Any] = {ID: str(community_id)}
                 for field in report_fields:
                     value = row.get(field)
                     if value is None or (isinstance(value, float) and pd.isna(value)):
                         record[field] = None
-                    elif field == "findings" and hasattr(value, "tolist"):
+                    elif field == FINDINGS and hasattr(value, "tolist"):
                         record[field] = value.tolist()
-                    elif field == "rank":
+                    elif field == RATING:
                         record[field] = float(value)
                     else:
                         record[field] = str(value)
@@ -801,18 +836,18 @@ class Manager:
     # ---------------------------------------------------------------------
     @staticmethod
     def _update_community_reports_tx(tx, payload: List[Dict[str, Any]]) -> int:
-        query = """
+        query = f"""
         UNWIND $payload AS row
-        MATCH (c:Community {id: row.id})
-        SET c.title = coalesce(row.title, c.title),
-            c.community = toInteger(row.community),
-            c.human_readable_id = row.human_readable_id,
-            c.summary = row.summary,
-            c.full_content = row.full_content,
-            c.rank = row.rank,
-            c.rating_explanation = row.rating_explanation,
-            c.findings = row.findings,
-            c.full_content_json = row.full_content_json,
+        MATCH (c:Community {{{ID}: row.{ID}}})
+        SET c.{TITLE} = coalesce(row.{TITLE}, c.{TITLE}),
+            c.{COMMUNITY_ID} = toInteger(row.{COMMUNITY_ID}),
+            c.{SHORT_ID} = row.{SHORT_ID},
+            c.{SUMMARY} = row.{SUMMARY},
+            c.{FULL_CONTENT} = row.{FULL_CONTENT},
+            c.{RATING} = row.{RATING},
+            c.{EXPLANATION} = row.{EXPLANATION},
+            c.{FINDINGS} = row.{FINDINGS},
+            c.{FULL_CONTENT_JSON} = row.{FULL_CONTENT_JSON},
             c.report_updated_at = datetime()
         RETURN count(c) AS updated
         """
@@ -822,16 +857,16 @@ class Manager:
 
     @staticmethod
     def _insert_nodes_tx(tx, payload: List[Dict[str, Any]]):
-        query = """
+        query = f"""
         UNWIND $payload AS row
-        MERGE (c:Community {id: row.id})
-        SET c.level = toInteger(row.level),
-            c.title = row.title,
-            c.community = toInteger(row.community),
-            c.human_readable_id = row.human_readable_id,
-            c.parent = toInteger(row.parent),
-            c.size = toInteger(row.size),
-            c.period = row.period
+        MERGE (c:Community {{{ID}: row.{ID}}})
+        SET c.{COMMUNITY_LEVEL} = toInteger(row.{COMMUNITY_LEVEL}),
+            c.{TITLE} = row.{TITLE},
+            c.{COMMUNITY_ID} = toInteger(row.{COMMUNITY_ID}),
+            c.{SHORT_ID} = row.{SHORT_ID},
+            c.{COMMUNITY_PARENT} = toInteger(row.{COMMUNITY_PARENT}),
+            c.{SIZE} = toInteger(row.{SIZE}),
+            c.{PERIOD} = row.{PERIOD}
         """
         tx.run(query, payload=payload)
 
@@ -839,10 +874,10 @@ class Manager:
     def _insert_parent_relations_tx(tx, payload: List[Dict[str, Any]]):
         # Используем MERGE для обоих узлов на случай, если родительское комьюнити
         # еще не было создано (например, при частичной загрузке данных)
-        query = """
+        query = f"""
         UNWIND $payload AS row
-        MERGE (child:Community {community: row.child})
-        MERGE (parent:Community {community: row.parent})
+        MERGE (child:Community {{{COMMUNITY_ID}: row.child}})
+        MERGE (parent:Community {{{COMMUNITY_ID}: row.{COMMUNITY_PARENT}}})
         MERGE (child)-[:IS_CHILD_OF]->(parent)
         MERGE (parent)-[:IS_PARENT_OF]->(child)
         """
@@ -850,12 +885,12 @@ class Manager:
 
     @staticmethod
     def _insert_entity_relations_tx(tx, payload: List[Dict[str, Any]]):
-        query = """
+        query = f"""
         UNWIND $payload AS row
-        MATCH (c:Community {community: row.community}) // MATCH, т.к. на Этапе 1 мы гарантированно создали все Community
+        MATCH (c:Community {{{COMMUNITY_ID}: row.{COMMUNITY_ID}}}) // MATCH, т.к. на Этапе 1 мы гарантированно создали все Community
         WITH c, row, split(toString(row.entity_id_str), '|') AS parts
         WHERE size(parts) = 2
-        MERGE (e:Entity {title: parts[0], type: parts[1]})
+        MERGE (e:Entity {{{TITLE}: parts[0], {TYPE}: parts[1]}})
         MERGE (c)-[:CONSISTS_OF]->(e)
         """
         tx.run(query, payload=payload)

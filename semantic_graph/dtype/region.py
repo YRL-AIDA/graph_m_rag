@@ -1,5 +1,4 @@
-# CONTENT_LABELS = ['text', 'table', 'list', 'figure', 'interline_equation']
-CONTENT_LABELS = ['text', 'table', 'image']
+from config import CONTENT_LABELS
 class BBox:
     def __init__(self, x1, y1, x2, y2):
         self.x1 = x1

@@ -11,7 +11,18 @@ from fastapi import FastAPI, HTTPException
 sys.path.insert(0, str(Path(__file__).parent))
 
 from clasterization import create_communities
-from config import MODEL_NAME
+from config import (
+    API_HOST,
+    API_PORT,
+    CLUSTERIZATION_SEED,
+    COMMUNITY_REPORT_PROMPT,
+    ENTITY_TYPES,
+    MAX_CLUSTER_SIZE,
+    MODEL_NAME,
+    QDRANT_API_KEY,
+    QDRANT_URL,
+    USE_LCC,
+)
 from create_community_report import run_community_reports_pipeline_async
 from dtype import (
     DocumentRequest,
@@ -22,16 +33,10 @@ from dtype import (
 )
 from graphrag import run_extraction_pipeline_async
 from manager import Manager, ManagerConfig
-from prompts import COMMUNITY_REPORT_PROMPT
-from Qdrant_extractor.config import QDRANT_API_KEY, QDRANT_URL
 from Qdrant_extractor.dataframe_builder import build_chunks_dataframe
 from Qdrant_extractor.qdrant_adapter import QdrantStreamAdapter
 
 load_dotenv()
-
-MAX_CLUSTER_SIZE = 10
-USE_LCC = False
-
 
 config = ManagerConfig(
     uri='neo4j://' + os.environ['URL'],
@@ -47,11 +52,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Document Chunk Processing Service")
-
-# --- Константы ---
-# Типы сущностей лучше вынести в константу и писать в верхнем регистре
-ENTITY_TYPES = ['ORGANIZATION', 'PERSON', 'GEO', 'EVENT']
-
 
 # --- Вспомогательные функции ---
 def _build_response(doc_id: str, total_chunks: int, start_time: float, status: str, extra_stats: dict = None) -> Dict[str, Any]:
@@ -139,7 +139,7 @@ async def clastrize_graph() -> Dict[str, Any]:
     start_time = time.time()
     logger.info(f"Starting clusterization for graph")
     relations_df = doc_manager.get_entity_relationships()
-    examples = await create_communities(relations_df,max_cluster_size=MAX_CLUSTER_SIZE,use_lcc=USE_LCC,seed=256)
+    examples = await create_communities(relations_df, max_cluster_size=MAX_CLUSTER_SIZE, use_lcc=USE_LCC, seed=CLUSTERIZATION_SEED)
     print(examples)
     save_result = doc_manager.insert_communities_to_neo4j(examples)
     neo4j_status = save_result if isinstance(save_result, EntitiesResponse) else {}
@@ -176,4 +176,4 @@ async def create_community_report() -> Dict[str, Any]:
     )
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9595)
+    uvicorn.run(app, host=API_HOST, port=API_PORT)

@@ -10,61 +10,10 @@ from uuid import uuid4
 import numpy as np
 import graspologic_native as gn
 from collections import defaultdict
+
+from config import COMMUNITIES_FINAL_COLUMNS
+
 logger = logging.getLogger(__name__)
-ID = "id"
-SHORT_ID = "human_readable_id"
-TITLE = "title"
-DESCRIPTION = "description"
-
-TYPE = "type"
-
-
-
-# COMMUNITY HIERARCHY TABLE SCHEMA
-SUB_COMMUNITY = "sub_community"
-
-# COMMUNITY CONTEXT TABLE SCHEMA
-ALL_CONTEXT = "all_context"
-CONTEXT_STRING = "context_string"
-CONTEXT_SIZE = "context_size"
-CONTEXT_EXCEED_FLAG = "context_exceed_limit"
-
-# COMMUNITY REPORT TABLE SCHEMA
-COMMUNITY_ID = "community"
-COMMUNITY_LEVEL = "level"
-COMMUNITY_PARENT = "parent"
-COMMUNITY_CHILDREN = "children"
-TITLE = "title"
-SUMMARY = "summary"
-FINDINGS = "findings"
-RATING = "rank"
-EXPLANATION = "rating_explanation"
-FULL_CONTENT = "full_content"
-FULL_CONTENT_JSON = "full_content_json"
-
-ENTITY_IDS = "entity_ids"
-RELATIONSHIP_IDS = "relationship_ids"
-TEXT_UNIT_IDS = "text_unit_ids"
-COVARIATE_IDS = "covariate_ids"
-DOCUMENT_ID = "document_id"
-
-PERIOD = "period"
-SIZE = "size"
-DEGREE = "degree"
-
-COMMUNITIES_FINAL_COLUMNS = [
-    ID,
-    SHORT_ID,
-    COMMUNITY_ID,
-    COMMUNITY_LEVEL,
-    COMMUNITY_PARENT,
-    COMMUNITY_CHILDREN,
-    TITLE,
-    ENTITY_IDS,
-    RELATIONSHIP_IDS,
-    PERIOD,
-    SIZE,
-]
 Communities = list[tuple[int, int, int, list[str]]]
 def cluster_graph(
     edges: pd.DataFrame,

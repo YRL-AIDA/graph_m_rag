@@ -11,8 +11,8 @@ from create_community_report import (
     CommunityReportResponse,
     FindingModel,
 )
+from config import COMMUNITY_REPORT_PROMPT
 from graphrag import AsyncLLMClient, remove_think_tags
-from prompts import COMMUNITY_REPORT_PROMPT
 
 
 SAMPLE_REPORT_JSON = {

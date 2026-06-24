@@ -1,7 +1,12 @@
-from config import QDRANT_URL, QDRANT_API_KEY, OUTPUT_DIR
-from qdrant_adapter import QdrantStreamAdapter
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from config import OUTPUT_DIR, QDRANT_API_KEY, QDRANT_URL
 from dataframe_builder import build_chunks_dataframe
 from export_graphrag import export_to_graphrag
+from qdrant_adapter import QdrantStreamAdapter
 
 
 def main():

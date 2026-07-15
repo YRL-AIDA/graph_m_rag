@@ -1,8 +1,9 @@
 """Unified configuration for semantic_graph modules."""
 
 # --- LLM / model ---
-MODEL_NAME = 'Qwen/Qwen3-4B-Instruct-2507'
-N4G_URL = 'http://192.168.19.148:9998'
+#MODEL_NAME = 'Qwen/Qwen3-4B-Instruct-2507'
+MODEL_NAME = 'Qwen/Qwen3-VL-32B-Thinking'
+N4G_URL = 'http://0.0.0.0:7474'
 LLM_API_KEY = 'EMPTY'
 
 # --- Qdrant ---
@@ -167,12 +168,12 @@ DOCUMENTS_FINAL_COLUMNS = [
 ]
 
 # --- Graph extraction delimiters and prompts ---
-TOKENIZER_URL = "http://192.168.19.127:9886/tokenize"
+#TOKENIZER_URL = "http://192.168.19.127:9886/tokenize"
 #LLM_URL = 'http://192.168.19.127:9886/v1'
-TOKENIZER_URL = "http://localhost:9886/tokenize"
-LLM_URL = 'http://localhost:9886/v1'
-#TOKENIZER_URL = "http://192.168.19.127:8888/tokenize"
-#LLM_URL = 'http://192.168.19.127:8888/v1'
+#TOKENIZER_URL = "http://localhost:9886/tokenize"
+#LLM_URL = 'http://localhost:9886/v1'
+TOKENIZER_URL = "http://192.168.19.127:8888/tokenize"
+LLM_URL = 'http://192.168.19.127:8888/v1'
 TUPLE_DELIMITER = "<|>"
 RECORD_DELIMITER = "##"
 COMPLETION_DELIMITER = "<|COMPLETE|>"

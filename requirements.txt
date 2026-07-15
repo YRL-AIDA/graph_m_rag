@@ -40,3 +40,4 @@ ultralytics==8.4.12
 tokenizers==0.22.2
 addict==2.3.0
 pandas==2.3.3
+graspologic_native==1.2.5

@@ -98,7 +98,7 @@ class AsyncLLMClient:
             async with self.session.post(
                     self.tokenizer_url,
                     json={"model": model, "prompt": text},
-                    timeout=aiohttp.ClientTimeout(total=10)
+                    timeout=aiohttp.ClientTimeout(total=10000)
             ) as response:
                 response.raise_for_status()
                 data = await response.json()

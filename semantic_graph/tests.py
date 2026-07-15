@@ -81,7 +81,7 @@ class TestGetEntityRelationships(unittest.TestCase):
 
         # Проверка колонок
         expected_columns = [
-            "source", "target", "weight", "description",
+            "source", "target", "weight", "description", 'combined_degree', 'id',
             "text_unit_ids", "updated_at", "created_at"
         ]
         self.assertListEqual(list(result.columns), expected_columns)
@@ -107,7 +107,7 @@ class TestGetEntityRelationships(unittest.TestCase):
 
         # Проверяем, что все ожидаемые колонки присутствуют
         expected_columns = [
-            "source", "target", "weight", "description",
+            "source", "target", "weight",'id', "description", 'combined_degree',
             "text_unit_ids", "updated_at", "created_at"
         ]
         self.assertListEqual(list(result.columns), expected_columns)
@@ -130,7 +130,7 @@ class TestGetEntityRelationships(unittest.TestCase):
         self.assertTrue(result.empty)
 
         expected_columns = [
-            "source", "target", "weight", "description",
+            "source", "target", "weight", 'id',"description", 'combined_degree',
             "text_unit_ids", "updated_at", "created_at"
         ]
         self.assertListEqual(list(result.columns), expected_columns)
@@ -185,7 +185,7 @@ class TestGetEntitiesAndCommunitiesIntegration(unittest.TestCase):
         print(result)
 
         expected_columns = [
-            'id', 'title', 'type', 'description', 'data', 'updated_at', 'created_at',
+            'id', 'title', 'type', 'description', 'degree', 'data', 'updated_at', 'created_at',
         ]
         self.assertIsInstance(result, pd.DataFrame)
         self.assertListEqual(list(result.columns), expected_columns)
@@ -204,7 +204,8 @@ class TestGetEntitiesAndCommunitiesIntegration(unittest.TestCase):
         result = self.manager.get_community()
         print(result)
 
-        expected_columns = ['id', 'title', 'level', 'parent', 'size', 'period']
+        expected_columns = ['id', 'title', 'community', 'human_readable_id',
+                            'level', 'parent', 'size', 'period','entity_ids','children']
         self.assertIsInstance(result, pd.DataFrame)
         self.assertListEqual(list(result.columns), expected_columns)
         self.assertGreater(len(result), 0, 'В базе должны быть узлы Community')

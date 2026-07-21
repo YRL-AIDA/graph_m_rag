@@ -36,28 +36,26 @@
 
 **Правило**: При добавлении нового сервиса он получает собственное хранилище или явно определённый интерфейс доступа к существующему.
 
-### P2. Единый идентификатор документа — `file_hash` 
+### P2. Единый идентификатор документа — `file_hash`
 
 MD5-хеш содержимого PDF-файла используется как первичный ключ документа во **всех** хранилищах:
 
 - MinIO: `pdfs/{file_hash}_*/`
 - Qdrant: поле `file_hash` в payload каждой точки
 - Neo4j (document graph): `Document.name`
+- Neo4j (semantic graph): фильтрация по `text_unit_ids` (производный от `file_hash`)
 
 **Правило**: Любая новая сущность, связанная с документом, обязана использовать `file_hash` для cross-store идентификации.
 
-### P3. Сквозной `region_id` между Qdrant и Neo4j
+### P3. Сквозной идентификатор региона — `file_hash|region_id`
 
 Каждый элемент документа (region) имеет уникальный `region_id`, который совпадает в:
 - Qdrant point (в payload как `region_id`)
 - Neo4j Document Graph (`Region` node)
 
-**Правило**: При добавлении нового хранилища для элементов документа, `region_id` обязан быть консистентным.
-### P3. Единый идентификатор региона - `file_hash|region_id` 
+Как композитный уникальный идентификатор региона в Neo4j используется связка `file_hash|region_id`.
 
-Как уникальный идентификатор региона в neo4j используется связка из file_hash и region_id.
-
-**Правило**: При добавлении нового елемента в хранилище qdrant или neo4j для сохранения связи с источником должна использоватся комбинация `file_hash|region_id`, если источником выступает регион.
+**Правило**: При добавлении нового элемента в Qdrant или Neo4j для сохранения связи с источником обязана использоваться комбинация `file_hash|region_id`, если источником выступает регион документа.
 
 ### P4. Два графа Neo4j — два набора данных
 
@@ -80,27 +78,45 @@ MD5-хеш содержимого PDF-файла используется как
 
 **Исключение**: pandas DataFrames допустимы для внутренних вычислений в pipeline (извлечение, кластеризация), но на вход/выход модулей должны преобразовываться в Pydantic-модели.
 
-### P7. Промпты — поведение системы, а не детали реализации
+### P7. Промпты вынесены из кода в файлы
 
-LLM-промпты определяют поведение системы. Требования к промпту (что он должен делать, какие входы/выходы) фиксируются в спецификации. Точный текст промпта остаётся в коде (config.py или prompt-файлах).
+LLM-промпты определяют поведение системы. Промпт хранится в отдельном `.md` файле в директории `prompts/` сервиса. Код загружает промпт из файла, а не из строковой константы. Спецификация ссылается на файл промпта и описывает требования к нему (вход/выход/ограничения).
+
+**Расположение**: `{service}/prompts/{prompt-name}.md`
+
+**Правило**: Изменение текста промпта = изменение поведения системы = требует обновления спецификации.
 
 ### P8. Новая функциональность — только через спецификацию
 
 Любое изменение, добавляющее новое поведение, новый эндпоинт, новую модель данных или новый пайплайн, обязано начинаться со спецификации. Исключения требуют явного обоснования в самом spec-файле (поле `Exceptions`).
 
+### P9. Семантический граф глобален
+
+Пайплайны кластеризации (`clastrize_graph`) и генерации отчётов сообществ (`create_community_report`) в `semantic_graph` работают со всем графом Neo4j, а не в разрезе отдельного документа. Это осознанное архитектурное решение — сообщества строятся на всём корпусе загруженных документов для кросс-документных инсайтов.
+
+**Следствия**:
+- Добавление нового документа может изменить состав сообществ и отчёты для всего графа
+- Удаление документа требует перестроения сообществ
+- `process-document` (извлечение сущностей) — per-document операция
+- `clastrize_graph` + `create_community_report` — always-full-graph операции, запускаются после накопления изменений
+
+### P10. Мягкое удаление из семантического графа
+
+При удалении документа его сущности (`Entity`) и связи (`RELATED`) не удаляются физически из Neo4j, а помечаются как `archived`. Archived-сущности исключаются из кластеризации и отчётов, но сохраняются для возможности восстановления документа без повторного извлечения сущностей.
+
+**Правило**: Любая операция, скрывающая сущность из активного графа, должна использовать флаг `archived`, а не физическое удаление.
+
 ---
 
 ## 3. Конфигурация и управление средой
 
-### C1. app/ использует Pydantic Settings
+### C1. Единый стандарт: Pydantic Settings для всех сервисов
 
-Конфигурация главного приложения (`app/`) управляется через `pydantic-settings` с префиксами и классами настроек. Переменные окружения — единственный способ переопределения.
+Конфигурация любого сервиса управляется через `pydantic-settings` с классами настроек и префиксами. Переменные окружения — единственный способ переопределения.
 
-### C2. semantic_graph/ мигрирует на Pydantic Settings
+**Текущее состояние**: `app/config/settings.py` уже использует Pydantic Settings. `semantic_graph/config.py` — plain Python константы, требует миграции (см. Этап 7 плана внедрения).
 
-Текущая реализация `semantic_graph/config.py` (plain Python constants) должна быть заменена на Pydantic Settings в соответствии с P6. Переходный период: новые параметры добавляются через Settings-классы, старые остаются до рефакторинга.
-
-### C3. Чувствительные данные — только через .env
+### C2. Чувствительные данные — только через .env
 
 Пароли, API-ключи, токены никогда не хардкодятся. Всегда через `.env` / переменные окружения. Файл `.env` в `.gitignore`.
 
@@ -116,6 +132,7 @@ LLM-промпты определяют поведение системы. Тр�
 app/specs/                    # Спецификации главного приложения
 semantic_graph/specs/         # Спецификации semantic graph сервиса
 documet_index/specs/          # Спецификации документного графа
+mineru/specs/                 # Спецификации MinerU сервиса
 ```
 
 ### 4.2 Типы спецификаций
@@ -123,8 +140,8 @@ documet_index/specs/          # Спецификации документног�
 | Тип | Назначение | Имя файла |
 |-----|-----------|-----------|
 | **Service Spec** | Описывает сервис целиком: зона ответственности, API, зависимости | `SERVICE.md` |
-| **Feature Spec** | Описывает одну фичу/эндпоинт/пайплайн | `{feature-name}.md` |
-| **Data Model Spec** | Описывает модель данных, схему БД, форматы обмена | `models/{entity-name}.md` |
+| **Feature Spec** | Описывает одну фичу/эндпоинт/пайплайн. Для API-эндпоинтов включает OpenAPI-фрагмент. | `{feature-name}.md` |
+| **Data Model Spec** | Описывает модель данных, схему БД, форматы обмена. Каждая Pydantic-модель из `dtype/` обязана иметь spec. | `models/{entity-name}.md` |
 | **Pipeline Spec** | Описывает многоэтапный пайплайн обработки | `pipelines/{pipeline-name}.md` |
 | **Integration Spec** | Описывает контракт между двумя сервисами | `integrations/{from}-{to}.md` |
 
@@ -144,9 +161,9 @@ documet_index/specs/          # Спецификации документног�
 | ...    | REST/gRPC/driver | ... |
 
 ## API
-| Method | Path | Purpose | Request | Response |
-|--------|------|---------|---------|----------|
-| ...    | ...  | ...     | ...     | ...      |
+| Method | Path | Feature Spec | Purpose |
+|--------|------|-------------|---------|
+| POST   | /upload-pdf | [document-ingestion.md](document-ingestion.md) | Загрузка PDF |
 
 ## Data Model
 - Ссылки на Data Model Specs: ...
@@ -182,9 +199,45 @@ documet_index/specs/          # Спецификации документног�
 ### Output
 - Что возвращает, формат, коды ошибок
 
+## API Contract
+<!-- Только для эндпоинтов. Валидируется CI против сгенерированного OpenAPI. -->
+
+```openapi
+{method}: {path}
+summary: ...
+requestBody:
+  required: true
+  content:
+    application/json:
+      schema:
+        $ref: '#/components/schemas/{RequestModel}'
+responses:
+  '200':
+    description: ...
+    content:
+      application/json:
+        schema:
+          $ref: '#/components/schemas/{ResponseModel}'
+  '400':
+    description: Invalid request
+  '500':
+    description: Internal processing error
+```
+
 ## Data Flow
 - Какие хранилища затрагивает, в каком порядке
 - Диаграмма (mermaid или описание текстом)
+
+## LLM Interactions
+- Ссылки на файлы промптов: `prompts/{prompt-name}.md`
+- Требования к промпту (вход/выход/ограничения)
+
+## LLM Model Requirements
+- **Тип модели**: text-only / multimodal (text+image) / reasoning
+- **Минимальный размер контекста**: {N} токенов
+- **Язык выхода**: русский / английский / multilingual
+- **Требования к формату выхода**: JSON / свободный текст / структурированный список
+- Конкретная модель задаётся в конфигурации сервиса (Pydantic Settings)
 
 ## Error Handling
 - Какие ошибки возможны, как обрабатываются
@@ -208,7 +261,10 @@ documet_index/specs/          # Спецификации документног�
 - Для чего используется эта модель
 
 ## Schema
-- Pydantic-модель или описание полей
+```python
+class {ModelName}(BaseModel):
+    field: type  # описание
+```
 
 ## Storage
 - Где хранится: Qdrant payload / Neo4j node / MinIO object / in-memory
@@ -237,10 +293,10 @@ documet_index/specs/          # Спецификации документног�
 | 1. ... | ... | ... | ... | sequential/parallel |
 
 ## Data Flow Diagram
-- Визуализация этапов
+- Визуализация этапов (mermaid или текстом)
 
 ## LLM Interactions
-- Какие промпты используются, на каких этапах
+- Ссылки на файлы промптов: `prompts/{prompt-name}.md`
 - Требования к промптам (не точный текст)
 
 ## Performance Constraints
@@ -248,6 +304,60 @@ documet_index/specs/          # Спецификации документног�
 
 ## Error Recovery
 - Что происходит при сбое на каждом этапе
+```
+
+### 4.7 Формат OpenAPI-фрагментов в Feature Spec
+
+Для каждого API-эндпоинта Feature Spec обязан содержать секцию `## API Contract` с OpenAPI-фрагментом в формате YAML внутри блока `openapi`. Фрагмент описывает:
+
+- HTTP method и path
+- `summary` — краткое описание
+- `requestBody` — схема запроса (ссылка на Pydantic-модель из `dtype/`)
+- `responses` — минимум `200`, `400`, `500`
+
+CI проверяет, что:
+1. Сгенерированный из FastAPI OpenAPI содержит эндпоинт с такими же method, path и статус-кодами
+2. Все эндпоинты из кода имеют соответствующий Feature Spec с OpenAPI-фрагментом
+
+### 4.8 Формат файлов промптов
+
+Промпты хранятся в `{service}/prompts/{prompt-name}.md`:
+
+```markdown
+# Prompt: {Название промпта}
+
+## Purpose
+- Какую задачу решает промпт, в каком пайплайне используется
+
+## Input Variables
+| Переменная | Тип | Описание |
+|------------|-----|----------|
+| `{var}` | str | ... |
+
+## Output Format
+- Что ожидается от LLM (JSON, CSV, список кортежей, свободный текст)
+
+## Constraints
+- Ограничения: max токенов, обязательные поля, валидация выхода
+
+## Version
+- Версия промпта: {semver}
+
+---
+
+{текст промпта}
+```
+
+Код загружает промпт из файла:
+
+```python
+from pathlib import Path
+
+def load_prompt(name: str) -> str:
+    prompt_file = Path(__file__).parent / "prompts" / f"{name}.md"
+    content = prompt_file.read_text(encoding="utf-8")
+    # Извлекаем текст после разделителя `---`
+    return content.split("---", 2)[-1].strip()
 ```
 
 ---
@@ -268,7 +378,7 @@ Draft → Review → Approved → Implementation → Verification → Done
 | **Review** | Технический лидер / второй разработчик | Проверка на соответствие Constitution, полноту, непротиворечивость |
 | **Approved** | Технический лидер | Spec принят, можно начинать реализацию |
 | **Implementation** | Разработчик | Код соответствует спецификации |
-| **Verification** | Разработчик + Reviewer | Код ревью сверяется со spec, тесты проходят |
+| **Verification** | Разработчик + Reviewer | Код ревью сверяется со spec, тесты проходят, CI проверки зелёные |
 | **Done** | — | Spec и код в main-ветке |
 
 ### 5.2 Правила работы со спецификациями
@@ -282,9 +392,52 @@ Draft → Review → Approved → Implementation → Verification → Done
 ### 5.3 Исключения из spec-first
 
 Допустимо начинать без спецификации в случаях:
-- **Bug fix**: исправление поведения, которое уже должно работать по spec
+- **Bug fix**: исправление поведения, которое уже должно работать по spec (или по поведению системы «как есть» в переходный период)
 - **Refactoring**: изменение структуры кода без изменения поведения
 - **Experiments/Spikes**: исследовательский код в отдельной ветке (перед мержем обязана появиться спецификация)
+
+### 5.4 Переходный период (до полного покрытия spec-ами)
+
+На старте spec-ы отсутствуют для всего существующего кода. Правила переходного периода:
+
+| Ситуация | Правило |
+|----------|---------|
+| **Новая фича / эндпоинт / модель** | Строгий spec-first. Без Approved spec — код не пишется. |
+| **Изменение существующего поведения** | Сначала пишется spec «как есть» (документирование текущего поведения), затем spec обновляется под желаемое поведение, затем правится код. |
+| **Bug fix в существующем коде** | Можно править без spec. После фикса рекомендуется добавить spec на исправленный компонент. |
+| **Документирование существующего (Этапы 2-5 плана)** | Spec пишется по текущему поведению кода. Не требует изменения кода. |
+
+### 5.5 Автоматическая валидация (CI)
+
+CI выполняет следующие проверки при каждом PR:
+
+#### API Contracts (автоматически)
+1. Генерируется OpenAPI spec из FastAPI (`/openapi.json`)
+2. Для каждого эндпоинта в коде проверяется наличие Feature Spec с OpenAPI-фрагментом
+3. method, path и status codes в OpenAPI-фрагменте сверяются со сгенерированным spec
+4. Расхождение = CI failure
+
+#### Структурная проверка spec-файлов (автоматически)
+1. Каждая Pydantic-модель из `dtype/` должна иметь Data Model Spec в `specs/models/`
+2. Каждый spec-файл должен содержать все обязательные секции шаблона
+3. Отсутствие обязательной секции = CI warning (на переходный период) → CI failure (после полного покрытия)
+
+#### Pipeline/Behaviour проверка (ручной review)
+- Pipeline Specs и Data Model Specs проверяются вручную при code review
+- Reviewer обязан сверить описанное поведение с реализацией
+
+### 5.6 Критерии готовности спецификации
+
+Спецификация считается готовой (Approved), когда:
+
+1. **Все обязательные секции шаблона заполнены** — нет placeholder'ов `...` или `TODO`
+2. **Достаточно для реализации** — другой разработчик может реализовать фичу, руководствуясь только спецификацией, не заглядывая в существующий код
+3. **Определены граничные случаи** — секция Error Handling описывает все известные failure modes
+4. **Определены тест-кейсы** — секция Testing содержит конкретные сценарии для проверки
+5. **Нет противоречий с Constitution** — секция Exceptions пуста или содержит обоснованные отклонения
+
+Для документационных spec-ов (существующий код) дополнительно:
+6. **Соответствует фактическому поведению** — reviewer проверил, что описанное поведение совпадает с кодом
 
 ---
 
@@ -305,13 +458,14 @@ Draft → Review → Approved → Implementation → Verification → Done
 - Тестовые PDF — минимального размера, покрывают все типы контента
 - Для LLM-зависимых тестов — моки или предзаписанные ответы
 
-
 ### T3. LLM-тестирование
+
 Избегать вызовов LLM в тестах (недетерминированность, стоимость, скорость). Вместо этого:
 - Мокать `AsyncLLMClient` с предзаписанными ответами
 - Снэпшот-тесты для парсинга ответов LLM (`_parse_result`, `_parse_tuple`)
 
-Для тестирования API к моделям нужно вызывать LLM
+Исключение: для интеграционного тестирования API к LLM-моделям допустимы реальные вызовы с малыми моделями.
+
 ---
 
 ## 7. Именование и стиль кода
@@ -332,10 +486,15 @@ Draft → Review → Approved → Implementation → Verification → Done
 │   ├── models/
 │   ├── pipelines/
 │   └── integrations/
+├── prompts/             # LLM-промпты (вынесены из кода)
+│   ├── graph-extraction.md
+│   ├── summarize.md
+│   └── community-report.md
 ├── src/ или корень      # Код
 │   ├── api.py           # HTTP-эндпоинты (FastAPI)
 │   ├── manager.py       # Бизнес-логика / оркестрация
 │   ├── config/          # Конфигурация (Pydantic Settings)
+│   │   └── settings.py
 │   ├── dtype/           # Модели данных (Pydantic)
 │   └── tests/           # Тесты
 ```
@@ -343,7 +502,8 @@ Draft → Review → Approved → Implementation → Verification → Done
 ### N3. Конфигурация
 
 - Настройки, специфичные для сервиса — в `config/settings.py` (Pydantic Settings)
-- Общие константы и промпты — в `config.py` (на переходный период, с планом миграции на Pydantic)
+- Промпты — в `prompts/*.md` (не в коде)
+- Константы доменной логики (ENTITY_TYPES, MAX_CLUSTER_SIZE) — в `config/settings.py` как часть Settings-класса
 
 ---
 
@@ -384,41 +544,98 @@ Response: {task_id, ...} → async → content_list JSON
 
 ## 9. План внедрения
 
+План состоит из трёх треков:
+- **Трек A**: документирование существующей системы (пишем specs «как есть», без изменения кода)
+- **Трек B**: рефакторинг через specs (устраняем техдолг, код меняется, поведение — нет)
+- **Трек C**: новые фичи (требуют spec-first, добавляют новое поведение)
+
 ### Этап 1: Принять Constitution
 
-- [x] Constitution написан и согласован
-- [ ] Constitution размещён в `CONSTITUTION.md` в корне репозитория
+- [ ] Constitution согласован и размещён в `CONSTITUTION.md` в корне репозитория
 
-### Этап 2: Написать Service Specs для всех существующих сервисов
+### Этап 2: Трек A — Service Specs для всех сервисов
 
-- [ ] `app/specs/SERVICE.md` — главное приложение
-- [ ] `semantic_graph/specs/SERVICE.md` — сервис семантического графа
+- [ ] `app/specs/SERVICE.md` — главное приложение (все эндпоинты, зависимости, конфигурация, модели)
+- [ ] `semantic_graph/specs/SERVICE.md` — сервис семантического графа (включая описание утилиты `Qdrant_extractor/` как CLI-инструмента экспорта)
 - [ ] `documet_index/specs/SERVICE.md` — сервис документного графа
 - [ ] `mineru/specs/SERVICE.md` — сервис обработки PDF
 
-### Этап 3: Написать Pipeline Specs для критических пайплайнов
+### Этап 3: Трек A — Pipeline Specs для критических пайплайнов
 
-- [ ] `app/specs/pipelines/document-ingestion.md` — загрузка PDF
-- [ ] `app/specs/pipelines/question-answering.md` — вопросно-ответный пайплайн
-- [ ] `semantic_graph/specs/pipelines/entity-extraction.md` — извлечение сущностей
-- [ ] `semantic_graph/specs/pipelines/community-reports.md` — генерация отчётов сообществ
+- [ ] `app/specs/pipelines/document-ingestion.md` — пайплайн загрузки PDF (upload → mineru → embeddings → Qdrant → Neo4j → semantic_graph)
+- [ ] `app/specs/pipelines/question-answering.md` — вопросно-ответный пайплайн (embed question → search → rerank → LLM answer, включая lazy indexing fallback)
+- [ ] `app/specs/pipelines/document-deletion.md` — пайплайн удаления документа (Qdrant + Neo4j document graph + MinIO, текущее состояние)
+- [ ] `semantic_graph/specs/pipelines/entity-extraction.md` — извлечение сущностей и связей (Qdrant → LLM extraction → summarization, per-document)
+- [ ] `semantic_graph/specs/pipelines/community-detection.md` — кластеризация Leiden + генерация отчётов сообществ (always-full-graph, P9)
 
-### Этап 4: Написать Data Model Specs
+### Этап 4: Трек A — Data Model Specs
 
 - [ ] `app/specs/models/mineru-content-list.md` — формат выдачи MinerU
 - [ ] `app/specs/models/qdrant-point.md` — схема точки в Qdrant
-- [ ] `semantic_graph/specs/models/entity.md` — модель Entity
-- [ ] `semantic_graph/specs/models/community.md` — модель Community
+- [ ] `app/specs/models/question-request.md` — QuestionRequest / QuestionResponse
+- [ ] `semantic_graph/specs/models/entity.md` — Entity, EntityCreate, RelationshipCreate
+- [ ] `semantic_graph/specs/models/community.md` — Community, CommunityReport
+- [ ] `documet_index/specs/models/region.md` — Region, BBox, Style
+- [ ] `documet_index/specs/models/document.md` — Document, document graph schema
 
-### Этап 5: Написать Integration Specs
+### Этап 5: Трек A — Integration Specs
 
-- [ ] `app/specs/integrations/app-semantic_graph.md`
-- [ ] `app/specs/integrations/app-mineru.md`
+- [ ] `app/specs/integrations/app-semantic_graph.md` — контракт app → semantic_graph
+- [ ] `app/specs/integrations/app-mineru.md` — контракт app → mineru
 
-### Этап 6: Автоматизация проверки соответствия
+### Этап 6: Трек A — LLM Model Requirements
 
-- [ ] CI check: все spec-файлы соответствуют шаблонам
-- [ ] CI check: новый код без spec → warning
+- [ ] В каждый Service Spec добавить секцию с требованиями к LLM-моделям (тип, контекст, язык)
+- [ ] В каждый Pipeline/Feature Spec добавить секцию `## LLM Model Requirements`
+- [ ] Привести `.env` в актуальное состояние: убрать неиспользуемые модели Ollama, добавить актуальные модели vLLM
+
+### Этап 7: Трек B — Вынос промптов в файлы
+
+- [ ] Создать `semantic_graph/prompts/` директорию
+- [ ] Вынести `GRAPH_EXTRACTION_PROMPT` → `prompts/graph-extraction.md`
+- [ ] Вынести `SUMMARIZE_PROMPT` → `prompts/entity-summarize.md`
+- [ ] Вынести `CONTINUE_PROMPT` + `LOOP_PROMPT` → `prompts/graph-extraction.md` (как часть extraction)
+- [ ] Вынести `COMMUNITY_REPORT_PROMPT` → `prompts/community-report.md`
+- [ ] Вынести системный промпт Q&A из `app/src/api.py` → `app/prompts/qa-system.md`
+- [ ] Реализовать `load_prompt()` и обновить код для загрузки промптов из файлов
+- [ ] Обновить Pipeline Specs: добавить ссылки на файлы промптов
+
+### Этап 8: Трек B — Унификация конфигурации
+
+- [ ] Мигрировать `semantic_graph/config.py` на Pydantic Settings (`semantic_graph/config/settings.py`)
+- [ ] Перенести константы доменной логики (ENTITY_TYPES, MAX_CLUSTER_SIZE, CLUSTERIZATION_SEED) в Settings
+- [ ] Перенести URL-ы (LLM_URL, QDRANT_URL, TOKENIZER_URL) в Settings с env-переменными
+- [ ] Удалить старый `config.py` после миграции
+
+### Этап 9: Трек B — Унификация Neo4j Manager'ов
+
+- [ ] Создать `documet_index/specs/pipelines/neo4j-manager-unification.md` — spec на унификацию
+- [ ] Выделить общий базовый класс `BaseNeo4jManager` с connection management, query helpers
+- [ ] Перевести `documet_index/manager.py` на наследование от `BaseNeo4jManager`
+- [ ] Перевести `semantic_graph/manager.py` на наследование от `BaseNeo4jManager`
+- [ ] Удалить дублирующийся код
+
+### Этап 10: Трек B — Выпиливание мёртвого кода
+
+- [ ] Удалить `semantic_graph/neo4j_service.py:create_graph_from_graphrag_result()` (метод с неопределёнными переменными)
+- [ ] Проверить и удалить остальной неиспользуемый код (неиспользуемые импорты, дублирующиеся файлы типа `requirements.txt` / `req2.txt`)
+
+### Этап 11: Трек C — Мягкое удаление из семантического графа (P10)
+
+- [ ] Создать `semantic_graph/specs/soft-delete.md` — Feature Spec на мягкое удаление
+- [ ] Добавить поле `archived: bool = False` в модель Entity
+- [ ] Реализовать эндпоинт маркировки сущностей документа как archived
+- [ ] Модифицировать `clastrize_graph` — исключать archived-сущности из кластеризации
+- [ ] Модифицировать `create_community_report` — исключать archived-сущности из отчётов
+- [ ] Интегрировать в `DELETE /documents/{file_hash}` в app — вызывать archived-маркировку
+
+### Этап 12: Настройка CI-валидации
+
+- [ ] Добавить CI job: генерация OpenAPI из FastAPI (`/openapi.json`)
+- [ ] Добавить CI job: проверка наличия Feature Spec + OpenAPI-фрагмента для каждого эндпоинта
+- [ ] Добавить CI job: сверка method/path/status codes между spec и кодом
+- [ ] Добавить CI job: проверка наличия Data Model Spec для каждой Pydantic-модели в `dtype/` (warning на переходный период)
+- [ ] Добавить CI job: структурная проверка spec-файлов (все обязательные секции шаблона)
 
 ---
 

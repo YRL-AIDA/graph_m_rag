@@ -617,14 +617,14 @@ class Manager:
 
             query = f"""
                 MATCH (e:Entity {{{TITLE}: $title, {TYPE}: $type}})
-                SET e.{TEXT_UNIT_IDS} = CASE 
-                    WHEN $text_unit_ids IS NOT NULL AND e.{TEXT_UNIT_IDS} IS NOT NULL THEN apoc.coll.toSet(e.{TEXT_UNIT_IDS} + $text_unit_ids)
+                SET e.{TEXT_UNIT_IDS} = CASE
+                    WHEN $text_unit_ids IS NOT NULL AND e.{TEXT_UNIT_IDS} IS NOT NULL THEN e.{TEXT_UNIT_IDS} + [x IN $text_unit_ids WHERE NOT x IN e.{TEXT_UNIT_IDS}]
                     WHEN $text_unit_ids IS NOT NULL THEN $text_unit_ids ELSE e.{TEXT_UNIT_IDS} END,
                     e.{NODE_FREQUENCY} = CASE WHEN $frequency IS NOT NULL THEN COALESCE(e.{NODE_FREQUENCY}, 0) + $frequency ELSE e.{NODE_FREQUENCY} END,
-                    e.{DESCRIPTION} = CASE 
+                    e.{DESCRIPTION} = CASE
                     WHEN $description IS NOT NULL AND e.{DESCRIPTION} IS NOT NULL THEN e.{DESCRIPTION} + '; ' + $description
                     WHEN $description IS NOT NULL THEN $description ELSE e.{DESCRIPTION} END,
-                    e.{NODE_DEGREE} = CASE WHEN $degree IS NOT NULL THEN COALESCE(e.{NODE_DEGREE}, 0) + $degree ELSE e.{NODE_DEGREE} END,    
+                    e.{NODE_DEGREE} = CASE WHEN $degree IS NOT NULL THEN COALESCE(e.{NODE_DEGREE}, 0) + $degree ELSE e.{NODE_DEGREE} END,
                     e.updated_at = datetime()
                 RETURN e.{TITLE} AS {TITLE}, e.{TYPE} AS {TYPE}
                 """
@@ -660,11 +660,11 @@ class Manager:
         if record:
             query = f"""
                     MATCH (s:Entity {{{TITLE}: $s_title, {TYPE}: $s_type}})-[r:RELATED]->(t:Entity {{{TITLE}: $t_title, {TYPE}: $t_type}})
-                    SET r.{ID} = $rel_id
+                    SET r.{ID} = $rel_id,
                         r.{EDGE_WEIGHT} = CASE WHEN $weight IS NOT NULL THEN COALESCE(r.{EDGE_WEIGHT}, 0) + $weight ELSE r.{EDGE_WEIGHT} END,
                         r.{DESCRIPTION} = CASE WHEN $description IS NOT NULL AND r.{DESCRIPTION} IS NOT NULL THEN r.{DESCRIPTION} + '; ' + $description
                                              WHEN $description IS NOT NULL THEN $description ELSE r.{DESCRIPTION} END,
-                        r.{TEXT_UNIT_IDS} = CASE WHEN $text_unit_ids IS NOT NULL AND r.{TEXT_UNIT_IDS} IS NOT NULL THEN apoc.coll.toSet(r.{TEXT_UNIT_IDS} + $text_unit_ids)
+                        r.{TEXT_UNIT_IDS} = CASE WHEN $text_unit_ids IS NOT NULL AND r.{TEXT_UNIT_IDS} IS NOT NULL THEN r.{TEXT_UNIT_IDS} + [x IN $text_unit_ids WHERE NOT x IN r.{TEXT_UNIT_IDS}]
                                                WHEN $text_unit_ids IS NOT NULL THEN $text_unit_ids ELSE r.{TEXT_UNIT_IDS} END,
                         r.{EDGE_DEGREE} = CASE WHEN $combined_degree IS NOT NULL THEN COALESCE(r.{EDGE_DEGREE}, 0) + $combined_degree ELSE r.{EDGE_DEGREE} END,
                         r.updated_at = datetime()

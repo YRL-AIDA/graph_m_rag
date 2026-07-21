@@ -176,7 +176,7 @@ class AsyncGraphExtractor:
             if not loop_decision or loop_decision.strip().upper() != "Y":
                 break
         out = self._parse_result(full_result, source_id)
-        logger.info(f"parsing out: len={out[0] if response_text else 0}, ")
+        logger.info(f"parsing End: Find elements={out[0].shape[0]},\n Find relations={out[1].shape[0]} ")
         return out
 
     # Методы _parse_result и _empty_dfs не выполняют I/O и остаются синхронными
@@ -231,7 +231,7 @@ class AsyncGraphExtractor:
             
             relationships_df['source'] = relationships_df['source'].apply(lambda x: f"{x}|{entity_map[x]}")
             relationships_df['target'] = relationships_df['target'].apply(lambda x: f"{x}|{entity_map[x]}")
-        print(entities_df,relationships_df)
+        #print(entities_df,relationships_df)
         return entities_df, relationships_df
 
     def _empty_dfs(self) -> Tuple[pd.DataFrame, pd.DataFrame]:

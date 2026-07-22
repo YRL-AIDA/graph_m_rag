@@ -1079,18 +1079,24 @@ async def upload_pdf(file: UploadFile = File(...)):
                 }
 
                 response = requests.post(url, json=data)
-                
+
                 logger.info(f"Semantic graph construction initiated for document {file_hash}. Status: {response.status_code}")
                 if response.status_code == 200:
                     response_data = response.json()
                     logger.info(f"Semantic graph construction response: {response_data}")
-                    
-                    # Attempt to connect structural and semantic graphs
+
+                    # Connect structural and semantic graphs after semantic graph is built
                     try:
                         connect_structural_and_semantic_graphs(file_hash)
                     except Exception as e:
                         logger.error(f"Error connecting structural and semantic graphs: {e}")
                         
+                    # Additionally, run the comprehensive graph connection process
+                    try:
+                        comprehensive_connect_graphs(file_hash)
+                    except Exception as e:
+                        logger.error(f"Error in comprehensive graph connection: {e}")
+
                 else:
                     logger.error(f"Semantic graph construction failed with status {response.status_code}: {response.json()}")
             except Exception as e:
@@ -1171,19 +1177,19 @@ def check_document_indexed(file_hash: str, client=None) -> bool:
 def connect_structural_and_semantic_graphs(file_hash: str):
     """
     Connect structural graph (created from MinerU results) with semantic graph (created by semantic_graph module)
-    
+
     Args:
         file_hash: Hash of the PDF file
     """
     if not NEO4J_AVAILABLE:
         logger.warning("Neo4j not available, skipping graph connection")
         return
-    
+
     try:
         # Connect to Neo4j to create relationships between structural and semantic graphs
         neo4j_service = DocumentIndexService()
-        
-        # Create a relationship between the document node (structural graph) 
+
+        # Create a relationship between the document node (structural graph)
         # and any corresponding community nodes (semantic graph)
         with neo4j_service.driver.session() as session:
             # First, ensure the document node exists in the structural graph
@@ -1195,16 +1201,16 @@ def connect_structural_and_semantic_graphs(file_hash: str):
             RETURN d
             """
             session.run(doc_query, file_hash=file_hash)
-            
+
             # Find all entities related to this document in the structural graph
             struct_query = """
             MATCH (d:Document {file_hash: $file_hash})<-[:PART_OF]-(e:Entity)
             RETURN e.title AS entity_title, e.label AS entity_label
             """
-            
+
             struct_results = session.run(struct_query, file_hash=file_hash)
             document_entities = [(record["entity_title"], record["entity_label"]) for record in struct_results]
-            
+
             # Connect document entities to their corresponding communities in the semantic graph
             connected_count = 0
             for entity_title, entity_label in document_entities:
@@ -1216,24 +1222,51 @@ def connect_structural_and_semantic_graphs(file_hash: str):
                 MERGE (d)-[:CONNECTS_TO {relationship_type: 'SEMANTIC_CONNECTION', created_at: datetime()}]->(c)
                 RETURN COUNT(*) AS connection_count
                 """
-                
+
                 result = session.run(
                     connect_query,
                     file_hash=file_hash,
                     entity_title=entity_title,
                     entity_label=entity_label
                 )
-                
+
                 record = result.single()
                 connected_count += record["connection_count"] if record else 0
-            
+
             logger.info(f"Created {connected_count} connections between structural and semantic graphs for document {file_hash}")
-        
+
         neo4j_service.close()
-        
+
     except Exception as e:
         logger.error(f"Error connecting structural and semantic graphs for document {file_hash}: {e}")
         # Re-raise the exception to be caught by the caller
+        raise
+
+
+def comprehensive_connect_graphs(file_hash: str):
+    """
+    Perform a comprehensive connection between structural and semantic graphs.
+    
+    Args:
+        file_hash: Hash of the PDF file
+    """
+    if not NEO4J_AVAILABLE:
+        logger.warning("Neo4j not available, skipping comprehensive graph connection")
+        return
+
+    try:
+        from connect_graphs import connect_graphs_by_document, get_connection_statistics
+        
+        # Run the comprehensive connection process for the specific document
+        connect_graphs_by_document(document_id=file_hash)
+        
+        # Get connection statistics for the document
+        stats = get_connection_statistics(document_id=file_hash)
+        
+        logger.info(f"Comprehensive graph connection completed for document {file_hash}. Stats: {stats}")
+        
+    except Exception as e:
+        logger.error(f"Error in comprehensive graph connection for document {file_hash}: {e}")
         raise
 
 

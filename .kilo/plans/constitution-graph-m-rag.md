@@ -699,8 +699,212 @@ Response: {task_id, ...} → async → content_list JSON
 
 Constitution следует семантическому версионированию:
 
-- **MAJOR**: изменение принципов (P1-P8) или удаление инвариантов
+- **MAJOR**: изменение принципов (P1-P10) или удаление инвариантов
 - **MINOR**: добавление новых секций, шаблонов, правил без изменения существующих
 - **PATCH**: исправление опечаток, уточнение формулировок
 
 Изменения Constitution проходят через тот же процесс Review, что и спецификации.
+
+---
+
+## 11. Практики качественного кода
+
+### Q1. Управление ресурсами
+
+Любой ресурс, требующий явного освобождения (соединения с БД, HTTP-сессии, файловые дескрипторы), обязан управляться через контекстный менеджер или гарантированное закрытие.
+
+```python
+# Правильно — контекстный менеджер
+async with Neo4jConnection(uri, user, password) as conn:
+    result = await conn.query("MATCH (n) RETURN n")
+
+# Правильно — гарантированное закрытие
+client = QdrantClient(url=url)
+try:
+    result = client.search(...)
+finally:
+    client.close()
+```
+
+**Правило**: Каждый класс, владеющий внешним ресурсом, реализует `__aenter__`/`__aexit__` (асинхронный) или `__enter__`/`__exit__` (синхронный).
+
+### Q2. Обработка ошибок и устойчивость
+
+#### Retry для transient-ошибок
+
+Сетевые вызовы к внешним сервисам (LLM, базы данных) обязаны иметь retry-логику для transient-ошибок (timeout, connection reset, 429/503):
+
+```python
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    reraise=True
+)
+async def call_llm(messages: list[dict]) -> str:
+    ...
+```
+
+#### Никаких голых except
+
+```python
+# Запрещено
+try:
+    ...
+except:
+    pass
+
+# Правильно — ловить конкретные исключения
+try:
+    ...
+except (ConnectionError, TimeoutError) as e:
+    logger.error(f"Сетевая ошибка: {e}")
+    raise
+```
+
+### Q3. Валидация на границах
+
+Все данные, приходящие извне (HTTP-запросы, ответы внешних API, содержимое файлов), проходят валидацию через Pydantic-модели на ближайшей границе системы:
+
+```python
+# На входе — сырые данные от MinerU, сразу в Pydantic
+class MinerUContentItem(BaseModel):
+    type: Literal["text", "image", "table", "equation"]
+    text: str | None = None
+    bbox: list[float]
+    page_idx: int
+    ...
+
+@app.post("/upload-pdf")
+async def upload_pdf(file: UploadFile):
+    content = await mineru_client.process(file)
+    items = [MinerUContentItem(**item) for item in content["content_list"]]
+    # Дальше работаем ТОЛЬКО с Pydantic-моделями
+```
+
+### Q4. Идемпотентность операций
+
+Любая операция, которая может быть повторена (повторная загрузка документа, перезапуск пайплайна), должна быть идемпотентной:
+
+- **Neo4j**: `MERGE` вместо `CREATE` — повторная вставка не дублирует узлы
+- **Qdrant**: `upsert` вместо `insert` — повторная загрузка обновляет существующие точки
+- **MinIO**: проверка существования перед загрузкой — не перезаписываем без необходимости
+- **LLM extraction**: дедупликация сущностей по `(title, type)` — повторный прогон не создаёт дубликатов
+
+### Q5. Асинхронная гигиена
+
+```python
+# Запрещено — блокирующий вызов в async-контексте
+async def process():
+    time.sleep(5)  # БЛОКИРУЕТ event loop!
+
+# Правильно — CPU-bound через run_in_executor
+async def process():
+    await asyncio.get_event_loop().run_in_executor(None, time.sleep, 5)
+
+# Или — I/O-bound через async-библиотеку
+async def process():
+    await asyncio.sleep(5)
+```
+
+**Правила**:
+- Никаких `time.sleep()`, `requests.get()`, синхронных драйверов БД в async-функциях
+- CPU-bound операции (хэширование, рендеринг PDF) → `run_in_executor`
+- Все сетевые вызовы → `aiohttp`, `httpx.AsyncClient`, асинхронные драйверы (neo4j, qdrant-client)
+
+### Q6. Чистые функции и иммутабельность
+
+Предпочитать чистые функции без побочных эффектов для вычислений, не требующих I/O:
+
+```python
+# Чистая функция — результат зависит только от аргументов
+def parse_entities(llm_output: str, source_id: str) -> pd.DataFrame:
+    records = llm_output.split(RECORD_DELIMITER)
+    return _build_dataframe(records, source_id)
+
+# Функция с побочным эффектом — явно отделена
+async def save_entities_to_neo4j(entities_df: pd.DataFrame, manager: Manager):
+    ...
+```
+
+Данные, прошедшие валидацию, не мутируются — преобразования создают новые объекты.
+
+### Q7. Логирование
+
+```python
+from loguru import logger
+
+# Структурированное логирование с контекстом
+logger.info("Начало обработки документа", file_hash=file_hash, pages=len(pages))
+logger.error("Ошибка извлечения сущностей", chunk_id=chunk_id, error=str(e))
+
+# Уровни:
+# DEBUG   — детали внутренней работы (парсинг промптов, построение запросов)
+# INFO    — ключевые точки пайплайна (начало/конец этапа, количество результатов)
+# WARNING — recoverable проблемы (retry, fallback, degraded mode)
+# ERROR   — ошибки, требующие внимания (сбой этапа, недоступность сервиса)
+```
+
+Каждый запрос/пайплайн получает уникальный идентификатор трассировки, который передаётся во все логи:
+
+```python
+import uuid
+trace_id = str(uuid.uuid4())[:8]
+logger.bind(trace_id=trace_id).info("Запрос начат", question=question)
+```
+
+### Q8. Внедрение зависимостей
+
+Избегать глобальных singleton'ов. Зависимости передаются явно через конструктор:
+
+```python
+# Правильно — зависимости явные
+class AsyncGraphExtractor:
+    def __init__(self, llm_client: AsyncLLMClient, model: str):
+        self.llm_client = llm_client
+        self.model = model
+
+# Неправильно — глобальный singleton
+LLM_CLIENT = AsyncLLMClient(...)  # модульный уровень
+
+class AsyncGraphExtractor:
+    def extract(self, text: str):
+        return LLM_CLIENT.generate(text)  # неявная зависимость
+```
+
+### Q9. Типизация
+
+Все публичные функции и методы обязаны иметь аннотации типов:
+
+```python
+# Правильно
+async def extract(
+    self,
+    text: str,
+    entity_types: list[str],
+    source_id: str
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ...
+
+# Неправильно
+async def extract(self, text, entity_types, source_id):
+    ...
+```
+
+### Q10. Тестирование контрактов, а не реализации
+
+Тесты проверяют поведение (вход → выход), а не внутреннее устройство:
+
+```python
+# Правильно — тестируем контракт
+def test_entity_parsing():
+    output = '("entity"<|>Alice<|>PERSON<|>Инженер)##("entity"<|>Bob<|>PERSON<|>Дизайнер)'
+    entities, rels = parse_result(output, "doc-1")
+    assert len(entities) == 2
+    assert entities.iloc[0]["title"] == "Alice"
+
+# Неправильно — тестируем внутренности
+def test_internal_regex():
+    assert ENTITY_PATTERN.match("...")  # тест зависит от детали реализации
+```

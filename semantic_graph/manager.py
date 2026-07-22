@@ -56,12 +56,13 @@ class Neo4jConnection:
             self.graph.close()
             logger.info("Neo4j connection closed")
 
-    def query(self, query: str, db: Optional[str] = None) -> list:
+    def query(self, query: str, db: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> list:
         """Execute a Cypher query.
 
         Args:
             query: Cypher query string
             db: Optional database name
+            params: Optional dictionary of parameters for the query
 
         Returns:
             List of query results
@@ -71,7 +72,10 @@ class Neo4jConnection:
         response = None
         try:
             session = self.graph.session(database=db) if db is not None else self.graph.session()
-            response = list(session.run(query))
+            if params:
+                response = list(session.run(query, **params))
+            else:
+                response = list(session.run(query))
         except Exception as e:
             logger.error(f"Query failed: {e}")
             raise
@@ -87,6 +91,18 @@ class Neo4jConnection:
             return session.execute_write(query, *args, **kwargs)
         finally:
             session.close()
+
+    def query(self, query: str, params: Optional[Dict[str, Any]] = None) -> list:
+        """Execute a Cypher query on the database.
+
+        Args:
+            query: Cypher query string
+            params: Optional dictionary of parameters for the query
+
+        Returns:
+            List of query results
+        """
+        return self.conn.query(query, self.name_db, params)
 class ManagerConfig:
     """Configuration for Document Manager."""
 
@@ -629,15 +645,49 @@ class Manager:
                 RETURN e.{TITLE} AS {TITLE}, e.{TYPE} AS {TYPE}
                 """
             tx.run(query, **entity.dict(exclude_unset=True))
+            
+            # Connect the entity to the structural graph elements (TextUnits and Documents)
+            if entity.text_unit_ids:
+                for tui in entity.text_unit_ids:
+                    connect_query = f"""
+                        MATCH (e:Entity {{{TITLE}: $title, {TYPE}: $type}})
+                        MATCH (tu:TextUnit {{{ID}: $tui}})
+                        MERGE (e)-[:PART_OF]->(tu)
+                        
+                        // Also connect to the document that contains the text unit
+                        WITH e, tu
+                        MATCH (tu)-[:PART_OF]->(d:Document)
+                        WHERE NOT (e)-[:PART_OF_DOCUMENT]->(d)
+                        MERGE (e)-[:PART_OF_DOCUMENT]->(d)
+                    """
+                    tx.run(connect_query, title=entity.title, type=entity.type, tui=tui)
+            
             return {ID: entity_id, "action": "updated"}
         else:
             query = f"""
                 CREATE (e:Entity {{{TITLE}: $title, {TYPE}: $type}})
-                SET e.{TEXT_UNIT_IDS} = $text_unit_ids, e.{NODE_FREQUENCY} = $frequency, 
+                SET e.{TEXT_UNIT_IDS} = $text_unit_ids, e.{NODE_FREQUENCY} = $frequency,
                     e.{DESCRIPTION} = $description, e.{NODE_DEGREE} = $degree, e.created_at = datetime()
                 RETURN e.{TITLE} AS {TITLE}, e.{TYPE} AS {TYPE}
                 """
             result = tx.run(query, **entity.dict(exclude_unset=True)).single()
+            
+            # Connect the newly created entity to the structural graph elements (TextUnits and Documents)
+            if entity.text_unit_ids:
+                for tui in entity.text_unit_ids:
+                    connect_query = f"""
+                        MATCH (e:Entity {{{TITLE}: $title, {TYPE}: $type}})
+                        MATCH (tu:TextUnit {{{ID}: $tui}})
+                        MERGE (e)-[:PART_OF]->(tu)
+                        
+                        // Also connect to the document that contains the text unit
+                        WITH e, tu
+                        MATCH (tu)-[:PART_OF]->(d:Document)
+                        WHERE NOT (e)-[:PART_OF_DOCUMENT]->(d)
+                        MERGE (e)-[:PART_OF_DOCUMENT]->(d)
+                    """
+                    tx.run(connect_query, title=entity.title, type=entity.type, tui=tui)
+            
             return {ID: f"{result[TITLE]}|{result[TYPE]}", "action": "created"}
 
     @staticmethod
@@ -892,12 +942,73 @@ class Manager:
         WHERE size(parts) = 2
         MERGE (e:Entity {{{TITLE}: parts[0], {TYPE}: parts[1]}})
         MERGE (c)-[:CONSISTS_OF]->(e)
+        
+        // Create connection between the Community and the Document that contains the Entity
+        // This links the semantic graph (Communities) to the structural graph (Documents)
+        WITH c, e
+        MATCH (e)-[:PART_OF]->(tu:TextUnit)-[:PART_OF]->(d:Document)
+        WHERE NOT (c)-[:CONNECTED_TO_DOCUMENT]->(d)
+        MERGE (c)-[:CONNECTED_TO_DOCUMENT]->(d)
         """
         tx.run(query, payload=payload)
     # --- ВСПОМОГАТЕЛЬНЫЕ ЛОГИЧЕСКИЕ ФУНКЦИИ ---
+    def add_structural_link(self, semantic_node_id: str, structural_node_id: str, relationship_type: str = "STRUCTURAL_CONNECTION"):
+        """Add a link between a semantic graph node and a structural graph node.
+
+        Args:
+            semantic_node_id: ID of the node in the semantic graph
+            structural_node_id: ID of the node in the structural graph
+            relationship_type: Type of relationship between the nodes
+        """
+        try:
+            query = """
+            MATCH (sn)
+            WHERE elementId(sn) = $semantic_node_id
+            MATCH (dn)
+            WHERE elementId(dn) = $structural_node_id
+            MERGE (sn)-[:LINKED_TO {relationship_type: $relationship_type, created_at: datetime()}]->(dn)
+            """
+            with self.conn.graph.session(database=self.name_db) as session:
+                session.run(query, {
+                    "semantic_node_id": semantic_node_id,
+                    "structural_node_id": structural_node_id,
+                    "relationship_type": relationship_type
+                })
+            logger.info(f"Added structural link from {semantic_node_id} to {structural_node_id}")
+        except Exception as e:
+            logger.error(f"Error adding structural link: {e}")
+            raise
+
+    def get_structural_links(self, semantic_node_id: str):
+        """Get structural graph nodes linked to a semantic graph node.
+
+        Args:
+            semantic_node_id: ID of the node in the semantic graph
+
+        Returns:
+            List of linked structural graph nodes
+        """
+        try:
+            query = """
+            MATCH (sn)
+            WHERE elementId(sn) = $semantic_node_id
+            OPTIONAL MATCH (sn)-[r:LINKED_TO]->(dn)
+            RETURN elementId(dn) AS structural_node_id, r.relationship_type AS relationship_type, r.created_at AS created_at
+            """
+            with self.conn.graph.session(database=self.name_db) as session:
+                result = session.run(query, {"semantic_node_id": semantic_node_id})
+                return [record.data() for record in result]
+        except Exception as e:
+            logger.error(f"Error getting structural links: {e}")
+            return []
+
     @staticmethod
     def _text_unit_ids_already_exist(existing: Optional[List[str]], new: Optional[List[str]]) -> bool:
         if not new: return True
         if not existing: return False
         existing_set = set(existing)
         return all(tuid in existing_set for tuid in new)
+
+    def close(self):
+        """Close the database connection."""
+        self.conn.close()

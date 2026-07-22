@@ -28,12 +28,13 @@ class Neo4jConnection:
             self.graph.close()
             logger.info("Neo4j connection closed")
 
-    def query(self, query: str, db: Optional[str] = None) -> list:
+    def query(self, query: str, db: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> list:
         """Execute a Cypher query.
 
         Args:
             query: Cypher query string
             db: Optional database name
+            params: Optional dictionary of parameters for the query
 
         Returns:
             List of query results
@@ -43,7 +44,10 @@ class Neo4jConnection:
         response = None
         try:
             session = self.graph.session(database=db) if db is not None else self.graph.session()
-            response = list(session.run(query))
+            if params:
+                response = list(session.run(query, **params))
+            else:
+                response = list(session.run(query))
         except Exception as e:
             logger.error(f"Query failed: {e}")
             raise
@@ -323,16 +327,17 @@ class Manager:
             logger.error(f"Error getting related context for {element_type}: {e}")
             return {"parent_element": None, "sibling_captions": [], "sibling_footnotes": []}
 
-    def query(self, query: str) -> list:
+    def query(self, query: str, params: Optional[Dict[str, Any]] = None) -> list:
         """Execute a Cypher query on the database.
 
         Args:
             query: Cypher query string
+            params: Optional dictionary of parameters for the query
 
         Returns:
             List of query results
         """
-        return self.conn.query(query, self.name_db)
+        return self.conn.query(query, self.name_db, params)
 
     def status(self) -> dict:
         """Get database status information.
@@ -348,6 +353,54 @@ class Manager:
         except Exception as e:
             logger.error(f"Error getting status: {e}")
             return {"node_count": 0, "error": str(e)}
+
+    def add_semantic_link(self, structural_node_id: str, semantic_node_id: str, relationship_type: str = "SEMANTIC_CONNECTION"):
+        """Add a link between a structural graph node and a semantic graph node.
+
+        Args:
+            structural_node_id: ID of the node in the structural graph
+            semantic_node_id: ID of the node in the semantic graph
+            relationship_type: Type of relationship between the nodes
+        """
+        try:
+            query = """
+            MATCH (sn)
+            WHERE elementId(sn) = $structural_node_id
+            MATCH (en)
+            WHERE elementId(en) = $semantic_node_id
+            MERGE (sn)-[:LINK {relationship_type: $relationship_type, created_at: datetime()}]->(en)
+            """
+            self.query(query, params={
+                "structural_node_id": structural_node_id,
+                "semantic_node_id": semantic_node_id,
+                "relationship_type": relationship_type
+            })
+            logger.info(f"Added semantic link from {structural_node_id} to {semantic_node_id}")
+        except Exception as e:
+            logger.error(f"Error adding semantic link: {e}")
+            raise
+
+    def get_semantic_links(self, structural_node_id: str):
+        """Get semantic graph nodes linked to a structural graph node.
+
+        Args:
+            structural_node_id: ID of the node in the structural graph
+
+        Returns:
+            List of linked semantic graph nodes
+        """
+        try:
+            query = """
+            MATCH (sn)
+            WHERE elementId(sn) = $structural_node_id
+            OPTIONAL MATCH (sn)-[r:LINK]->(en)
+            RETURN elementId(en) AS semantic_node_id, r.relationship_type AS relationship_type, r.created_at AS created_at
+            """
+            result = self.query(query, params={"structural_node_id": structural_node_id})
+            return [record.data() for record in result]
+        except Exception as e:
+            logger.error(f"Error getting semantic links: {e}")
+            return []
 
     def close(self):
         """Close the database connection."""

@@ -9,7 +9,8 @@ def test_upload_pdf_directory():
     """
     # Директория с PDF файлами для тестирования
     #pdf_directory = "/home/ivan/work/MMLongBench-Doc/data/documents2"
-    pdf_directory = "/home/sunveil/Documents/projects/laba/graph-m-rag/data/MMLongBench-Doc/data/documents"
+    pdf_directory = "/home/sunveil/Documents/projects/laba/graph-m-rag/data/SmallerDataset/documents"
+    #pdf_directory = "/home/sunveil/Documents/projects/laba/graph-m-rag/data/MMLongBench-Doc/data/documents"
     # Проверяем существование директории
     if not os.path.exists(pdf_directory):
         print(f"Директория {pdf_directory} не найдена")

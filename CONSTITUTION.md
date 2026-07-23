@@ -5,8 +5,6 @@
 > **Версия**: 1.0.0  
 > **Статус**: Принято
 
----
-
 ## 1. Идентичность проекта
 
 **graph_m_rag** — система графового мультимодального Retrieval-Augmented Generation (GraphRAG) для обработки PDF-документов:
@@ -17,8 +15,6 @@
 - Извлечение семантического графа знаний: сущности, связи, сообщества (LLM + Neo4j)
 - Генерация иерархических отчётов по сообществам
 - Вопросно-ответный интерфейс с мультимодальным контекстом (текст + изображения)
-
----
 
 ## 2. Неизменяемые принципы
 
@@ -276,97 +272,3 @@ Response: {task_id, ...} → async → content_list JSON
 ### I5. semantic_graph → Neo4j (direct driver)
 
 Создание `Entity`, `Community` узлов и связей через `Manager`.
-
----
-
-## 9. План внедрения
-
-План состоит из трёх треков:
-- **Трек A**: документирование существующей системы (пишем specs «как есть», без изменения кода)
-- **Трек B**: рефакторинг через specs (устраняем техдолг, код меняется, поведение — нет)
-- **Трек C**: новые фичи (требуют spec-first, добавляют новое поведение)
-
-
-### Этап 2: Трек A — Service Specs для всех сервисов
-
-- [ ] `app/specs/SERVICE.md` — главное приложение (все эндпоинты, зависимости, конфигурация, модели)
-- [ ] `semantic_graph/specs/SERVICE.md` — сервис семантического графа (включая описание утилиты `Qdrant_extractor/` как CLI-инструмента экспорта)
-- [ ] `documet_index/specs/SERVICE.md` — сервис документного графа
-- [ ] `mineru/specs/SERVICE.md` — сервис обработки PDF
-
-### Этап 3: Трек A — Pipeline Specs для критических пайплайнов
-
-- [ ] `app/specs/pipelines/document-ingestion.md` — пайплайн загрузки PDF (upload → mineru → embeddings → Qdrant → Neo4j → semantic_graph)
-- [ ] `app/specs/pipelines/question-answering.md` — вопросно-ответный пайплайн (embed question → search → rerank → LLM answer, включая lazy indexing fallback)
-- [ ] `app/specs/pipelines/document-deletion.md` — пайплайн удаления документа (Qdrant + Neo4j document graph + MinIO, текущее состояние)
-- [ ] `semantic_graph/specs/pipelines/entity-extraction.md` — извлечение сущностей и связей (Qdrant → LLM extraction → summarization, per-document)
-- [ ] `semantic_graph/specs/pipelines/community-detection.md` — кластеризация Leiden + генерация отчётов сообществ (always-full-graph, P9)
-
-### Этап 4: Трек A — Data Model Specs
-
-- [ ] `app/specs/models/mineru-content-list.md` — формат выдачи MinerU
-- [ ] `app/specs/models/qdrant-point.md` — схема точки в Qdrant
-- [ ] `app/specs/models/question-request.md` — QuestionRequest / QuestionResponse
-- [ ] `semantic_graph/specs/models/entity.md` — Entity, EntityCreate, RelationshipCreate
-- [ ] `semantic_graph/specs/models/community.md` — Community, CommunityReport
-- [ ] `documet_index/specs/models/region.md` — Region, BBox, Style
-- [ ] `documet_index/specs/models/document.md` — Document, document graph schema
-
-### Этап 5: Трек A — Integration Specs
-
-- [ ] `app/specs/integrations/app-semantic_graph.md` — контракт app → semantic_graph
-- [ ] `app/specs/integrations/app-mineru.md` — контракт app → mineru
-
-### Этап 6: Трек A — LLM Model Requirements
-
-- [ ] В каждый Service Spec добавить секцию с требованиями к LLM-моделям (тип, контекст, язык)
-- [ ] В каждый Pipeline/Feature Spec добавить секцию `## LLM Model Requirements`
-- [ ] Привести `.env` в актуальное состояние: убрать неиспользуемые модели Ollama, добавить актуальные модели vLLM
-
-### Этап 7: Трек B — Вынос промптов в файлы
-
-- [ ] Создать `semantic_graph/prompts/` директорию
-- [ ] Вынести `GRAPH_EXTRACTION_PROMPT` → `prompts/graph-extraction.md`
-- [ ] Вынести `SUMMARIZE_PROMPT` → `prompts/entity-summarize.md`
-- [ ] Вынести `CONTINUE_PROMPT` + `LOOP_PROMPT` → `prompts/graph-extraction.md` (как часть extraction)
-- [ ] Вынести `COMMUNITY_REPORT_PROMPT` → `prompts/community-report.md`
-- [ ] Вынести системный промпт Q&A из `app/src/api.py` → `app/prompts/qa-system.md`
-- [ ] Реализовать `load_prompt()` и обновить код для загрузки промптов из файлов
-- [ ] Обновить Pipeline Specs: добавить ссылки на файлы промптов
-
-### Этап 8: Трек B — Унификация конфигурации
-
-- [ ] Мигрировать `semantic_graph/config.py` на Pydantic Settings (`semantic_graph/config/settings.py`)
-- [ ] Перенести константы доменной логики (ENTITY_TYPES, MAX_CLUSTER_SIZE, CLUSTERIZATION_SEED) в Settings
-- [ ] Перенести URL-ы (LLM_URL, QDRANT_URL, TOKENIZER_URL) в Settings с env-переменными
-- [ ] Удалить старый `config.py` после миграции
-
-### Этап 9: Трек B — Унификация Neo4j Manager'ов
-
-- [ ] Создать `documet_index/specs/pipelines/neo4j-manager-unification.md` — spec на унификацию
-- [ ] Выделить общий базовый класс `BaseNeo4jManager` с connection management, query helpers
-- [ ] Перевести `documet_index/manager.py` на наследование от `BaseNeo4jManager`
-- [ ] Перевести `semantic_graph/manager.py` на наследование от `BaseNeo4jManager`
-- [ ] Удалить дублирующийся код
-
-### Этап 10: Трек B — Выпиливание мёртвого кода
-
-- [ ] Удалить `semantic_graph/neo4j_service.py:create_graph_from_graphrag_result()` (метод с неопределёнными переменными)
-- [ ] Проверить и удалить остальной неиспользуемый код (неиспользуемые импорты, дублирующиеся файлы типа `requirements.txt` / `req2.txt`)
-
-### Этап 11: Трек C — Мягкое удаление из семантического графа (P10)
-
-- [ ] Создать `semantic_graph/specs/soft-delete.md` — Feature Spec на мягкое удаление
-- [ ] Добавить поле `archived: bool = False` в модель Entity
-- [ ] Реализовать эндпоинт маркировки сущностей документа как archived
-- [ ] Модифицировать `clastrize_graph` — исключать archived-сущности из кластеризации
-- [ ] Модифицировать `create_community_report` — исключать archived-сущности из отчётов
-- [ ] Интегрировать в `DELETE /documents/{file_hash}` в app — вызывать archived-маркировку
-
-### Этап 12: Настройка CI-валидации
-
-- [ ] Добавить CI job: генерация OpenAPI из FastAPI (`/openapi.json`)
-- [ ] Добавить CI job: проверка наличия Feature Spec + OpenAPI-фрагмента для каждого эндпоинта
-- [ ] Добавить CI job: сверка method/path/status codes между spec и кодом
-- [ ] Добавить CI job: проверка наличия Data Model Spec для каждой Pydantic-модели в `dtype/` (warning на переходный период)
-- [ ] Добавить CI job: структурная проверка spec-файлов (все обязательные секции шаблона)

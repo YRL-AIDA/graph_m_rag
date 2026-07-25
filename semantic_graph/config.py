@@ -1,5 +1,5 @@
 """Unified configuration for semantic_graph modules."""
-
+import uuid
 # --- LLM / model ---
 MODEL_NAME = 'Qwen/Qwen3-4B-Instruct-2507'
 N4G_URL = 'http://192.168.19.148:9998'
@@ -12,11 +12,12 @@ OUTPUT_DIR = "data/processed"
 DOCUMENT_ID_FIELD = "file_hash"
 
 # --- Embedding service ---
-EMBEDDING_BASE_URL = "http://localhost:9899"
+EMBEDDING_BASE_URL = "http://192.168.19.127:10115/embedding"
 EMBEDDING_TIMEOUT = 30  # seconds
 EMBEDDING_MAX_CONCURRENCY = 8
 ENTITY_EMBEDDINGS_COLLECTION = "entity_embeddings"
 ENTITY_EMBEDDINGS_BATCH_SIZE = 100
+ENTITY_EMBEDDINGS_NAMESPACE = uuid.UUID("a7f1b2c3-4d5e-6f78-9abc-def012345678")
 
 # --- Graph processing ---
 MAX_CLUSTER_SIZE = 10

@@ -3,7 +3,8 @@ import os
 import sys
 import time
 import asyncio
-import json
+import uuid
+
 from pathlib import Path
 from typing import Any, Dict
 
@@ -11,7 +12,6 @@ import aiohttp
 from aiohttp import (
     ClientConnectorError,
     ClientResponseError,
-    ContentTypeError,
     ServerTimeoutError,
 )
 
@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))  # repo root for app import
 
 from clasterization import create_communities
 from config import (
@@ -26,17 +27,18 @@ from config import (
     API_PORT,
     CLUSTERIZATION_SEED,
     COMMUNITY_REPORT_PROMPT,
+    EMBEDDING_BASE_URL,
+    EMBEDDING_MAX_CONCURRENCY,
+    EMBEDDING_TIMEOUT,
+    ENTITY_EMBEDDINGS_BATCH_SIZE,
+    ENTITY_EMBEDDINGS_COLLECTION,
+    ENTITY_EMBEDDINGS_NAMESPACE,
     ENTITY_TYPES,
     MAX_CLUSTER_SIZE,
     MODEL_NAME,
     QDRANT_API_KEY,
     QDRANT_URL,
     USE_LCC,
-    EMBEDDING_BASE_URL,
-    EMBEDDING_MAX_CONCURRENCY,
-    EMBEDDING_TIMEOUT,
-    ENTITY_EMBEDDINGS_BATCH_SIZE,
-    ENTITY_EMBEDDINGS_COLLECTION,
 )
 from create_community_report import run_community_reports_pipeline_async
 from dtype import (
@@ -50,6 +52,7 @@ from graphrag import run_extraction_pipeline_async
 from manager import Manager, ManagerConfig
 from Qdrant_extractor.dataframe_builder import build_chunks_dataframe
 from Qdrant_extractor.qdrant_adapter import QdrantStreamAdapter
+from app.src.qwen3_emb_client import EmbeddingClient
 
 load_dotenv()
 
@@ -61,6 +64,9 @@ config = ManagerConfig(
 )
 
 doc_manager = Manager(config)
+
+# --- Embedding client ---
+emb_client = EmbeddingClient(base_url=EMBEDDING_BASE_URL, timeout=EMBEDDING_TIMEOUT)
 
 # --- Настройка логирования ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -194,7 +200,7 @@ async def create_community_report() -> Dict[str, Any]:
 async def compute_entity_embeddings() -> Dict[str, Any]:
     """Compute 2048-dim embeddings for Entity nodes with changed descriptions.
 
-    Flow: Neo4j (read candidates) → Embedding Service (batched) →
+    Flow: Neo4j (read candidates) → EmbeddingClient (sync, via asyncio.to_thread) →
           Qdrant (upsert) → Neo4j (write embedding_updated_at).
     """
     start_time = time.time()
@@ -257,44 +263,35 @@ async def compute_entity_embeddings() -> Dict[str, Any]:
             logger.info("No entities needing embedding computation")
             return _build_response("None", 0, start_time, "completed", stats)
 
-        # 3-4. Compute embeddings in parallel with Semaphore
+        # 3-4. Compute embeddings via EmbeddingClient with Semaphore for concurrency
         semaphore = asyncio.Semaphore(EMBEDDING_MAX_CONCURRENCY)
-        embed_url = f"{EMBEDDING_BASE_URL}/embed"
 
         async def fetch_embedding(entity: dict) -> dict:
             async with semaphore:
                 try:
-                    async with session.post(
-                        embed_url,
-                        json={"messages": [{"type": "text", "text": entity["description"]}]},
-                        timeout=aiohttp.ClientTimeout(total=EMBEDDING_TIMEOUT),
-                    ) as resp:
-                        resp.raise_for_status()
-                        data = await resp.json()
-                        embedding = data["data"][0]["embedding"]
-                        if len(embedding) != 2048:
-                            logger.warning(
-                                "Embedding dimension mismatch for entity '%s' (%s): expected 2048, got %d",
-                                entity["title"], entity["type"], len(embedding)
-                            )
-                            return None
-                        entity["embedding_vector"] = embedding
-                        return entity
-                except (KeyError, IndexError, TypeError) as e:
+                    embedding = await asyncio.to_thread(
+                        emb_client.get_text_embedding, entity["description"]
+                    )
+                    if len(embedding) != 2048:
+                        logger.warning(
+                            "Embedding dimension mismatch for entity '%s' (%s): expected 2048, got %d",
+                            entity["title"], entity["type"], len(embedding)
+                        )
+                        return None
+                    entity["embedding_vector"] = embedding
+                    return entity
+                except ValueError as e:
                     logger.warning(
                         "Invalid embedding response for entity '%s' (%s): %s",
                         entity["title"], entity["type"], e
                     )
                     return None
-                except (ClientResponseError, ContentTypeError, ServerTimeoutError, asyncio.TimeoutError) as e:
+                except Exception as e:
                     logger.warning(
                         "Embedding service error for entity '%s' (%s): %s",
                         entity["title"], entity["type"], e
                     )
                     return None
-                except ClientConnectorError as e:
-                    logger.error("Embedding service connection failed: %s", e)
-                    raise HTTPException(status_code=500, detail=f"Embedding service unavailable: {e}")
 
         # Classify and run in parallel
         for entity in candidates:
@@ -304,11 +301,7 @@ async def compute_entity_embeddings() -> Dict[str, Any]:
                 entity["is_new"] = False
 
         tasks = [fetch_embedding(e) for e in candidates]
-
-        try:
-            results = await asyncio.gather(*tasks)
-        except HTTPException:
-            raise
+        results = await asyncio.gather(*tasks)
 
         # Separate successful from failed
         successful = [r for r in results if r is not None]
@@ -332,7 +325,7 @@ async def compute_entity_embeddings() -> Dict[str, Any]:
             for entity in batch:
                 entity_id = f"{entity['title']}|{entity['type']}"
                 points.append({
-                    "id": entity_id,
+                    "id": str(uuid.uuid5(ENTITY_EMBEDDINGS_NAMESPACE, entity_id)),
                     "vector": entity["embedding_vector"],
                     "payload": {
                         "entity_title": entity["title"],
@@ -366,7 +359,6 @@ async def compute_entity_embeddings() -> Dict[str, Any]:
                 updated_count = doc_manager.set_entity_embedding_updated_at(neo4j_batch)
             except Exception as e:
                 logger.error("Neo4j write error for batch %d-%d: %s", i, i + len(batch), e)
-                # Critical: Neo4j not available, stop processing
                 raise HTTPException(status_code=500, detail=f"Neo4j write error: {e}")
 
             # Update stats

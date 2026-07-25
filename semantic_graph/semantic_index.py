@@ -2,8 +2,18 @@ import logging
 import os
 import sys
 import time
+import asyncio
+import json
 from pathlib import Path
 from typing import Any, Dict
+
+import aiohttp
+from aiohttp import (
+    ClientConnectorError,
+    ClientResponseError,
+    ContentTypeError,
+    ServerTimeoutError,
+)
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -22,6 +32,11 @@ from config import (
     QDRANT_API_KEY,
     QDRANT_URL,
     USE_LCC,
+    EMBEDDING_BASE_URL,
+    EMBEDDING_MAX_CONCURRENCY,
+    EMBEDDING_TIMEOUT,
+    ENTITY_EMBEDDINGS_BATCH_SIZE,
+    ENTITY_EMBEDDINGS_COLLECTION,
 )
 from create_community_report import run_community_reports_pipeline_async
 from dtype import (
@@ -174,6 +189,197 @@ async def create_community_report() -> Dict[str, Any]:
         status='completed',
         extra_stats=neo4j_status
     )
+
+@app.get("/compute_entity_embeddings")
+async def compute_entity_embeddings() -> Dict[str, Any]:
+    """Compute 2048-dim embeddings for Entity nodes with changed descriptions.
+
+    Flow: Neo4j (read candidates) → Embedding Service (batched) →
+          Qdrant (upsert) → Neo4j (write embedding_updated_at).
+    """
+    start_time = time.time()
+    logger.info("Starting compute_entity_embeddings")
+
+    stats = {
+        "embeddings_added": 0,
+        "embeddings_updated": 0,
+        "embeddings_skipped": 0,
+        "embeddings_failed": 0,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        # 1. Check / create Qdrant collection
+        collection_url = f"{QDRANT_URL}/collections/{ENTITY_EMBEDDINGS_COLLECTION}"
+        try:
+            async with session.get(collection_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    vector_config = data.get("result", {}).get("config", {}).get("params", {}).get("vectors", {})
+                    if vector_config.get("size") != 2048:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Qdrant collection dimension mismatch: expected 2048, got {vector_config.get('size')}"
+                        )
+                    if vector_config.get("distance") != "Cosine":
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Qdrant collection distance metric mismatch: expected Cosine, got {vector_config.get('distance')}"
+                        )
+                elif resp.status == 404:
+                    create_body = {"vectors": {"size": 2048, "distance": "Cosine"}}
+                    async with session.put(collection_url, json=create_body) as create_resp:
+                        if create_resp.status not in (200, 201):
+                            error_text = await create_resp.text()
+                            raise HTTPException(
+                                status_code=500,
+                                detail=f"Failed to create Qdrant collection: {error_text}"
+                            )
+                    logger.info("Created Qdrant collection '%s'", ENTITY_EMBEDDINGS_COLLECTION)
+                else:
+                    error_text = await resp.text()
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Qdrant unavailable: {error_text}"
+                    )
+        except HTTPException:
+            raise
+        except (ClientConnectorError, ServerTimeoutError) as e:
+            raise HTTPException(status_code=500, detail=f"Qdrant unavailable: {e}")
+
+        # 2. Get candidates from Neo4j
+        try:
+            candidates = doc_manager.get_entities_needing_embedding()
+        except Exception as e:
+            logger.error("Failed to read candidates from Neo4j: %s", e)
+            raise HTTPException(status_code=500, detail="Neo4j read error")
+
+        if not candidates:
+            logger.info("No entities needing embedding computation")
+            return _build_response("None", 0, start_time, "completed", stats)
+
+        # 3-4. Compute embeddings in parallel with Semaphore
+        semaphore = asyncio.Semaphore(EMBEDDING_MAX_CONCURRENCY)
+        embed_url = f"{EMBEDDING_BASE_URL}/embed"
+
+        async def fetch_embedding(entity: dict) -> dict:
+            async with semaphore:
+                try:
+                    async with session.post(
+                        embed_url,
+                        json={"messages": [{"type": "text", "text": entity["description"]}]},
+                        timeout=aiohttp.ClientTimeout(total=EMBEDDING_TIMEOUT),
+                    ) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json()
+                        embedding = data["data"][0]["embedding"]
+                        if len(embedding) != 2048:
+                            logger.warning(
+                                "Embedding dimension mismatch for entity '%s' (%s): expected 2048, got %d",
+                                entity["title"], entity["type"], len(embedding)
+                            )
+                            return None
+                        entity["embedding_vector"] = embedding
+                        return entity
+                except (KeyError, IndexError, TypeError) as e:
+                    logger.warning(
+                        "Invalid embedding response for entity '%s' (%s): %s",
+                        entity["title"], entity["type"], e
+                    )
+                    return None
+                except (ClientResponseError, ContentTypeError, ServerTimeoutError, asyncio.TimeoutError) as e:
+                    logger.warning(
+                        "Embedding service error for entity '%s' (%s): %s",
+                        entity["title"], entity["type"], e
+                    )
+                    return None
+                except ClientConnectorError as e:
+                    logger.error("Embedding service connection failed: %s", e)
+                    raise HTTPException(status_code=500, detail=f"Embedding service unavailable: {e}")
+
+        # Classify and run in parallel
+        for entity in candidates:
+            if entity["embedding_updated_at"] is None:
+                entity["is_new"] = True
+            else:
+                entity["is_new"] = False
+
+        tasks = [fetch_embedding(e) for e in candidates]
+
+        try:
+            results = await asyncio.gather(*tasks)
+        except HTTPException:
+            raise
+
+        # Separate successful from failed
+        successful = [r for r in results if r is not None]
+        stats["embeddings_failed"] = len(candidates) - len(successful)
+
+        if not successful:
+            logger.warning("All embedding requests failed")
+            return _build_response("None", 0, start_time, "completed", stats)
+
+        # 5. Batch upsert to Qdrant
+        points_url = f"{QDRANT_URL}/collections/{ENTITY_EMBEDDINGS_COLLECTION}/points?wait=true"
+
+        x_qdrant_api_key = QDRANT_API_KEY
+        headers = {}
+        if x_qdrant_api_key:
+            headers["api-key"] = x_qdrant_api_key
+
+        for i in range(0, len(successful), ENTITY_EMBEDDINGS_BATCH_SIZE):
+            batch = successful[i:i + ENTITY_EMBEDDINGS_BATCH_SIZE]
+            points = []
+            for entity in batch:
+                entity_id = f"{entity['title']}|{entity['type']}"
+                points.append({
+                    "id": entity_id,
+                    "vector": entity["embedding_vector"],
+                    "payload": {
+                        "entity_title": entity["title"],
+                        "entity_type": entity["type"],
+                        "entity_id": entity_id,
+                        "description": entity["description"],
+                    }
+                })
+
+            try:
+                async with session.put(
+                    points_url,
+                    json={"points": points},
+                    headers=headers
+                ) as resp:
+                    resp.raise_for_status()
+            except (ClientResponseError, ServerTimeoutError, ClientConnectorError) as e:
+                logger.error("Qdrant upsert batch %d-%d failed: %s", i, i + len(batch), e)
+                stats["embeddings_failed"] += len(batch)
+                # Mark all entities in this batch as failed
+                for entity in batch:
+                    entity["qdrant_failed"] = True
+                continue
+
+            # 6. Update Neo4j embedding_updated_at for this batch
+            neo4j_batch = [{"title": e["title"], "type": e["type"]} for e in batch if not e.get("qdrant_failed")]
+            if not neo4j_batch:
+                continue
+
+            try:
+                updated_count = doc_manager.set_entity_embedding_updated_at(neo4j_batch)
+            except Exception as e:
+                logger.error("Neo4j write error for batch %d-%d: %s", i, i + len(batch), e)
+                # Critical: Neo4j not available, stop processing
+                raise HTTPException(status_code=500, detail=f"Neo4j write error: {e}")
+
+            # Update stats
+            for entity in batch:
+                if not entity.get("qdrant_failed"):
+                    if entity.get("is_new"):
+                        stats["embeddings_added"] += 1
+                    else:
+                        stats["embeddings_updated"] += 1
+
+    return _build_response("None", 0, start_time, "completed", stats)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host=API_HOST, port=API_PORT)

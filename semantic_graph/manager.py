@@ -468,6 +468,39 @@ class Manager:
             "created_at": record["created_at"],
         } for record in results])
  
+
+    def get_entities_needing_embedding(self) -> List[Dict[str, Any]]:
+        """Reads candidate entities from Neo4j that need embedding computation.
+
+        Returns:
+            List of dicts with keys: title, type, description,
+            embedding_updated_at, updated_at
+        """
+        query = f"""
+        MATCH (e:Entity)
+        WHERE e.description IS NOT NULL
+          AND (e.embedding_updated_at IS NULL OR e.updated_at > e.embedding_updated_at)
+        RETURN e.{TITLE} AS {TITLE}, e.{TYPE} AS {TYPE}, e.{DESCRIPTION} AS {DESCRIPTION},
+               e.embedding_updated_at AS embedding_updated_at,
+               e.updated_at AS updated_at
+        """
+        results = self.query(query)
+        return [dict(record) for record in results]
+
+    def set_entity_embedding_updated_at(self, entities: List[Dict[str, str]]) -> int:
+        """Sets embedding_updated_at = datetime() on Entity nodes after successful Qdrant upsert.
+
+        Args:
+            entities: List of dicts with keys 'title' and 'type'
+
+        Returns:
+            Count of updated entities
+        """
+        with self.conn.graph.session(database=self.name_db) as session:
+            updated = session.execute_write(self._set_embedding_updated_at_tx, entities)
+        logger.info("Updated embedding_updated_at for %d entities", updated)
+        return updated
+
     def get_community(self) -> pd.DataFrame:
         """
         Получить все комьюнити из Neo4j.
@@ -894,6 +927,19 @@ class Manager:
         MERGE (c)-[:CONSISTS_OF]->(e)
         """
         tx.run(query, payload=payload)
+
+    @staticmethod
+    def _set_embedding_updated_at_tx(tx, entities: List[Dict[str, str]]) -> int:
+        query = f"""
+        UNWIND $entities AS row
+        MATCH (e:Entity {{{TITLE}: row.{TITLE}, {TYPE}: row.{TYPE}}})
+        SET e.embedding_updated_at = datetime()
+        RETURN count(e) AS updated
+        """
+        result = tx.run(query, entities=entities)
+        record = result.single()
+        return int(record["updated"]) if record else 0
+
     # --- ВСПОМОГАТЕЛЬНЫЕ ЛОГИЧЕСКИЕ ФУНКЦИИ ---
     @staticmethod
     def _text_unit_ids_already_exist(existing: Optional[List[str]], new: Optional[List[str]]) -> bool:

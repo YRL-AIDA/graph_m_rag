@@ -11,6 +11,13 @@ QDRANT_API_KEY = None
 OUTPUT_DIR = "data/processed"
 DOCUMENT_ID_FIELD = "file_hash"
 
+# --- Embedding service ---
+EMBEDDING_BASE_URL = "http://localhost:9899"
+EMBEDDING_TIMEOUT = 30  # seconds
+EMBEDDING_MAX_CONCURRENCY = 8
+ENTITY_EMBEDDINGS_COLLECTION = "entity_embeddings"
+ENTITY_EMBEDDINGS_BATCH_SIZE = 100
+
 # --- Graph processing ---
 MAX_CLUSTER_SIZE = 10
 USE_LCC = False

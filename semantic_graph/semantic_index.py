@@ -33,6 +33,9 @@ from config import (
     ENTITY_EMBEDDINGS_BATCH_SIZE,
     ENTITY_EMBEDDINGS_COLLECTION,
     ENTITY_EMBEDDINGS_NAMESPACE,
+    COMMUNITY_EMBEDDINGS_BATCH_SIZE,
+    COMMUNITY_EMBEDDINGS_COLLECTION,
+    COMMUNITY_EMBEDDINGS_NAMESPACE,
     ENTITY_TYPES,
     MAX_CLUSTER_SIZE,
     MODEL_NAME,
@@ -365,6 +368,182 @@ async def compute_entity_embeddings() -> Dict[str, Any]:
             for entity in batch:
                 if not entity.get("qdrant_failed"):
                     if entity.get("is_new"):
+                        stats["embeddings_added"] += 1
+                    else:
+                        stats["embeddings_updated"] += 1
+
+    return _build_response("None", 0, start_time, "completed", stats)
+
+
+
+@app.get("/compute_community_embeddings")
+async def compute_community_embeddings() -> Dict[str, Any]:
+    """Compute 2048-dim embeddings for Community nodes with changed summaries.
+
+    Flow: Neo4j (read candidates) → EmbeddingClient (sync, via asyncio.to_thread) →
+          Qdrant (upsert) → Neo4j (write embedding_updated_at).
+    """
+    start_time = time.time()
+    logger.info("Starting compute_community_embeddings")
+
+    stats = {
+        "embeddings_added": 0,
+        "embeddings_updated": 0,
+        "embeddings_skipped": 0,
+        "embeddings_failed": 0,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        # 1. Check / create Qdrant collection
+        collection_url = f"{QDRANT_URL}/collections/{COMMUNITY_EMBEDDINGS_COLLECTION}"
+        try:
+            async with session.get(collection_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    vector_config = data.get("result", {}).get("config", {}).get("params", {}).get("vectors", {})
+                    if vector_config.get("size") != 2048:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Qdrant collection dimension mismatch: expected 2048, got {vector_config.get('size')}"
+                        )
+                    if vector_config.get("distance") != "Cosine":
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Qdrant collection distance metric mismatch: expected Cosine, got {vector_config.get('distance')}"
+                        )
+                elif resp.status == 404:
+                    create_body = {"vectors": {"size": 2048, "distance": "Cosine"}}
+                    async with session.put(collection_url, json=create_body) as create_resp:
+                        if create_resp.status not in (200, 201):
+                            error_text = await create_resp.text()
+                            raise HTTPException(
+                                status_code=500,
+                                detail=f"Failed to create Qdrant collection: {error_text}"
+                            )
+                    logger.info("Created Qdrant collection '%s'", COMMUNITY_EMBEDDINGS_COLLECTION)
+                else:
+                    error_text = await resp.text()
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Qdrant unavailable: {error_text}"
+                    )
+        except HTTPException:
+            raise
+        except (ClientConnectorError, ServerTimeoutError) as e:
+            raise HTTPException(status_code=500, detail=f"Qdrant unavailable: {e}")
+
+        # 2. Get candidates from Neo4j
+        try:
+            candidates = doc_manager.get_communities_needing_embedding()
+        except Exception as e:
+            logger.error("Failed to read candidates from Neo4j: %s", e)
+            raise HTTPException(status_code=500, detail="Neo4j read error")
+
+        if not candidates:
+            logger.info("No communities needing embedding computation")
+            return _build_response("None", 0, start_time, "completed", stats)
+
+        # 3-4. Compute embeddings via EmbeddingClient with Semaphore for concurrency
+        semaphore = asyncio.Semaphore(EMBEDDING_MAX_CONCURRENCY)
+
+        async def fetch_embedding(community: dict) -> dict:
+            async with semaphore:
+                try:
+                    embedding = await asyncio.to_thread(
+                        emb_client.get_text_embedding, community["summary"]
+                    )
+                    if len(embedding) != 2048:
+                        logger.warning(
+                            "Embedding dimension mismatch for community '%s' (id=%s): expected 2048, got %d",
+                            community.get("title"), community.get("id"), len(embedding)
+                        )
+                        return None
+                    community["embedding_vector"] = embedding
+                    return community
+                except ValueError as e:
+                    logger.warning(
+                        "Invalid embedding response for community '%s' (id=%s): %s",
+                        community.get("title"), community.get("id"), e
+                    )
+                    return None
+                except Exception as e:
+                    logger.warning(
+                        "Embedding service error for community '%s' (id=%s): %s",
+                        community.get("title"), community.get("id"), e
+                    )
+                    return None
+
+        # Classify and run in parallel
+        for community in candidates:
+            if community["embedding_updated_at"] is None:
+                community["is_new"] = True
+            else:
+                community["is_new"] = False
+
+        tasks = [fetch_embedding(c) for c in candidates]
+        results = await asyncio.gather(*tasks)
+
+        # Separate successful from failed
+        successful = [r for r in results if r is not None]
+        stats["embeddings_failed"] = len(candidates) - len(successful)
+
+        if not successful:
+            logger.warning("All embedding requests failed")
+            return _build_response("None", 0, start_time, "completed", stats)
+
+        # 5. Batch upsert to Qdrant
+        points_url = f"{QDRANT_URL}/collections/{COMMUNITY_EMBEDDINGS_COLLECTION}/points?wait=true"
+
+        x_qdrant_api_key = QDRANT_API_KEY
+        headers = {}
+        if x_qdrant_api_key:
+            headers["api-key"] = x_qdrant_api_key
+
+        for i in range(0, len(successful), COMMUNITY_EMBEDDINGS_BATCH_SIZE):
+            batch = successful[i:i + COMMUNITY_EMBEDDINGS_BATCH_SIZE]
+            points = []
+            for community in batch:
+                community_id_str = str(community["id"])
+                points.append({
+                    "id": str(uuid.uuid5(COMMUNITY_EMBEDDINGS_NAMESPACE, community_id_str)),
+                    "vector": community["embedding_vector"],
+                    "payload": {
+                        "community_id": community_id_str,
+                        "title": community["title"],
+                        "level": community["level"],
+                        "summary": community["summary"],
+                    }
+                })
+
+            try:
+                async with session.put(
+                    points_url,
+                    json={"points": points},
+                    headers=headers
+                ) as resp:
+                    resp.raise_for_status()
+            except (ClientResponseError, ServerTimeoutError, ClientConnectorError) as e:
+                logger.error("Qdrant upsert batch %d-%d failed: %s", i, i + len(batch), e)
+                stats["embeddings_failed"] += len(batch)
+                for community in batch:
+                    community["qdrant_failed"] = True
+                continue
+
+            # 6. Update Neo4j embedding_updated_at for this batch
+            neo4j_batch = [{"id": c["id"]} for c in batch if not c.get("qdrant_failed")]
+            if not neo4j_batch:
+                continue
+
+            try:
+                updated_count = doc_manager.set_community_embedding_updated_at(neo4j_batch)
+            except Exception as e:
+                logger.error("Neo4j write error for batch %d-%d: %s", i, i + len(batch), e)
+                raise HTTPException(status_code=500, detail=f"Neo4j write error: {e}")
+
+            # Update stats
+            for community in batch:
+                if not community.get("qdrant_failed"):
+                    if community.get("is_new"):
                         stats["embeddings_added"] += 1
                     else:
                         stats["embeddings_updated"] += 1

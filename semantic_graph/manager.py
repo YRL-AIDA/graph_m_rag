@@ -501,6 +501,42 @@ class Manager:
         logger.info("Updated embedding_updated_at for %d entities", updated)
         return updated
 
+    def get_communities_needing_embedding(self) -> List[Dict[str, Any]]:
+        """Reads candidate communities from Neo4j that need embedding computation.
+
+        Returns:
+            List of dicts with keys: id, title, level, summary,
+            embedding_updated_at, updated_at
+        """
+        query = """
+        MATCH (c:Community)
+        WHERE c.summary IS NOT NULL
+          AND (c.embedding_updated_at IS NULL
+               OR c.updated_at IS NULL
+               OR c.updated_at > c.embedding_updated_at)
+        RETURN c.id AS id, c.title AS title, c.level AS level, c.summary AS summary,
+               c.embedding_updated_at AS embedding_updated_at,
+               c.updated_at AS updated_at
+        """
+        results = self.query(query)
+        return [dict(record) for record in results]
+
+    def set_community_embedding_updated_at(self, communities: List[Dict[str, str]]) -> int:
+        """Sets embedding_updated_at = datetime() on Community nodes after successful Qdrant upsert.
+
+        Also sets updated_at = coalesce(c.updated_at, datetime()) for backward compatibility.
+
+        Args:
+            communities: List of dicts with key 'id' (UUID string)
+
+        Returns:
+            Count of updated communities
+        """
+        with self.conn.graph.session(database=self.name_db) as session:
+            updated = session.execute_write(self._set_community_embedding_updated_at_tx, communities)
+        logger.info("Updated embedding_updated_at for %d communities", updated)
+        return updated
+
     def get_community(self) -> pd.DataFrame:
         """
         Получить все комьюнити из Neo4j.
@@ -881,7 +917,8 @@ class Manager:
             c.{EXPLANATION} = row.{EXPLANATION},
             c.{FINDINGS} = row.{FINDINGS},
             c.{FULL_CONTENT_JSON} = row.{FULL_CONTENT_JSON},
-            c.report_updated_at = datetime()
+            c.report_updated_at = datetime(),
+            c.updated_at = datetime()
         RETURN count(c) AS updated
         """
         result = tx.run(query, payload=payload)
@@ -899,7 +936,8 @@ class Manager:
             c.{SHORT_ID} = row.{SHORT_ID},
             c.{COMMUNITY_PARENT} = toInteger(row.{COMMUNITY_PARENT}),
             c.{SIZE} = toInteger(row.{SIZE}),
-            c.{PERIOD} = row.{PERIOD}
+            c.{PERIOD} = row.{PERIOD},
+            c.updated_at = coalesce(c.updated_at, datetime())
         """
         tx.run(query, payload=payload)
 
@@ -937,6 +975,20 @@ class Manager:
         RETURN count(e) AS updated
         """
         result = tx.run(query, entities=entities)
+        record = result.single()
+        return int(record["updated"]) if record else 0
+
+
+    @staticmethod
+    def _set_community_embedding_updated_at_tx(tx, communities: List[Dict[str, str]]) -> int:
+        query = """
+        UNWIND $communities AS row
+        MATCH (c:Community {id: row.id})
+        SET c.updated_at = coalesce(c.updated_at, datetime()),
+            c.embedding_updated_at = datetime()
+        RETURN count(c) AS updated
+        """
+        result = tx.run(query, communities=communities)
         record = result.single()
         return int(record["updated"]) if record else 0
 

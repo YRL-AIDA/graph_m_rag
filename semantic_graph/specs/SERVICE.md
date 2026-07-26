@@ -21,6 +21,8 @@
 | `POST` | `/process-document` | (pending) | Загрузка чанков документа из Qdrant → извлечение сущностей и связей LLM → сохранение в Neo4j |
 | `GET` | `/clastrize_graph` | (pending) | Кластеризация всего графа связей (Leiden) → создание/обновление узлов `Community` в Neo4j |
 | `GET` | `/create_community_report` | (pending) | Генерация LLM-отчётов по всем сообществам → запись отчётов в существующие узлы `Community` |
+| `GET` | `/compute_entity_embeddings` | [compute-entity-embeddings.md](compute-entity-embeddings.md) | Вычисление 2048-мерных эмбеддингов для Entity с изменившимся описанием, сохранение в Qdrant `entity_embeddings`, обновление `embedding_updated_at` в Neo4j |
+| `GET` | `/compute_community_embeddings` | [compute-community-embeddings.md](compute-community-embeddings.md) | Вычисление 2048-мерных эмбеддингов для Community с изменившимся `summary`, сохранение в Qdrant `community_embeddings`, обновление `embedding_updated_at` в Neo4j |
 
 ### `POST /process-document`
 
@@ -73,6 +75,30 @@
 }
 ```
 
+### `GET /compute_entity_embeddings`
+
+**Response** (`200 OK`):
+```json
+{
+  "document_id": "None",
+  "statistics": {
+    "total_chunks": 0,
+    "processing_time_ms": 5000,
+    "status": "completed",
+    "embeddings_added": 10,
+    "embeddings_updated": 5,
+    "embeddings_skipped": 0,
+    "embeddings_failed": 0
+  }
+}
+```
+
+**Error responses**:
+- `500 Qdrant unavailable` — Qdrant недоступен при проверке/создании коллекции
+- `500 Qdrant collection dimension mismatch` — коллекция существует, но размерность ≠ 2048
+- `500 Qdrant collection distance metric mismatch` — коллекция существует, но метрика ≠ Cosine
+- `500 Neo4j unavailable` — Neo4j недоступен при чтении кандидатов
+
 ### `GET /create_community_report`
 
 **Response** (`200 OK`):
@@ -89,6 +115,30 @@
   }
 }
 ```
+
+### `GET /compute_community_embeddings`
+
+**Response** (`200 OK`):
+```json
+{
+  "document_id": "None",
+  "statistics": {
+    "total_chunks": 0,
+    "processing_time_ms": 8000,
+    "status": "completed",
+    "embeddings_added": 5,
+    "embeddings_updated": 3,
+    "embeddings_skipped": 0,
+    "embeddings_failed": 0
+  }
+}
+```
+
+**Error responses**:
+- `500 Qdrant unavailable` — Qdrant недоступен при проверке/создании коллекции
+- `500 Qdrant collection dimension mismatch` — коллекция существует, но размерность ≠ 2048
+- `500 Qdrant collection distance metric mismatch` — коллекция существует, но метрика ≠ Cosine
+- `500 Neo4j unavailable` — Neo4j недоступен при чтении кандидатов или записи `embedding_updated_at`
 
 ## Data Model
 
@@ -147,6 +197,15 @@
 | `ENTITY_TYPES` | `['ORGANIZATION', 'PERSON', 'GEO', 'EVENT']` | Типы сущностей для промпта извлечения |
 | `API_HOST` | `0.0.0.0` | Хост FastAPI-сервера |
 | `API_PORT` | `9595` | Порт FastAPI-сервера |
+| `EMBEDDING_BASE_URL` | `http://192.168.19.127:10115/embedding` | Базовый URL embedding-сервиса |
+| `EMBEDDING_TIMEOUT` | `30` | Таймаут запроса к embedding-сервису в секундах |
+| `EMBEDDING_MAX_CONCURRENCY` | `8` | Максимальное количество одновременных вызовов embedding-сервиса |
+| `ENTITY_EMBEDDINGS_COLLECTION` | `entity_embeddings` | Имя коллекции Qdrant для эмбеддингов Entity |
+| `ENTITY_EMBEDDINGS_BATCH_SIZE` | `100` | Размер батча для upsert в Qdrant |
+| `ENTITY_EMBEDDINGS_NAMESPACE` | `UUID("a7f1b2c3-...")` | Namespace UUID для детерминированных point ID |
+| `COMMUNITY_EMBEDDINGS_COLLECTION` | `community_embeddings` | Имя коллекции Qdrant для эмбеддингов Community |
+| `COMMUNITY_EMBEDDINGS_BATCH_SIZE` | `100` | Размер батча для upsert эмбеддингов Community в Qdrant |
+| `COMMUNITY_EMBEDDINGS_NAMESPACE` | `UUID("b8e2c3d4-...")` | Namespace UUID для детерминированных point ID Community |
 
 ### Константы форматирования промптов (`config.py`)
 
@@ -176,8 +235,9 @@
 6. **Порядок выполнения пайплайна**: `POST /process-document` → `GET /clastrize_graph` → `GET /create_community_report`. Каждый следующий шаг зависит от результатов предыдущего.
 7. **LLM-формат ответа**: извлечение сущностей ожидает строгий формат: `("entity"<|>NAME<|>TYPE<|>DESCRIPTION)` и `("relationship"<|>SRC<|>TGT<|>DESC<|>WEIGHT)`, разделённые `##`, завершающиеся `<|COMPLETE|>`.
 8. **Нормализация имён**: имена сущностей приводятся к UPPER CASE при парсинге ответа LLM.
-9. **Neo4j APOC**: для обновления `text_unit_ids` через `apoc.coll.toSet` требуется установленный плагин APOC в Neo4j.
-10. **Constraint на Entity**: уникальность пары `(title, type)` гарантируется constraint'ом `entity_title_type_unique`, создаваемым при инициализации `Manager`.
+9. **Embedding-обновление ONLY после Qdrant upsert**: Neo4j-поле `embedding_updated_at` обновляется строго после успешного upsert в Qdrant (не наоборот), чтобы предотвратить ситуацию, где Neo4j считает embedding актуальным, а в Qdrant его нет.
+10. **Neo4j APOC**: для обновления `text_unit_ids` через `apoc.coll.toSet` требуется установленный плагин APOC в Neo4j.
+11. **Constraint на Entity**: уникальность пары `(title, type)` гарантируется constraint'ом `entity_title_type_unique`, создаваемым при инициализации `Manager`.
 
 ## Exceptions
 
@@ -196,3 +256,4 @@
 6. **Синхронный Qdrant-клиент**: `build_chunks_dataframe` и `QdrantStreamAdapter` используют синхронный `requests` для скроллинга Qdrant, что блокирует event loop FastAPI. Согласно P5, должно быть асинхронно или через `run_in_executor`. Обоснование: переходный период.
 
 7. **P10 — Мягкое удаление не реализовано**: флаг `archived` на узлах `Entity` и связях `RELATED` в коде `manager.py` не проставлен, физического удаления также нет — удаление документов из семантического графа в текущей версии не поддерживается. Обоснование: функциональность удаления документов не реализована.
+8. **P10 — Мягкое удаление Community не реализовано**: флаг `archived` на узлах `Community` отсутствует. Cypher-запрос в `get_communities_needing_embedding()` не фильтрует по `archived`. При реализации мягкого удаления потребуется добавить условие `AND (c.archived IS NULL OR c.archived = false)`.

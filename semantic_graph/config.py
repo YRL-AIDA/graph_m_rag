@@ -1,6 +1,20 @@
 """Unified configuration for semantic_graph modules."""
 import uuid
+import os
+from pathlib import Path
 # --- LLM / model ---
+
+# --- Prompt loading helpers ---
+def _load_prompt() -> str:
+    """Load GRAPH_EXTRACTION_PROMPT from file, fallback to inline string."""
+    try:
+        prompt_path = Path(__file__).parent / "prompts" / "graph-extraction.md"
+        if prompt_path.is_file():
+            return prompt_path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return INLINE_GRAPH_EXTRACTION_PROMPT
+
 MODEL_NAME = 'Qwen/Qwen3-4B-Instruct-2507'
 N4G_URL = 'http://192.168.19.148:9998'
 LLM_API_KEY = 'EMPTY'
@@ -184,6 +198,15 @@ TOKENIZER_URL = "http://localhost:9886/tokenize"
 LLM_URL = 'http://localhost:9886/v1'
 #TOKENIZER_URL = "http://192.168.19.127:8888/tokenize"
 #LLM_URL = 'http://192.168.19.127:8888/v1'
+
+# --- Query extraction model (separate from main model) ---
+QUERY_EXTRACTION_MODEL_NAME = os.getenv("QUERY_EXTRACTION_MODEL_NAME", MODEL_NAME)
+QUERY_EXTRACTION_LLM_URL = os.getenv("QUERY_EXTRACTION_LLM_URL", LLM_URL)
+QUERY_EXTRACTION_API_KEY = os.getenv("QUERY_EXTRACTION_API_KEY", LLM_API_KEY)
+QUERY_EXTRACTION_TOKENIZER_URL = os.getenv("QUERY_EXTRACTION_TOKENIZER_URL", TOKENIZER_URL)
+
+# --- Qdrant collections ---
+DOCUMENTS_COLLECTION = os.getenv("DOCUMENTS_COLLECTION", "documents")
 TUPLE_DELIMITER = "<|>"
 RECORD_DELIMITER = "##"
 COMPLETION_DELIMITER = "<|COMPLETE|>"
@@ -203,7 +226,7 @@ Description List: {description_list}
 Output:
 """
 
-GRAPH_EXTRACTION_PROMPT = """
+INLINE_GRAPH_EXTRACTION_PROMPT = """
 -Goal-
 Given a text document that is potentially relevant to this activity and a list of entity types, identify all entities of those types from the text and all relationships among the identified entities.
  
@@ -324,6 +347,8 @@ Entity_types: {entity_types}
 Text: {input_text}
 ######################
 Output:"""
+
+GRAPH_EXTRACTION_PROMPT = _load_prompt()
 
 CONTINUE_PROMPT = "MANY entities and relationships were missed in the last extraction. Remember to ONLY emit entities that match any of the previously extracted types. Add them below using the same format:\n"
 LOOP_PROMPT = "It appears some entities and relationships may have still been missed. Answer Y if there are still entities or relationships that need to be added, or N if there are none. Please answer with a single letter Y or N.\n"

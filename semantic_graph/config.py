@@ -15,7 +15,8 @@ def _load_prompt() -> str:
         pass
     return INLINE_GRAPH_EXTRACTION_PROMPT
 
-MODEL_NAME = 'Qwen/Qwen3-4B-Instruct-2507'
+#MODEL_NAME = 'Qwen/Qwen3-4B-Instruct-2507'
+MODEL_NAME ="Qwen/Qwen3-VL-32B-Thinking"
 N4G_URL = 'http://192.168.19.148:9998'
 LLM_API_KEY = 'EMPTY'
 
@@ -192,12 +193,12 @@ DOCUMENTS_FINAL_COLUMNS = [
 ]
 
 # --- Graph extraction delimiters and prompts ---
-TOKENIZER_URL = "http://192.168.19.127:9886/tokenize"
+#TOKENIZER_URL = "http://192.168.19.127:9886/tokenize"
 #LLM_URL = 'http://192.168.19.127:9886/v1'
-TOKENIZER_URL = "http://localhost:9886/tokenize"
-LLM_URL = 'http://localhost:9886/v1'
-#TOKENIZER_URL = "http://192.168.19.127:8888/tokenize"
-#LLM_URL = 'http://192.168.19.127:8888/v1'
+#TOKENIZER_URL = "http://localhost:9886/tokenize"
+#LLM_URL = 'http://localhost:9886/v1'
+TOKENIZER_URL = "http://192.168.19.127:8888/tokenize"
+LLM_URL = 'http://192.168.19.127:8888/v1'
 
 # --- Query extraction model (separate from main model) ---
 QUERY_EXTRACTION_MODEL_NAME = os.getenv("QUERY_EXTRACTION_MODEL_NAME", MODEL_NAME)

@@ -602,9 +602,9 @@ async def search_graph(request: SearchRequest) -> SearchResponse:
     proportions = request.proportions
 
     # --- Шаг 0: Инициализация и расчёт бюджетов токенов ---
-    text_budget = int(request.max_tokens * proportions["text_units"])
-    entity_budget = int(request.max_tokens * proportions["entities"])
-    community_budget = int(request.max_tokens * proportions["communities"])
+    text_budget = int(request.max_tokens * proportions.text_units)
+    entity_budget = int(request.max_tokens * proportions.entities)
+    community_budget = int(request.max_tokens * proportions.communities)
 
     entity_counters = {"search_miss_count": 0}
     fallback_used = False

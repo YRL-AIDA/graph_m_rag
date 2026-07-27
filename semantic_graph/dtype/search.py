@@ -1,9 +1,17 @@
 """Pydantic-модели для эндпоинта POST /search."""
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import List
 
 from pydantic import BaseModel, Field, model_validator
+
+
+class Proportions(BaseModel):
+    """Доли токенов для каждого типа объектов поисковой выдачи."""
+
+    text_units: float = Field(default=0.5, description="Доля токенов для текстовых блоков")
+    entities: float = Field(default=0.25, description="Доля токенов для сущностей")
+    communities: float = Field(default=0.25, description="Доля токенов для сообществ")
 
 
 class TokensBreakdown(BaseModel):
@@ -32,8 +40,8 @@ class SearchRequest(BaseModel):
 
     question: str = Field(..., min_length=1, description="Строка вопроса пользователя")
     max_tokens: int = Field(..., gt=0, description="Максимальный суммарный размер вывода в токенах")
-    proportions: Dict[str, float] = Field(
-        default_factory=lambda: {"text_units": 0.5, "entities": 0.25, "communities": 0.25},
+    proportions: Proportions = Field(
+        default_factory=lambda: Proportions(text_units=0.5, entities=0.25, communities=0.25),
         description="Доли токенов для text_units, entities, communities (сумма = 1.0)",
     )
     documents_filter: str = Field(
@@ -45,21 +53,13 @@ class SearchRequest(BaseModel):
     def validate_proportions(self) -> "SearchRequest":
         """Валидация поля proportions: сумма значений должна быть 1.0 ± 0.001, все ≥ 0."""
         props = self.proportions
-        required_keys = {"text_units", "entities", "communities"}
-
-        # Проверка, что все ключи присутствуют
-        if set(props.keys()) != required_keys:
-            raise ValueError(
-                "proportions must contain exactly keys: text_units, entities, communities"
-            )
 
         # Проверка неотрицательности
-        for key in required_keys:
-            if props[key] < 0:
-                raise ValueError("proportions values must be non-negative")
+        if props.text_units < 0 or props.entities < 0 or props.communities < 0:
+            raise ValueError("proportions values must be non-negative")
 
         # Проверка суммы
-        total = sum(props.values())
+        total = props.text_units + props.entities + props.communities
         if abs(total - 1.0) > 0.001:
             raise ValueError("proportions must sum to 1.0")
 

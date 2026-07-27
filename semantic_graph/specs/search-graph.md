@@ -30,7 +30,7 @@
 |------|-----|-------------|--------------|----------|
 | `question` | `str` | Да | — | Строка вопроса пользователя (непустая). Валидация: `min_length=1`. |
 | `max_tokens` | `int` | Да | — | Максимальный суммарный размер вывода в токенах. Валидация: `gt=0`. |
-| `proportions` | `Dict[str, float]` | Нет | `{"text_units": 0.5, "entities": 0.25, "communities": 0.25}` | Доли токенов для каждого типа объектов. Ключи: `text_units`, `entities`, `communities`. Валидация: сумма значений == 1.0 ± 0.001, каждое значение ≥ 0. |
+| `proportions` | `Proportions` | Нет | `{"text_units": 0.5, "entities": 0.25, "communities": 0.25}` | Модель с полями `text_units: float`, `entities: float`, `communities: float`. Валидация: сумма значений == 1.0 ± 0.001 (model_validator), каждое значение ≥ 0. |
 | `documents_filter` | `str` | Нет | `"text_only"` | Режим фильтрации коллекции `documents`: `"text_only"` — только `element_type == "text"`, `"all"` — без фильтра по `element_type`. Валидация: одно из `{"text_only", "all"}`. |
 
 **Валидация**:
@@ -44,15 +44,15 @@
 **Общая схема**: LLM-извлечение сущностей из вопроса → вычисление эмбеддингов → поиск текстовых блоков (Qdrant `documents`) → для каждой сущности: поиск точки входа (Qdrant `entity_embeddings`) + обход графа (Neo4j: точка входа, связи `RELATED`, сообщества `CONSISTS_OF`) → fallback-путь (если сущностей нет или не найдены в графе) → round-robin объединение пулов → формирование ответа со статистикой.
 
 #### Шаг 0: Инициализация и расчёт бюджетов токенов
-- Извлечь доли из `proportions` (или использовать значения по умолчанию):
+- Извлечь доли из `proportions` (если не переданы — используется default Proportions с 0.5/0.25/0.25):
   ```
-  proportions = request.proportions or {"text_units": 0.5, "entities": 0.25, "communities": 0.25}
+  proportions = request.proportions
   ```
 - Вычислить бюджеты токенов:
   ```
-  text_budget       = int(max_tokens * proportions["text_units"])
-  entity_budget     = int(max_tokens * proportions["entities"])
-  community_budget  = int(max_tokens * proportions["communities"])
+  text_budget       = int(max_tokens * proportions.text_units)
+  entity_budget     = int(max_tokens * proportions.entities)
+  community_budget  = int(max_tokens * proportions.communities)
   ```
 - Все бюджеты — целые числа (округление вниз за счёт `int()`).
 - Запомнить `start_time = time.time()`.
@@ -793,66 +793,87 @@ semantic_index.py — search_graph()
 - **math**: стандартный модуль для `sqrt` в `cosine_similarity()`
 - **uuid**: стандартный модуль для `uuid5` при формировании ID точек Qdrant для community embeddings
 
-## Pydantic Models (добавляются в `dtype/search.py`)
+## Pydantic Models (реализованы в `dtype/search.py`)
 
 ```python
-from pydantic import BaseModel, Field, validator
-from typing import Dict, List, Optional
+from __future__ import annotations
+
+from typing import List
+
+from pydantic import BaseModel, Field, model_validator
 
 
-class SearchRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="Вопрос пользователя")
-    max_tokens: int = Field(..., gt=0, description="Максимальный размер вывода в токенах")
-    proportions: Optional[Dict[str, float]] = Field(
-        default=None,
-        description="Доли токенов: text_units, entities, communities (сумма = 1.0)"
-    )
-    documents_filter: Optional[str] = Field(
-        default="text_only",
-        pattern="^(text_only|all)$",
-        description="Фильтр: text_only или all"
-    )
+class Proportions(BaseModel):
+    """Доли токенов для каждого типа объектов поисковой выдачи."""
 
-    @validator("proportions")
-    def validate_proportions(cls, v):
-        if v is not None:
-            required_keys = {"text_units", "entities", "communities"}
-            if set(v.keys()) != required_keys:
-                raise ValueError(
-                    f"proportions must contain exactly: {required_keys}"
-                )
-            total = sum(v.values())
-            if abs(total - 1.0) > 0.001:
-                raise ValueError(
-                    f"proportions must sum to 1.0, got {total}"
-                )
-            if any(p < 0 for p in v.values()):
-                raise ValueError("proportions values must be non-negative")
-        return v
+    text_units: float = Field(default=0.5, description="Доля токенов для текстовых блоков")
+    entities: float = Field(default=0.25, description="Доля токенов для сущностей")
+    communities: float = Field(default=0.25, description="Доля токенов для сообществ")
 
 
 class TokensBreakdown(BaseModel):
+    """Разбивка использованных/оставшихся токенов по типам пулов."""
+
     text_units: int = 0
     entities: int = 0
     communities: int = 0
 
 
 class SearchStatistics(BaseModel):
-    processing_time_ms: int = 0
-    tokens_used: TokensBreakdown = Field(default_factory=TokensBreakdown)
-    tokens_remaining: TokensBreakdown = Field(default_factory=TokensBreakdown)
-    entities_extracted_from_question: int = 0
-    entities_matched_in_graph: int = 0
-    entities_search_misses: int = 0
-    fallback_used: bool = False
-    total_items: TokensBreakdown = Field(default_factory=TokensBreakdown)
+    """Статистика выполнения поискового запроса."""
+
+    processing_time_ms: int
+    tokens_used: TokensBreakdown
+    tokens_remaining: TokensBreakdown
+    entities_extracted_from_question: int
+    entities_matched_in_graph: int
+    entities_search_misses: int
+    fallback_used: bool
+    total_items: TokensBreakdown
+
+
+class SearchRequest(BaseModel):
+    """Тело запроса POST /search."""
+
+    question: str = Field(..., min_length=1, description="Строка вопроса пользователя")
+    max_tokens: int = Field(..., gt=0, description="Максимальный суммарный размер вывода в токенах")
+    proportions: Proportions = Field(
+        default_factory=lambda: Proportions(text_units=0.5, entities=0.25, communities=0.25),
+        description="Доли токенов для text_units, entities, communities (сумма = 1.0)",
+    )
+    documents_filter: str = Field(
+        default="text_only",
+        description="Режим фильтрации коллекции documents: text_only или all",
+    )
+
+    @model_validator(mode="after")
+    def validate_proportions(self) -> "SearchRequest":
+        """Валидация поля proportions: сумма значений должна быть 1.0 ± 0.001, все ≥ 0."""
+        props = self.proportions
+
+        # Проверка неотрицательности
+        if props.text_units < 0 or props.entities < 0 or props.communities < 0:
+            raise ValueError("proportions values must be non-negative")
+
+        # Проверка суммы
+        total = props.text_units + props.entities + props.communities
+        if abs(total - 1.0) > 0.001:
+            raise ValueError("proportions must sum to 1.0")
+
+        # Проверка documents_filter
+        if self.documents_filter not in {"text_only", "all"}:
+            raise ValueError("documents_filter must be 'text_only' or 'all'")
+
+        return self
 
 
 class SearchResponse(BaseModel):
-    text_units: List[str] = Field(default_factory=list)
-    entities: List[str] = Field(default_factory=list)
-    communities: List[str] = Field(default_factory=list)
-    statistics: SearchStatistics = Field(default_factory=SearchStatistics)
+    """Ответ POST /search."""
+
+    text_units: List[str] = Field(default_factory=list, description="Текстовые блоки из коллекции documents")
+    entities: List[str] = Field(default_factory=list, description="Описания сущностей и их связей")
+    communities: List[str] = Field(default_factory=list, description="Описания сообществ (community summaries)")
+    statistics: SearchStatistics
 ```
 
 ## Exceptions

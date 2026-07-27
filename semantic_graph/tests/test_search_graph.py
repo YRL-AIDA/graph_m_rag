@@ -186,7 +186,9 @@ class TestSearchRequestValidation:
         req = SearchRequest(question="What is GraphRAG?", max_tokens=4000)
         assert req.question == "What is GraphRAG?"
         assert req.max_tokens == 4000
-        assert req.proportions == {"text_units": 0.5, "entities": 0.25, "communities": 0.25}
+        assert req.proportions.text_units == 0.5
+        assert req.proportions.entities == 0.25
+        assert req.proportions.communities == 0.25
         assert req.documents_filter == "text_only"
 
     def test_valid_custom_proportions(self):
@@ -196,7 +198,9 @@ class TestSearchRequestValidation:
             max_tokens=1000,
             proportions={"text_units": 0.7, "entities": 0.2, "communities": 0.1},
         )
-        assert req.proportions == {"text_units": 0.7, "entities": 0.2, "communities": 0.1}
+        assert req.proportions.text_units == 0.7
+        assert req.proportions.entities == 0.2
+        assert req.proportions.communities == 0.1
 
     def test_proportions_sum_not_one(self):
         """Сумма пропорций ≠ 1.0 → ValueError."""
@@ -217,8 +221,9 @@ class TestSearchRequestValidation:
             )
 
     def test_proportions_missing_keys(self):
-        """Отсутствует ключ в proportions → ValueError."""
-        with pytest.raises(ValueError, match="proportions must contain exactly keys"):
+        """Отсутствует ключ в proportions → ValidationError."""
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
             SearchRequest(
                 question="Test",
                 max_tokens=1000,

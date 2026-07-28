@@ -93,9 +93,13 @@ class AsyncLLMClient:
             return None
 
     async def count_tokens(self, text: str, model: str) -> int:
-        """Асинхронный подсчет токенов."""
-        try:
-            async with self.session.post(
+        """Асинхронный подсчет токенов.
+
+        Использует управляемую сессию (если открыта через async with),
+        либо создаёт временную сессию на один запрос.
+        """
+        async def _do_count(session):
+            async with session.post(
                     self.tokenizer_url,
                     json={"model": model, "prompt": text},
                     timeout=aiohttp.ClientTimeout(total=10)
@@ -103,6 +107,13 @@ class AsyncLLMClient:
                 response.raise_for_status()
                 data = await response.json()
                 return data.get('count', len(text) // 4)
+
+        try:
+            if self._session is not None and not self._session.closed:
+                return await _do_count(self._session)
+            else:
+                async with aiohttp.ClientSession() as tmp_session:
+                    return await _do_count(tmp_session)
         except Exception as e:
             logger.warning(f"Token counting failed, using fallback. Error: {e}")
             return len(text) // 4 + 1

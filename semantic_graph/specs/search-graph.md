@@ -41,7 +41,7 @@
 
 ### Processing
 
-**Общая схема**: LLM-извлечение сущностей из вопроса → вычисление эмбеддингов → поиск текстовых блоков (Qdrant `documents`) → для каждой сущности: поиск точки входа (Qdrant `entity_embeddings`) + обход графа (Neo4j: точка входа, связи `RELATED`, сообщества `CONSISTS_OF`) → fallback-путь (если сущностей нет или не найдены в графе) → round-robin объединение пулов → формирование ответа со статистикой.
+**Общая схема**: Инициализация `AsyncLLMClient` через `async with` (охватывает шаги 1–7) → LLM-извлечение сущностей из вопроса → вычисление эмбеддингов → инициализация `aiohttp.ClientSession` (вложенный контекст для Qdrant-запросов, шаги 4–7) → поиск текстовых блоков (Qdrant `documents`) → для каждой сущности: поиск точки входа (Qdrant `entity_embeddings`) + обход графа (Neo4j: точка входа, связи `RELATED`, сообщества `CONSISTS_OF`) → fallback-путь (если сущностей нет или не найдены в графе) → round-robin объединение пулов → формирование ответа со статистикой.
 
 #### Шаг 0: Инициализация и расчёт бюджетов токенов
 - Извлечь доли из `proportions` (если не переданы — используется default Proportions с 0.5/0.25/0.25):
@@ -66,15 +66,29 @@
   - `extraction_llm_url = QUERY_EXTRACTION_LLM_URL or LLM_URL` (отдельный URL, fallback на основной)
   - `extraction_api_key = QUERY_EXTRACTION_API_KEY or LLM_API_KEY` (отдельный ключ, fallback на основной)
   - `extraction_tokenizer_url = QUERY_EXTRACTION_TOKENIZER_URL or TOKENIZER_URL` (отдельный URL токенизатора, fallback на основной)
-- Создать экземпляр `AsyncLLMClient(base_url=extraction_llm_url, tokenizer_url=extraction_tokenizer_url, api_key=extraction_api_key)`.
-- Создать экземпляр `AsyncGraphExtractor(llm_client, model=extraction_model, max_gleanings=0)`.
-- Вызвать `await extractor.extract(text=question_lower, entity_types=ENTITY_TYPES, source_id="search_query")`.
+- Инициализировать `AsyncLLMClient` через `async with` с параметрами query extraction:
+  ```
+  async with AsyncLLMClient(
+      base_url=extraction_llm_url,
+      tokenizer_url=extraction_tokenizer_url,
+      api_key=extraction_api_key,
+  ) as llm:
+  ```
+- **Этот контекстный менеджер охватывает ВСЕ последующие шаги (1–7)**, поскольку `llm.count_tokens()` используется для подсчёта токенов на шагах 4, 5, 6 и 7. `AsyncLLMClient` остаётся живым (сессия открыта) на протяжении всей обработки — от извлечения сущностей до финального подсчёта токенов в пулах.
+- Внутри контекста `async with AsyncLLMClient`:
+  a. Создать экземпляр `AsyncGraphExtractor(llm_client=llm, model=extraction_model, max_gleanings=0)`.
+  b. Вызвать `await extractor.extract(text=question_lower, entity_types=ENTITY_TYPES, source_id="search_query")`.
+  c. Выполнить Шаги 2–3 (эмбеддинги и распределение бюджетов).
+  d. Создать `async with aiohttp.ClientSession() as session:` (вложенный контекст для Qdrant-запросов на шагах 4–7).
+  e. Внутри вложенного контекста `session` выполнить Шаги 4–7 (Qdrant поиск, обход графа, fallback, объединение пулов).
+  f. Шаг 8 (формирование ответа) — внутри контекста `llm` или сразу после него (не использует `llm`).
 - `extract` внутри использует промпт `GRAPH_EXTRACTION_PROMPT.format(input_text=question_lower, entity_types=",".join(ENTITY_TYPES))`, вызывает LLM через `AsyncLLMClient.generate()`, парсит ответ через `_parse_result()`, возвращает кортеж `(entities_df, relationships_df)` — pandas DataFrame.
 - Из `entities_df` извлечь список сущностей: каждая — `{"title": str, "type": str, "description": str}` (поля DataFrame: `title`, `type`, `description`).
 - Если LLM вернул пустой ответ (`response_text` is None/empty) или `entities_df` пуст (0 строк) → `entities_from_question = []`.
 - Если LLM API выбросил исключение (HTTP-ошибка, таймаут) → перехватить, залогировать warning, `entities_from_question = []`.
 - Сохранить `len(entities_from_question)` для статистики.
 - **Примечание для VL-моделей**: если `QUERY_EXTRACTION_MODEL_NAME` указывает на мультимодальную (VL) модель, в текущей версии эндпоинта изображение не передаётся — модель получает только текст вопроса. Архитектура (отдельный `AsyncLLMClient` с собственными параметрами подключения) позволяет в будущем расширить запрос на поддержку изображений без изменения сигнатуры эндпоинта.
+- **Примечание для thinking/reasoning моделей**: модели с тегами `<think>...</think>` (Qwen3-Thinking, DeepSeek-R1 и аналоги) обрабатываются функцией `remove_think_tags()`, которая удаляет содержимое тегов `<think>`, оставляя только фактический ответ модели. Возможен сценарий, при котором модель помещает все рассуждения в `<think>`-блок и возвращает только `<|COMPLETE|>` как фактический ответ — это валидное поведение, означающее, что модель не нашла сущностей для извлечения. В этом случае `_parse_result()` вернёт пустой DataFrame, `entities_from_question = []`, и сработает глобальный fallback (Шаг 6). Формат ответа `<|COMPLETE|>` (длина 12, только completion delimiter) является частным случаем «пустого ответа» и обрабатывается корректно.
 
 #### Шаг 2: Вычисление эмбеддингов
 2.1. Вычислить эмбеддинг полного вопроса (нижний регистр):
@@ -137,7 +151,7 @@
   - Извлечь текстовое содержимое: `text = point.payload.original_element.text` (основной источник текста — поле `text` внутри `original_element`).
   - Если `text` is None или пустая строка → пропустить точку.
   - Посчитать количество токенов: `token_count = await llm.count_tokens(text, MODEL_NAME)`.
-    - `llm` — экземпляр `AsyncLLMClient` (создан на шаге 1.2).
+    - `llm` — экземпляр `AsyncLLMClient`, инициализированный в начале `search_graph()` через `async with` и живой на протяжении всех шагов 1–7.
     - Если tokenizer недоступен → используется fallback `len(text) // 4` (встроен в `AsyncLLMClient.count_tokens`).
   - Если `token_count <= remaining_text_budget`:
     - Добавить `text` в `text_pool`.
@@ -615,61 +629,67 @@ Client (app)
   ▼
 semantic_index.py — search_graph()
   │
-  ├─[Шаг 1] LLM: извлечение сущностей из вопроса
-  │     ├─ AsyncLLMClient (aiohttp к TOKENIZER_URL, AsyncOpenAI к LLM_URL)
-  │     ├─ AsyncGraphExtractor.extract() с GRAPH_EXTRACTION_PROMPT
-  │     └─ Результат: список сущностей [{title, type, description}, ...] или []
-  │
-  ├─[Шаг 2] EmbeddingClient: эмбеддинг вопроса + эмбеддинги сущностей (parallel)
-  │     ├─ asyncio.to_thread(emb_client.get_text_embedding, question_lower)
-  │     │   └─ POST {EMBEDDING_BASE_URL}/embed → question_embedding[2048]
-  │     └─ asyncio.gather(... asyncio.to_thread(emb_client.get_text_embedding, f"{title} ({type})") ...)
-  │         └─ POST {EMBEDDING_BASE_URL}/embed → сущность.embedding[2048]
-  │
-  ├─[Шаг 4] Qdrant: поиск текстовых блоков (documents)
-  │     ├─ POST {QDRANT_URL}/collections/documents/points/search
-  │     │   vector: question_embedding, limit: 100, filter: element_type == "text" (опц.)
-  │     ├─ Tokenizer (AsyncLLMClient.count_tokens): подсчёт токенов для каждого блока
-  │     │   └─ POST {TOKENIZER_URL}/tokenize (fallback: len(text)//4)
-  │     └─ text_pool[] (по text_budget)
-  │
-  ├─[Шаг 5] Для каждой сущности (parallel via asyncio.gather):
+  ├─ async with AsyncLLMClient(...) as llm:  ← инициализация, охватывает шаги 1–7
   │   │
-  │   ├─[5.1] Qdrant: поиск точки входа в entity_embeddings (limit=1)
-  │   │   └─ POST {QDRANT_URL}/collections/entity_embeddings/points/search
+  │   ├─[Шаг 1] LLM: извлечение сущностей из вопроса
+  │   │     ├─ AsyncGraphExtractor.extract() с GRAPH_EXTRACTION_PROMPT
+  │   │     └─ Результат: список сущностей [{title, type, description}, ...] или []
   │   │
-  │   ├─[5.2] Neo4j: MATCH (e:Entity {title, type}) → title, type, description
+  │   ├─[Шаг 2] EmbeddingClient: эмбеддинг вопроса + эмбеддинги сущностей (parallel)
+  │   │     ├─ asyncio.to_thread(emb_client.get_text_embedding, question_lower)
+  │   │     │   └─ POST {EMBEDDING_BASE_URL}/embed → question_embedding[2048]
+  │   │     └─ asyncio.gather(... asyncio.to_thread(emb_client.get_text_embedding, f"{title} ({type})") ...)
+  │   │         └─ POST {EMBEDDING_BASE_URL}/embed → сущность.embedding[2048]
   │   │
-  │   ├─[5.3] Tokenizer: подсчёт токенов → добавление в entity_pool_i
+  │   ├─ async with aiohttp.ClientSession() as session:  ← вложенный контекст для Qdrant (шаги 4–7)
+  │   │   │
+  │   │   ├─[Шаг 4] Qdrant: поиск текстовых блоков (documents)
+  │   │   │     ├─ POST {QDRANT_URL}/collections/documents/points/search
+  │   │   │     │   vector: question_embedding, limit: 100, filter: element_type == "text" (опц.)
+  │   │   │     ├─ llm.count_tokens() — подсчёт токенов для каждого блока
+  │   │   │     │   └─ POST {TOKENIZER_URL}/tokenize (fallback: len(text)//4)
+  │   │   │     └─ text_pool[] (по text_budget)
+  │   │   │
+  │   │   ├─[Шаг 5] Для каждой сущности (parallel via asyncio.gather):
+  │   │   │   │
+  │   │   │   ├─[5.1] Qdrant: поиск точки входа в entity_embeddings (limit=1)
+  │   │   │   │   └─ POST {QDRANT_URL}/collections/entity_embeddings/points/search
+  │   │   │   │
+  │   │   │   ├─[5.2] Neo4j: MATCH (e:Entity {title, type}) → title, type, description
+  │   │   │   │
+  │   │   │   ├─[5.3] llm.count_tokens() → добавление в entity_pool_i
+  │   │   │   │
+  │   │   │   ├─[5.4] Neo4j: MATCH (entry)-[r:RELATED]-(related) → related entities
+  │   │   │   │   ├─ EmbeddingClient (parallel): эмбеддинги rel_description
+  │   │   │   │   │   └─ POST {EMBEDDING_BASE_URL}/embed
+  │   │   │   │   ├─ Cosine similarity (question_embedding × rel_embedding)
+  │   │   │   │   ├─ Сортировка по убыванию score
+  │   │   │   │   └─ llm.count_tokens() → добавление в entity_pool_i (по budget)
+  │   │   │   │
+  │   │   │   └─[5.5] Neo4j: поиск leaf Community через CONSISTS_OF
+  │   │   │         ├─ Community с условиями: имеет IS_CHILD_OF, не имеет IS_PARENT_OF
+  │   │   │         ├─ Neo4j: COUNT entities per community (count_ent)
+  │   │   │         ├─ Сортировка по убыванию count_ent
+  │   │   │         └─ llm.count_tokens() → добавление в community_pool_i (по budget)
+  │   │   │
+  │   │   ├─[Шаг 6] Fallback (если сущности не извлечены или miss в Qdrant):
+  │   │   │   ├─ Qdrant: поиск community_embeddings (level=0, limit=1)
+  │   │   │   │   └─ POST {QDRANT_URL}/collections/community_embeddings/points/search
+  │   │   │   ├─ Neo4j: MATCH (c:Community {id}) → title, summary
+  │   │   │   ├─ Neo4j: MATCH (root)-[:IS_PARENT_OF]->(child)
+  │   │   │   ├─ Qdrant (parallel): GET /collections/community_embeddings/points/{point_id}?with_vector=true
+  │   │   │   ├─ Cosine similarity (question_embedding × child_embedding)
+  │   │   │   ├─ Сортировка по убыванию score
+  │   │   │   └─ llm.count_tokens() → fallback_community_pool[] (по budget)
+  │   │   │
+  │   │   └─[Шаг 7] Объединение:
+  │   │       ├─ Round-robin merge всех entity_pool_i → merged_entity_pool[]
+  │   │       └─ Round-robin merge всех community_pool_i → merged_community_pool[]
   │   │
-  │   ├─[5.4] Neo4j: MATCH (entry)-[r:RELATED]-(related) → related entities
-  │   │   ├─ EmbeddingClient (parallel): эмбеддинги rel_description
-  │   │   │   └─ POST {EMBEDDING_BASE_URL}/embed
-  │   │   ├─ Cosine similarity (question_embedding × rel_embedding)
-  │   │   ├─ Сортировка по убыванию score
-  │   │   └─ Tokenizer: подсчёт токенов → добавление в entity_pool_i (по budget)
-  │   │
-  │   └─[5.5] Neo4j: поиск leaf Community через CONSISTS_OF
-  │         ├─ Community с условиями: имеет IS_CHILD_OF, не имеет IS_PARENT_OF
-  │         ├─ Neo4j: COUNT entities per community (count_ent)
-  │         ├─ Сортировка по убыванию count_ent
-  │         └─ Tokenizer: подсчёт токенов → добавление в community_pool_i (по budget)
-  │
-  ├─[Шаг 6] Fallback (если сущности не извлечены или miss в Qdrant):
-  │   ├─ Qdrant: поиск community_embeddings (level=0, limit=1)
-  │   │   └─ POST {QDRANT_URL}/collections/community_embeddings/points/search
-  │   ├─ Neo4j: MATCH (c:Community {id}) → title, summary
-  │   ├─ Neo4j: MATCH (root)-[:IS_PARENT_OF]->(child)
-  │   ├─ Qdrant (parallel): GET /collections/community_embeddings/points/{point_id}?with_vector=true
-  │   ├─ Cosine similarity (question_embedding × child_embedding)
-  │   ├─ Сортировка по убыванию score
-  │   └─ Tokenizer: подсчёт токенов → fallback_community_pool[] (по budget)
-  │
-  ├─[Шаг 7] Объединение:
-  │   ├─ Round-robin merge всех entity_pool_i → merged_entity_pool[]
-  │   └─ Round-robin merge всех community_pool_i → merged_community_pool[]
+  │   └─ Шаги 4–7 завершены (выход из вложенного контекста `session`)
   │
   └─[Шаг 8] Ответ: SearchResponse {text_units, entities, communities, statistics}
+     (может быть внутри или сразу после контекста `llm` — не использует `llm`)
 ```
 
 ## LLM Interactions
@@ -711,7 +731,7 @@ semantic_index.py — search_graph()
 | Neo4j недоступен (любой запрос) | 500 | `"Neo4j connection error"`. Логирование ошибки. |
 | Embedding API недоступен для вопроса | 500 | `"Failed to compute embedding for question"`. Логирование ошибки. |
 | LLM API недоступен при entity extraction | 200 | Сущности не извлечены, `entities_extracted_from_question: 0`. Срабатывает глобальный fallback. Warning в логах. |
-| LLM вернул пустой ответ или невалидный формат | 200 | `entities_from_question = []`, `entities_extracted_from_question: 0`. Срабатывает глобальный fallback. Warning в логах. |
+| LLM вернул пустой ответ или невалидный формат (включая ответ, состоящий только из `<|COMPLETE|>` после удаления `<think>`-тегов) | 200 | `entities_from_question = []`, `entities_extracted_from_question: 0`. Срабатывает глобальный fallback. Warning в логах. |
 | Tokenizer недоступен | — | Используется fallback: `len(text) // 4` (встроен в `AsyncLLMClient.count_tokens`). Warning в логах. |
 | Пустой результат поиска в `documents` (`result: []`) | 200 | `text_units: []`, `tokens_used.text_units: 0`. |
 | Сущность извлечена, но не найдена в Qdrant `entity_embeddings` | 200 | `entities_search_misses += 1`. Бюджет entity-пула этой сущности передаётся в community-пул. Для этой сущности срабатывает per-entity fallback (шаг 6). |

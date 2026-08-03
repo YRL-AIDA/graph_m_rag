@@ -16,7 +16,7 @@ class ExperimentSettings(BaseSettings):
     gliner_base_url: str = "http://192.168.19.127:9899/v1"
     gliner_api_key: str = "EMPTY"
     gliner_model: str = "urchade/gliner_large-v2.1"
-    scierc_data_path: str = "/home/ivan/work/ooo/graph_m_rag/datasets/scierc"
+    scierc_data_path: str = "/home/ivan/work/ooo/graph_m_rag/datasets_/scierc"
     prompts_dir: str = str(Path(__file__).parent.parent / "prompts")
     results_dir: str = str(Path(__file__).parent.parent / "results")
     datasets: list[str] = ["conll04", "scierc"]
@@ -101,10 +101,10 @@ python -m ... --experiment E1 --dataset conll04 --split test --max-samples 50
 См. `general_experiment.md` §Data Flow. Раннер — точка входа: `DatasetLoader.load()` → `BaseModelClient.extract_*()` → `compute_*_f1()` → `save_results()`.
 
 ## LLM Interactions
-Раннер напрямую с LLM не взаимодействует. Клиенты используют `prompts/ner_prompt.md` и `prompts/re_prompt.md`. Требования — в `general_experiment.md` §LLM Interactions и `experiment_feature.md`.
+Раннер напрямую с LLM не взаимодействует. Клиенты используют `prompts/ner_prompt.md` и `prompts/re_prompt.md`. Требования — в `general_experiment.md` §LLM Interactions.
 
 ## LLM Model Requirements
-Требования к моделям — в `experiment_feature.md` §LLM Model Requirements. Раннер дополнительных ограничений не накладывает.
+Требования к моделям — в `general_experiment.md`. Раннер дополнительных ограничений не накладывает.
 
 ## Error Handling
 
@@ -129,4 +129,4 @@ python -m ... --experiment E1 --dataset conll04 --split test --max-samples 50
 - **Внешние**: `pydantic>=2.0`, `pydantic-settings>=2.0`, `openai>=1.0`, `pytest>=7.0`, `pytest-asyncio>=0.21`.
 
 ## Exceptions
-Отклонения от Constitution — см. `experiment_feature.md` §Exceptions. Данный файл не вводит дополнительных отклонений.
+Отклонения от Constitution — см. `general_experiment.md` §Exceptions. Данный файл не вводит дополнительных отклонений.

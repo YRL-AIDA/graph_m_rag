@@ -38,7 +38,7 @@
 - **Relation types**: `["Located_In", "Work_For", "OrgBased_In", "Live_In", "Kill"]`
 
 ### Base class
-Наследует `DatasetLoader` ABC (файл `datasets/base_loader.py`, определён в `experiment_feature.md` § 2.2):
+Наследует `DatasetLoader` ABC (файл `testdata/base_loader.py`, определён в `general_experiment.md`):
 - `entity_types: list[str]` → `["Peop", "Loc", "Org", "Other"]`
 - `relation_types: list[str]` → `["Located_In", "Work_For", "OrgBased_In", "Live_In", "Kill"]`
 - `load(split: str) -> list[DatasetRecord]` — загружает и нормализует сплит
@@ -67,7 +67,7 @@
 | 8 | ID формат `conll04_test_5` | Содержит split и 0-based индекс |
 
 ## Dependencies
-- **Внутренние**: `datasets/base_loader.py` — `DatasetLoader` (ABC), плюс `Entity`, `Relation`, `DatasetRecord` (Pydantic-модели из `general_experiment.md`).
+- **Внутренние**: `testdata/base_loader.py` — `DatasetLoader` (ABC), плюс `Entity`, `Relation`, `DatasetRecord` (Pydantic-модели из `general_experiment.md`).
 - **Внешние**: `datasets>=2.0`, `pydantic>=2.0`.
 
 ## Exceptions

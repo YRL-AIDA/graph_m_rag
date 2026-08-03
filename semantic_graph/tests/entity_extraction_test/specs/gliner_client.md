@@ -44,7 +44,7 @@ class GleanerClient(BaseModelClient):
 ## Dependencies
 - `openai>=1.0` (`AsyncOpenAI`)
 - `PredictedEntity`, `PredictedRelation`, `BaseModelClient` — определены в `models/base_client.py` (см. `general_experiment.md` §2 Unified Model Interface)
-- Удалённый Gleaner FastAPI сервер: `deploy/gliner_server.py` (см. `experiment_feature.md` §7.2)
+- Удалённый Gleaner FastAPI сервер: `deploy/gliner_server.py`
 
 ## Exceptions
 - **§5.2 Experiments/Spikes**: код в изолированной директории `tests/`, спецификация написана до реализации.

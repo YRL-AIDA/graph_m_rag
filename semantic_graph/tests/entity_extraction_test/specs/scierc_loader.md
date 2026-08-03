@@ -6,7 +6,7 @@
 ## Behaviour
 
 ### Source
-Локальные JSON-файлы по пути `/home/ivan/work/ooo/graph_m_rag/datasets/scierc/json/`:
+Локальные JSON-файлы по пути `/home/ivan/work/ooo/graph_m_rag/datasets_/scierc/json/`:
 
 | Сплит | Файл | Документов |
 |-------|------|-----------|
@@ -46,7 +46,7 @@
 - **Relation types**: фиксированный список `["USED-FOR", "FEATURE-OF", "HYPONYM-OF", "CONJUNCTION", "COMPARE", "EVALUATE-FOR", "PART-OF"]` (7 типов).
 
 ### Base Class
-Наследует `DatasetLoader` (ABC из `datasets/base_loader.py`, контракт описан в `general_experiment.md`):
+Наследует `DatasetLoader` (ABC из `testdata/base_loader.py`, контракт описан в `general_experiment.md`):
 - `entity_types` (property) → динамически собранный список
 - `relation_types` (property) → фиксированный список
 - `load(split: str) -> list[DatasetRecord]` — загружает указанный сплит
@@ -54,7 +54,7 @@
 
 ## Data Flow
 ```
-datasets/scierc/json/{split}.json  →  json.load (весь файл)
+datasets_/scierc/json/{split}.json  →  json.load (весь файл)
   →  for doc in data:
        for i in range(len(doc["sentences"])):
          normalize sentence i → DatasetRecord
@@ -64,7 +64,7 @@ datasets/scierc/json/{split}.json  →  json.load (весь файл)
 ## Error Handling
 | Сценарий | Поведение |
 |----------|-----------|
-| Файл сплита не найден (`datasets/scierc/json/train.json` отсутствует) | `FileNotFoundError` с путём к файлу |
+| Файл сплита не найден (`datasets_/scierc/json/train.json` отсутствует) | `FileNotFoundError` с путём к файлу |
 | JSON не парсится (malformed) | `json.JSONDecodeError` с именем файла и номером строки |
 | RE-спан не соответствует ни одному NER-спану | `WARNING` в лог, отношение пропускается, выполнение продолжается |
 | Документ без предложений (`"sentences": []`) | Документ пропускается (0 записей), без ошибки |
@@ -79,7 +79,7 @@ datasets/scierc/json/{split}.json  →  json.load (весь файл)
 
 ## Dependencies
 - Стандартная библиотека: `json`, `logging`, `pathlib.Path`
-- Импорт из `datasets/base_loader.py`: `Entity`, `Relation`, `DatasetRecord`, `DatasetLoader`
+- Импорт из `testdata/base_loader.py`: `Entity`, `Relation`, `DatasetRecord`, `DatasetLoader`
 
 ## Exceptions
 - **Constitution §5.2 — Experiments/Spikes**: код находится в `semantic_graph/tests/entity_extraction_test/`, изолирован от основного пайплайна. Спецификация написана spec-first — более строгий подход.

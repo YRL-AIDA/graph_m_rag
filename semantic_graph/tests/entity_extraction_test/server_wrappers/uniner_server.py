@@ -259,3 +259,6 @@ async def extract(request: ExtractRequest) -> ExtractResponse:
         len(entities),
     )
     return ExtractResponse(entities=entities)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=9597)

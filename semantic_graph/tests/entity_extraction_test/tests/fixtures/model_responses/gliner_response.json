@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1699200000,
+  "model": "urchade/gliner_large-v2.1",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "[{\"name\": \"Apple Inc.\", \"type\": \"Organization\"}, {\"name\": \"Steve Jobs\", \"type\": \"Person\"}, {\"name\": \"Cupertino\", \"type\": \"Location\"}]"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 55,
+    "completion_tokens": 42,
+    "total_tokens": 97
+  }
+}

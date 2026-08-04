@@ -143,7 +143,7 @@ async def test_runner_e1_mocked(mock_get_loader: MagicMock) -> None:
 @pytest.mark.asyncio
 @patch.object(ExperimentRunner, "_get_loader")
 async def test_runner_e3_mocked(mock_get_loader: MagicMock) -> None:
-    """E3 с замоканным QwenClient combined mode."""
+    """E3 с замоканным QwenClient combined_single_call mode."""
     mock_get_loader.return_value = _make_mock_loader(
         records=[_make_record_with_relation()],
         entity_types=["ORG", "LOC"],
@@ -153,19 +153,20 @@ async def test_runner_e3_mocked(mock_get_loader: MagicMock) -> None:
     settings = ExperimentSettings(results_dir="/tmp/test_results_e3")
     runner = ExperimentRunner(settings)
 
-    # Combined mode: один клиент делает и NER, и RE
+    # Combined single call mode: один клиент делает NER+RE одним вызовом
     combined_client = _make_ner_mock()
-    combined_client.extract_relations = AsyncMock(
-        return_value=[
-            PredictedRelation(head="Apple", tail="Cupertino", type="located_in"),
-        ],
+    combined_client.extract_entities_and_relations = AsyncMock(
+        return_value=(
+            [PredictedEntity(name="Apple", type="ORG"), PredictedEntity(name="Cupertino", type="LOC")],
+            [PredictedRelation(head="Apple", tail="Cupertino", type="located_in")],
+        ),
     )
 
     result = await runner.run_experiment(
         experiment_id="E3",
         ner_client=combined_client,
         re_client=combined_client,
-        re_mode="combined",
+        re_mode="combined_single_call",
         dataset_name="conll04",
         split="test",
     )
@@ -177,10 +178,10 @@ async def test_runner_e3_mocked(mock_get_loader: MagicMock) -> None:
     assert isinstance(result.metrics["f1_ner"], float)
     assert isinstance(result.metrics["f1_re"], float)
 
-    # NER был вызван
-    combined_client.extract_entities.assert_called()
-    # RE тоже был вызван (combined mode)
-    combined_client.extract_relations.assert_called()
+    # В combined_single_call вызывается extract_entities_and_relations
+    combined_client.extract_entities_and_relations.assert_called_once()
+    # extract_entities не должен вызываться отдельно в combined_single_call
+    combined_client.extract_entities.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -318,3 +319,40 @@ async def test_runner_error_handling(mock_get_loader: MagicMock) -> None:
     assert result.metrics["f1_ner"] == 0.0
     assert result.metrics["total_samples"] == 0  # successful=0
     assert result.metrics["failed_samples"] == 1  # one failed
+
+
+@pytest.mark.asyncio
+@patch("runner.experiment_runner.UniNerClient")
+@patch("runner.experiment_runner.GleanerClient")
+@patch("runner.experiment_runner.QwenClient")
+@patch.object(ExperimentRunner, "_get_loader")
+async def test_runner_experiment_filter(
+    mock_get_loader: MagicMock,
+    mock_qwen_cls: MagicMock,
+    mock_gliner_cls: MagicMock,
+    mock_uniner_cls: MagicMock,
+) -> None:
+    """Проверка что experiment_filter='E1' запускает только E1, не E2–E6."""
+    mock_get_loader.return_value = _make_mock_loader(
+        records=[_make_minimal_record()],
+    )
+
+    mock_uniner = MagicMock()
+    mock_uniner.extract_entities = AsyncMock(
+        return_value=[PredictedEntity(name="Apple", type="ORG")],
+    )
+    mock_uniner_cls.return_value = mock_uniner
+    mock_gliner_cls.return_value = MagicMock()
+    mock_qwen_cls.return_value = MagicMock()
+
+    settings = ExperimentSettings(
+        results_dir="/tmp/test_results_filter",
+        datasets=["conll04"],
+        splits=["test"],
+        max_samples=1,
+    )
+    runner = ExperimentRunner(settings)
+
+    results = await runner.run_all(experiment_filter="E1")
+    assert len(results) == 1
+    assert results[0].experiment_id == "E1"

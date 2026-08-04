@@ -11,7 +11,7 @@
 |----|-----------|----------|--------------|----------|
 | E1 | UniNer | — | — | CoNLL04, SCIERC |
 | E2 | Gleaner | — | — | CoNLL04, SCIERC |
-| E3 | Qwen | Qwen | combined (NER+RE одним промптом) | CoNLL04, SCIERC |
+| E3 | Qwen | Qwen | combined_single_call (один API-вызов Qwen для NER+RE) | CoNLL04, SCIERC |
 | E4 | Qwen | Qwen | separate (NER затем RE) | CoNLL04, SCIERC |
 | E5 | UniNer | Qwen | hybrid (NER=UniNer, RE=Qwen) | CoNLL04, SCIERC |
 | E6 | Gleaner | Qwen | hybrid (NER=Gleaner, RE=Qwen) | CoNLL04, SCIERC |
@@ -86,7 +86,74 @@ class BaseModelClient(ABC):
         raise NotImplementedError(f"{self.__class__.__name__} не поддерживает RE")
 ```
 
-### 3. ExperimentResult
+### 3. Name and Type Normalization
+
+Две утилитарные функции, используемые везде — и в метриках, и в клиентах:
+
+```python
+def normalize_name(name: str) -> str:
+    """Нормализовать имя сущности: lower(), strip(), схлопнуть множественные пробелы в один."""
+    return " ".join(name.lower().strip().split())
+
+def normalize_type(typ: str, allowed_types: list[str]) -> str | None:
+    """Сопоставить тип, возвращённый моделью, с каноническим типом из датасета.
+
+    Алгоритм:
+    1. Точное совпадение (case-insensitive) с одним из allowed_types → вернуть канонический тип.
+    2. Поиск в TYPE_SYNONYMS: если typ есть в словаре синонимов → вернуть канонический тип.
+    3. Иначе → None (тип не распознан — сущность/отношение отбрасывается).
+    """
+    ...
+```
+
+**Словарь `TYPE_SYNONYMS`** — mapping от вариантов написания к каноническим типам CoNLL04:
+
+| Варианты (lowercase) | Канонический тип |
+|----------------------|------------------|
+| `"person"`, `"people"`, `"human"` | `"Peop"` |
+| `"location"`, `"place"`, `"loc"` | `"Loc"` |
+| `"organization"`, `"organisation"`, `"company"`, `"corporation"`, `"corp"` | `"Org"` |
+| `"other"`, `"miscellaneous"`, `"misc"` | `"Other"` |
+
+Для **SciERC** синонимы не нужны (типы специфичны: `"Task"`, `"Method"`, `"Metric"`, `"Material"`, `"OtherScientificTerm"`, `"Generic"`), только case-insensitive match с `allowed_types`.
+
+### 4. Type Validation in Clients
+
+Все клиенты (`QwenClient`, `UniNerClient`, `GleanerClient`) при парсинге ответа модели **обязаны**:
+
+1. **Для каждого извлечённого `PredictedEntity`**: вызвать `normalize_type(ent.type, entity_types)`.
+   - Если вернулся `None` — пропустить эту сущность (не включать в результат).
+   - Если вернулся канонический тип — заменить `ent.type` на канонический.
+
+2. **Для каждого извлечённого `PredictedRelation`**: вызвать `normalize_type(rel.type, relation_types)`.
+   - Если `None` — пропустить отношение.
+
+3. **Логировать `warning`** для каждой отброшенной сущности/отношения с указанием исходного типа и списка доступных типов (`entity_types`/`relation_types`).
+
+### 5. E3 Combined Mode
+
+E3 использует выделенный combined-промпт из файла `prompts/combined_prompt.md`.
+
+`QwenClient` предоставляет метод:
+
+```python
+async def extract_entities_and_relations(
+    self, text: str, entity_types: list[str], relation_types: list[str]
+) -> tuple[list[PredictedEntity], list[PredictedRelation]]:
+    """Делает ОДИН вызов llm.generate() и парсит из одного ответа и сущности, и отношения."""
+    ...
+```
+
+**Формат combined-ответа**: строки `("entity"<|>NAME<|>TYPE)` и `("relationship"<|>SRC<|>TGT<|>TYPE)`, разделённые `##`, с единым терминатором `<|COMPLETE|>`.
+
+**Пример ответа модели**:
+```
+("entity"<|>John Smith<|>person)<|NEWLINE|>("entity"<|>Microsoft<|>organization)<|NEWLINE|>##<|NEWLINE|>("relationship"<|>John Smith<|>Microsoft<|>Work_For)<|NEWLINE|><|COMPLETE|>
+```
+
+**Парсинг**: используются разные регулярные выражения для сущностей и отношений, извлекая их из одного тела ответа. Валидация типов (`normalize_type`) применяется и к сущностям, и к отношениям.
+
+### 6. ExperimentResult
 
 ```python
 class ExperimentResult(BaseModel):
@@ -99,9 +166,17 @@ class ExperimentResult(BaseModel):
     config: dict              # Параметры запуска
     metrics: dict[str, float] # precision_ner, recall_ner, f1_ner,
                               # precision_re, recall_re, f1_re,
-                              # avg_response_time_sec, total_samples
+                              # avg_response_time_sec, total_samples,
+                              # ner_entity_count
     timestamp: str            # ISO 8601
 ```
+
+**Поля `metrics`**:
+- `precision_ner`, `recall_ner`, `f1_ner` — NER-метрики
+- `precision_re`, `recall_re`, `f1_re` — RE-метрики
+- `avg_response_time_sec` — среднее время ответа модели (в секундах)
+- `total_samples` — количество обработанных записей
+- `ner_entity_count` — среднее количество предсказанных NER-сущностей на запись (после фильтрации типов через `normalize_type`)
 
 ## Data Flow
 
@@ -118,7 +193,28 @@ Model Clients:
      ▼
 Metrics:
   compute_ner_f1(gold_entities, pred_entities) → {precision, recall, f1}
+
+    NER Entity matching:
+    - gold и pred сущности сопоставляются по нормализованным (name, type).
+    - gold.name и pred.name проходят через `normalize_name()`.
+    - gold.type и pred.type проходят через `normalize_type()` с allowed_types=entity_types датасета.
+    - Совпадение — только если оба нормализованных значения равны.
+    - Жадный алгоритм: одна gold-сущность на одну pred-сущность.
+
+    Из совпадений вычисляются precision, recall, F1.
+
   compute_re_f1(gold_entities, gold_relations, pred_entities, pred_relations) → {precision, recall, f1}
+
+    RE Entity matching:
+    - gold и pred сущности сопоставляются по нормализованным (name, type).
+    - gold.name и pred.name проходят через `normalize_name()`.
+    - gold.type и pred.type проходят через `normalize_type()` с allowed_types=entity_types датасета.
+    - Совпадение — только если оба нормализованных значения равны.
+    - Жадный алгоритм: одна gold-сущность на одну pred-сущность.
+
+    После матчинга сущностей, отношения сопоставляются по парам (head_idx, tail_idx, type)
+    с использованием замапленных индексов. Вычисляются precision, recall, F1.
+
   compute_avg_response_time(timings: list[float]) → float
      │
      ▼

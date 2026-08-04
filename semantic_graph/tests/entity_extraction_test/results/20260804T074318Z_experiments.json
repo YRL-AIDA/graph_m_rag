@@ -1,0 +1,41 @@
+[
+  {
+    "experiment_id": "E2",
+    "model_ner": "gliner",
+    "model_re": "none",
+    "dataset": "conll04",
+    "split": "test",
+    "task_type": "ner_only",
+    "config": {
+      "ner_client": "GleanerClient",
+      "re_client": "none",
+      "re_mode": "none",
+      "entity_types": [
+        "Peop",
+        "Loc",
+        "Org",
+        "Other"
+      ],
+      "relation_types": [
+        "Located_In",
+        "Work_For",
+        "OrgBased_In",
+        "Live_In",
+        "Kill"
+      ]
+    },
+    "metrics": {
+      "precision_ner": 0.0,
+      "recall_ner": 0.0,
+      "f1_ner": 0.0,
+      "precision_re": 0.0,
+      "recall_re": 0.0,
+      "f1_re": 0.0,
+      "ner_entity_count": 3.6,
+      "avg_response_time_sec": 0.07486745899986999,
+      "total_samples": 5.0,
+      "failed_samples": 0.0
+    },
+    "timestamp": "2026-08-04T07:43:18.754832+00:00"
+  }
+]

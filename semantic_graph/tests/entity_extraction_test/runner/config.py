@@ -21,9 +21,9 @@ class ExperimentSettings(BaseSettings):
 
     uniner_base_url: str = "http://192.168.19.127:9898/v1"
 
-    gliner_base_url: str = "http://192.168.19.127:9899/v1"
+    gliner_base_url: str = "http://192.168.19.127:9596/v1"
     gliner_api_key: str = "EMPTY"
-    gliner_model: str = "urchade/gliner_large-v2.1"
+    gliner_model: str = "gliner-community/gliner_small-v2.5"
 
     scierc_data_path: str = "/home/ivan/work/ooo/graph_m_rag/datasets_/scierc"
 

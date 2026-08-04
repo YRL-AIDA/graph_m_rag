@@ -110,9 +110,9 @@ class ExperimentRunner:
             experiment_id: Идентификатор эксперимента (``"E1"``–``"E6"``).
             ner_client: Клиент NER-модели.
             re_client: Клиент RE-модели (может быть ``None`` для ``re_mode="none"``
-                       и ``"combined"``).
-            re_mode: Режим извлечения отношений: ``"combined"``, ``"separate"``
-                     или ``"none"``.
+                       и ``"combined_single_call"``).
+            re_mode: Режим извлечения отношений: ``"combined_single_call"``,
+                     ``"separate"`` или ``"none"``.
             dataset_name: Имя датасета (``"conll04"``, ``"scierc"``).
             split: Сплит датасета (``"test"``, ``"validation"``, ``"train"``).
 
@@ -163,6 +163,7 @@ class ExperimentRunner:
                     "precision_re": 0.0,
                     "recall_re": 0.0,
                     "f1_re": 0.0,
+                    "ner_entity_count": 0.0,
                     "avg_response_time_sec": 0.0,
                     "total_samples": 0,
                     "failed_samples": 0,
@@ -189,6 +190,7 @@ class ExperimentRunner:
         re_precisions: list[float] = []
         re_recalls: list[float] = []
         re_f1s: list[float] = []
+        ner_entity_counts: list[int] = []
         successful = 0
         failed = 0
 
@@ -217,8 +219,11 @@ class ExperimentRunner:
             if r_time is not None:
                 re_timings.append(r_time)
 
+            ner_entity_counts.append(len(pred_entities))
+            print()
             # Метрики NER
-            ner_metrics = compute_ner_f1(record.entities, pred_entities)
+            print (record.entities, pred_entities, entity_types)
+            ner_metrics = compute_ner_f1(record.entities, pred_entities, entity_types)
             ner_precisions.append(ner_metrics["precision"])
             ner_recalls.append(ner_metrics["recall"])
             ner_f1s.append(ner_metrics["f1"])
@@ -229,6 +234,8 @@ class ExperimentRunner:
                 gold_relations=record.relations,
                 pred_entities=pred_entities,
                 pred_relations=pred_relations,
+                entity_types=entity_types,
+                relation_types=relation_types,
             )
             re_precisions.append(re_metrics["precision"])
             re_recalls.append(re_metrics["recall"])
@@ -271,6 +278,7 @@ class ExperimentRunner:
                 "precision_re": _safe_mean(re_precisions),
                 "recall_re": _safe_mean(re_recalls),
                 "f1_re": _safe_mean(re_f1s),
+                "ner_entity_count": _safe_mean([float(c) for c in ner_entity_counts]),
                 "avg_response_time_sec": compute_avg_response_time(all_timings),
                 "total_samples": successful,
                 "failed_samples": failed,
@@ -301,7 +309,7 @@ class ExperimentRunner:
         Args:
             ner_client: NER-клиент.
             re_client: RE-клиент (игнорируется при ``re_mode="none"``
-                       и ``"combined"``).
+                       и ``"combined_single_call"``).
             re_mode: Режим RE.
             record: Запись датасета.
             entity_types: Типы сущностей датасета.
@@ -313,6 +321,36 @@ class ExperimentRunner:
         Raises:
             ConnectionError: При ошибках сетевого соединения или таймауте.
         """
+        # --- Шаг 0: combined_single_call — один вызов API для NER+RE ---
+        if re_mode == "combined_single_call":
+            t0 = time.monotonic()
+            try:
+                pred_entities, pred_relations = await ner_client.extract_entities_and_relations(
+                    record.text, entity_types, relation_types
+                )
+            except NotImplementedError:
+                logger.warning(
+                    "combined_single_call не поддерживается клиентом %s на записи %s",
+                    type(ner_client).__name__,
+                    record.id,
+                )
+                pred_entities = []
+                pred_relations = []
+            except ConnectionError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Непарсируемый combined-ответ на записи %s",
+                    record.id,
+                    exc_info=True,
+                )
+                pred_entities = []
+                pred_relations = []
+            t1 = time.monotonic()
+            ner_time = t1 - t0
+            re_time = None  # время уже учтено в ner_time
+            return pred_entities, pred_relations, ner_time, re_time
+
         # --- Шаг 1: NER ---
         t0 = time.monotonic()
         try:
@@ -342,32 +380,7 @@ class ExperimentRunner:
         pred_relations: list = []
         re_time: float | None = None
 
-        if re_mode == "combined":
-            # Combined: тот же ner_client делает RE (re_client игнорируется)
-            t2 = time.monotonic()
-            try:
-                pred_relations = await ner_client.extract_relations(
-                    record.text, pred_entities, relation_types
-                )
-            except NotImplementedError:
-                logger.debug(
-                    "RE не поддерживается клиентом %s в combined-режиме",
-                    type(ner_client).__name__,
-                )
-                pred_relations = []
-            except ConnectionError:
-                raise
-            except Exception:
-                logger.warning(
-                    "Непарсируемый ответ RE (combined) на записи %s",
-                    record.id,
-                    exc_info=True,
-                )
-                pred_relations = []
-            t3 = time.monotonic()
-            re_time = t3 - t2
-
-        elif re_mode == "separate" and re_client is not None:
+        if re_mode == "separate" and re_client is not None:
             t2 = time.monotonic()
             try:
                 pred_relations = await re_client.extract_relations(
@@ -399,11 +412,17 @@ class ExperimentRunner:
     # run_all — полная матрица экспериментов
     # -------------------------------------------------------------------------
 
-    async def run_all(self) -> list[ExperimentResult]:
+    async def run_all(
+        self, experiment_filter: str | None = None
+    ) -> list[ExperimentResult]:
         """Запустить все эксперименты E1–E6 × датасеты × сплиты.
 
         Создаёт клиентов моделей, итерирует матрицу, вызывает
         :meth:`run_experiment` для каждой комбинации.
+
+        Args:
+            experiment_filter: Если указан (``"E1"``–``"E6"``), выполняются только
+                               эксперименты с этим идентификатором.
 
         Returns:
             Список :class:`ExperimentResult` для всех успешно завершённых
@@ -432,13 +451,21 @@ class ExperimentRunner:
 
         # --- Матрица экспериментов ---
         experiments: list[tuple[str, BaseModelClient, BaseModelClient | None, str]] = [
-            ("E1", uniner_client, None, "none"),          # UniNer NER only
-            ("E2", gliner_client, None, "none"),           # Gleaner NER only
-            ("E3", qwen_client, None, "combined"),         # Qwen combined NER+RE
-            ("E4", qwen_client, qwen_client, "separate"),  # Qwen NER + Qwen RE
-            ("E5", hybrid_uniner_qwen, qwen_client, "separate"),  # Hybrid UniNer+Qwen
-            ("E6", hybrid_gliner_qwen, qwen_client, "separate"),  # Hybrid Gleaner+Qwen
+            ("E1", uniner_client, None, "none"),                          # UniNer NER only
+            ("E2", gliner_client, None, "none"),                           # Gleaner NER only
+            ("E3", qwen_client, None, "combined_single_call"),             # Qwen combined NER+RE (single call)
+            ("E4", qwen_client, qwen_client, "separate"),                  # Qwen NER + Qwen RE
+            ("E5", hybrid_uniner_qwen, qwen_client, "separate"),           # Hybrid UniNer+Qwen
+            ("E6", hybrid_gliner_qwen, qwen_client, "separate"),           # Hybrid Gleaner+Qwen
         ]
+
+        # --- Фильтрация матрицы ДО выполнения ---
+        if experiment_filter is not None:
+            experiments = [
+                (eid, ner, re, mode)
+                for (eid, ner, re, mode) in experiments
+                if eid == experiment_filter
+            ]
 
         results: list[ExperimentResult] = []
 
@@ -521,8 +548,8 @@ class ExperimentRunner:
             f"Дата запуска: {timestamp}",
             f"Всего экспериментов: {len(results)}",
             "",
-            "| Эксперимент | Датасет | Сплит | NER F1 | RE F1 | Avg Time (s) | Успешно | Провалено |",
-            "|------------|---------|-------|--------|-------|-------------|---------|----------|",
+            "| Эксперимент | Датасет | Сплит | NER F1 | RE F1 | Entities | Avg Time (s) | Успешно | Провалено |",
+            "|------------|---------|-------|--------|-------|----------|-------------|---------|----------|",
         ]
 
         for r in results:
@@ -530,6 +557,7 @@ class ExperimentRunner:
             md_lines.append(
                 f"| {r.experiment_id} | {r.dataset} | {r.split} "
                 f"| {m['f1_ner']:.4f} | {m['f1_re']:.4f} "
+                f"| {m['ner_entity_count']:.1f} "
                 f"| {m['avg_response_time_sec']:.4f} "
                 f"| {m['total_samples']} | {m['failed_samples']} |"
             )
@@ -548,7 +576,7 @@ class ExperimentRunner:
         """Определить тип задачи по режиму RE.
 
         Args:
-            re_mode: ``"none"``, ``"combined"`` или ``"separate"``.
+            re_mode: ``"none"``, ``"combined_single_call"`` или ``"separate"``.
 
         Returns:
             ``"ner_only"`` или ``"ner_re"``.
@@ -669,18 +697,8 @@ async def _main() -> None:
     # 3. Создание раннера и запуск
     runner = ExperimentRunner(settings)
 
-    if args.experiment is not None:
-        # Фильтрация до одного эксперимента
-        all_results = await runner.run_all()
-        results = [r for r in all_results if r.experiment_id == args.experiment]
-        logger.info(
-            "Отфильтровано: %d → %d экспериментов (%s)",
-            len(all_results),
-            len(results),
-            args.experiment,
-        )
-    else:
-        results = await runner.run_all()
+    # Фильтрация --experiment передаётся в run_all() — матрица фильтруется ДО выполнения
+    results = await runner.run_all(experiment_filter=args.experiment)
 
     # 4. Сохранение
     json_path = runner.save_results(results)

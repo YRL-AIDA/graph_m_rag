@@ -16,15 +16,15 @@
 
 ### Processing (normalization algorithm)
 1. `text = " ".join(tokens)` — склейка токенов через пробел.
-2. **Entities**: для каждой `{type, start, end}`:
-   - `name = " ".join(tokens[start:end+1])`
+2. **Entities**: для каждой `{type, start, end}` (**end — exclusive**, стандартный Python slice):
+   - `name = " ".join(tokens[start:end])`
    - `start_char` / `end_char` вычисляются через кумулятивные длины токенов с одиночными пробелами:
      ```
      start_char = sum(len(tokens[i]) for i in range(start)) + start
      end_char   = start_char + len(name) - 1
      ```
-   - Пример single-token: `tokens=["John", "lives", "in", "NYC"]`, entity `{Peop, 0, 0}` → `name="John"`, `start_char=0`, `end_char=3`.
-   - Пример multi-token: `tokens=["New", "York"]`, entity `{Loc, 0, 1}` → `name="New York"`, `start_char=0`, `end_char=7`.
+   - Пример single-token: `tokens=["John", "lives", "in", "NYC"]`, entity `{Peop, 0, 1}` → `name="John"`, `start_char=0`, `end_char=3`.
+   - Пример multi-token: `tokens=["New", "York"]`, entity `{Loc, 0, 2}` → `name="New York"`, `start_char=0`, `end_char=7`.
 3. **Relations**: для каждой `{type, head, tail}`:
    - `head_idx = head`, `tail_idx = tail` (прямые индексы в gold-списке сущностей)
    - `head_start`, `head_end`, `tail_start`, `tail_end` — копируются из `Entity` по индексам `head_idx`, `tail_idx`.
@@ -57,9 +57,9 @@
 
 | # | Тест-кейс | Ожидаемый результат |
 |---|-----------|---------------------|
-| 1 | `tokens=["John", "lives", "in", "NYC"]`, entity `{Peop, 0, 0}` | `name="John"`, `start_char=0`, `end_char=3` |
-| 2 | `tokens=["New", "York"]`, entity `{Loc, 0, 1}` | `name="New York"`, `start_char=0`, `end_char=7` |
-| 3 | `tokens=["A", "B", "C"]`, entity `{Org, 1, 2}` | `name="B C"`, `start_char=2`, `end_char=4` |
+| 1 | `tokens=["John", "lives", "in", "NYC"]`, entity `{Peop, 0, 1}` | `name="John"`, `start_char=0`, `end_char=3` |
+| 2 | `tokens=["New", "York"]`, entity `{Loc, 0, 2}` | `name="New York"`, `start_char=0`, `end_char=7` |
+| 3 | `tokens=["A", "B", "C"]`, entity `{Org, 1, 3}` | `name="B C"`, `start_char=2`, `end_char=4` |
 | 4 | Отношения: `head_idx`/`tail_idx` матчатся с entity-списком | Индексы прямого соответствия |
 | 5 | `head_start`/`head_end`/`tail_start`/`tail_end` в `Relation` | Копии полей `start`/`end` Entity по `head_idx`/`tail_idx` |
 | 6 | `entity_types` и `relation_types` | `["Peop", "Loc", "Org", "Other"]`, `["Located_In", ...]` |

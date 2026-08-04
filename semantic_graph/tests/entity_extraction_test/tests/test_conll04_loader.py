@@ -42,17 +42,17 @@ def loader() -> Conll04Loader:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# TC1: single-token entity
-#   tokens=["John", "lives", "in", "NYC"], entity {Peop, 0, 0}
+# TC1: single-token entity (exclusive end)
+#   tokens=["John", "lives", "in", "NYC"], entity {Peop, 0, 1}
 #   → name="John", start_char=0, end_char=3
 # ════════════════════════════════════════════════════════════════════════════
 
 
 def test_normalize_single_token_entity(loader: Conll04Loader) -> None:
-    """TC1: одиночный токен — символьные границы совпадают с токеном."""
+    """TC1: одиночный токен — exclusive end, символьные границы совпадают с токеном."""
     record = {
         "tokens": ["John", "lives", "in", "NYC"],
-        "entities": [{"type": "Peop", "start": 0, "end": 0}],
+        "entities": [{"type": "Peop", "start": 0, "end": 1}],
         "relations": [],
     }
     result = loader._normalize_record(record, "test", 0)
@@ -67,17 +67,17 @@ def test_normalize_single_token_entity(loader: Conll04Loader) -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# TC2: multi-token entity
-#   tokens=["New", "York"], entity {Loc, 0, 1}
+# TC2: multi-token entity (exclusive end)
+#   tokens=["New", "York"], entity {Loc, 0, 2}
 #   → name="New York", start_char=0, end_char=7
 # ════════════════════════════════════════════════════════════════════════════
 
 
 def test_normalize_multi_token_entity(loader: Conll04Loader) -> None:
-    """TC2: несколько токенов — склейка через пробел, границы с учётом пробела."""
+    """TC2: несколько токенов — exclusive end, склейка через пробел, границы с учётом пробела."""
     record = {
         "tokens": ["New", "York"],
-        "entities": [{"type": "Loc", "start": 0, "end": 1}],
+        "entities": [{"type": "Loc", "start": 0, "end": 2}],
         "relations": [],
     }
     result = loader._normalize_record(record, "test", 1)
@@ -92,17 +92,17 @@ def test_normalize_multi_token_entity(loader: Conll04Loader) -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# TC3: multi-token entity в середине
-#   tokens=["A", "B", "C"], entity {Org, 1, 2}
+# TC3: multi-token entity в середине (exclusive end)
+#   tokens=["A", "B", "C"], entity {Org, 1, 3}
 #   → name="B C", start_char=2, end_char=4
 # ════════════════════════════════════════════════════════════════════════════
 
 
 def test_normalize_mid_multi_token_entity(loader: Conll04Loader) -> None:
-    """TC3: сущность не с начала — кумулятивные длины токенов + пробелы."""
+    """TC3: сущность не с начала — exclusive end, кумулятивные длины токенов + пробелы."""
     record = {
         "tokens": ["A", "B", "C"],
-        "entities": [{"type": "Org", "start": 1, "end": 2}],
+        "entities": [{"type": "Org", "start": 1, "end": 3}],
         "relations": [],
     }
     result = loader._normalize_record(record, "test", 2)
@@ -128,9 +128,9 @@ def test_relation_indices_match_entity_list(loader: Conll04Loader) -> None:
     record = {
         "tokens": ["John", "works", "at", "Microsoft", "in", "Seattle"],
         "entities": [
-            {"type": "Peop", "start": 0, "end": 0},
-            {"type": "Org", "start": 3, "end": 3},
-            {"type": "Loc", "start": 5, "end": 5},
+            {"type": "Peop", "start": 0, "end": 1},
+            {"type": "Org", "start": 3, "end": 4},
+            {"type": "Loc", "start": 5, "end": 6},
         ],
         "relations": [
             {"type": "Work_For", "head": 0, "tail": 1},
@@ -170,8 +170,8 @@ def test_relation_copies_entity_boundaries(loader: Conll04Loader) -> None:
     record = {
         "tokens": ["John", "works", "at", "Microsoft"],
         "entities": [
-            {"type": "Peop", "start": 0, "end": 0},   # John: start=0, end=3
-            {"type": "Org", "start": 3, "end": 3},     # Microsoft: start=15, end=23
+            {"type": "Peop", "start": 0, "end": 1},   # John: start=0, end=3
+            {"type": "Org", "start": 3, "end": 4},     # Microsoft: start=14, end=22
         ],
         "relations": [
             {"type": "Work_For", "head": 0, "tail": 1},

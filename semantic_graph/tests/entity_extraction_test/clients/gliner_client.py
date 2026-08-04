@@ -11,10 +11,17 @@ import json
 import logging
 import os
 import re
+import sys
+from pathlib import Path
 
 import openai
 
 from testdata.base_loader import BaseModelClient, PredictedEntity, PredictedRelation
+
+_ENTITY_DIR = str(Path(__file__).resolve().parent.parent)
+if _ENTITY_DIR not in sys.path:
+    sys.path.insert(0, _ENTITY_DIR)
+from metrics.metrics import normalize_type
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +110,16 @@ class GleanerClient(BaseModelClient):
         result: list[PredictedEntity] = []
         for item in parsed:
             if isinstance(item, dict) and "name" in item and "type" in item:
-                result.append(
-                    PredictedEntity(name=item["name"], type=item["type"])
-                )
+                name = item["name"]
+                raw_type = item["type"]
+                canonical_type = normalize_type(raw_type, entity_types)
+                if canonical_type is not None:
+                    result.append(PredictedEntity(name=name, type=canonical_type))
+                else:
+                    logger.warning(
+                        "Gleaner: skipping entity %r with unknown type %r (allowed: %s)",
+                        name, raw_type, entity_types,
+                    )
 
         return result
 

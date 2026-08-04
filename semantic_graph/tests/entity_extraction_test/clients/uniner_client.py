@@ -7,10 +7,17 @@ NER-only модель. RE не поддерживается.
 from __future__ import annotations
 
 import logging
+import sys
+from pathlib import Path
 
 import httpx
 
 from testdata.base_loader import BaseModelClient, PredictedEntity, PredictedRelation
+
+_ENTITY_DIR = str(Path(__file__).resolve().parent.parent)
+if _ENTITY_DIR not in sys.path:
+    sys.path.insert(0, _ENTITY_DIR)
+from metrics.metrics import normalize_type
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +67,19 @@ class UniNerClient(BaseModelClient):
             logger.warning("Невалидный ответ UniNer (отсутствует ключ 'entities' или невалидный JSON): %s", e)
             return []
 
-        return [PredictedEntity(name=item["name"], type=item["type"]) for item in entities_raw]
+        result: list[PredictedEntity] = []
+        for item in entities_raw:
+            name = item["name"]
+            raw_type = item["type"]
+            canonical_type = normalize_type(raw_type, entity_types)
+            if canonical_type is not None:
+                result.append(PredictedEntity(name=name, type=canonical_type))
+            else:
+                logger.warning(
+                    "UniNer: skipping entity %r with unknown type %r (allowed: %s)",
+                    name, raw_type, entity_types,
+                )
+        return result
 
     async def extract_relations(
         self,

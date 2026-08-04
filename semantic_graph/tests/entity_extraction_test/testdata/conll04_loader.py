@@ -112,7 +112,7 @@ class Conll04Loader(DatasetLoader):
 
         # 2. Предвычисление кумулятивных стартов для токенов,
         #    чтобы по формуле start_char = sum(len(tokens[i]) for i<start) + start
-        #    вычислять за O(1) на каждую сущность
+        #    вычислять за O(1) на каждую сущность (end — exclusive, стандартный Python slice)
         token_starts: list[int] = []
         pos = 0
         for t in tokens:
@@ -134,11 +134,12 @@ class Conll04Loader(DatasetLoader):
                 )
 
             # Имя сущности — склейка токенов через пробел
-            name = " ".join(tokens[start : end + 1])
+            name = " ".join(tokens[start : end])
 
-            # Символьные границы по формуле спецификации:
-            #   start_char = sum(len(tokens[i]) for i in range(start)) + start
-            #   end_char   = start_char + len(name) - 1
+            # Символьные границы: end — exclusive в датасете, поэтому
+            #   name = " ".join(tokens[start:end])  (Python slice)
+            #   start_char = token_starts[start]
+            #   end_char   = start_char + len(name) - 1  (inclusive в Entity)
             start_char = token_starts[start]
             end_char = start_char + len(name) - 1
 

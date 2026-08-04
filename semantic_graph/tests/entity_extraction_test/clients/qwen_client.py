@@ -2,6 +2,7 @@
 
 Использует AsyncLLMClient из semantic_graph/graphrag.py для сетевых вызовов.
 Реализует BaseModelClient: extract_entities (NER) и extract_relations (RE).
+Поддерживает combined-режим: extract_entities_and_relations (NER+RE одним вызовом).
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 
 from semantic_graph.graphrag import AsyncLLMClient
@@ -25,12 +27,19 @@ _RE_LINE_RE = re.compile(r'\("relationship"<\|>([^<]+)<\|>([^<]+)<\|>([^<]+)\)')
 _COMPLETE_MARKER = "<|COMPLETE|>"
 _SEPARATOR = "##"
 
+# Импорт normalize_type из metrics.metrics
+_ENTITY_DIR = str(Path(__file__).resolve().parent.parent)
+if _ENTITY_DIR not in sys.path:
+    sys.path.insert(0, _ENTITY_DIR)
+
+from metrics.metrics import normalize_type  # noqa: E402
+
 
 class QwenClient(BaseModelClient):
     """Клиент модели Qwen через OpenAI-совместимый API.
 
-    Поддерживает раздельные вызовы NER (extract_entities) и RE (extract_relations).
-    Combined-режим (NER+RE одним вызовом) реализуется на уровне ExperimentRunner.
+    Поддерживает раздельные вызовы NER (extract_entities) и RE (extract_relations),
+    а также combined-режим (extract_entities_and_relations) — NER+RE одним вызовом.
     """
 
     def __init__(
@@ -40,6 +49,7 @@ class QwenClient(BaseModelClient):
         model: str | None = None,
         ner_prompt_path: str = "",
         re_prompt_path: str = "",
+        combined_prompt_path: str = "",
     ) -> None:
         """Инициализация QwenClient.
 
@@ -51,6 +61,7 @@ class QwenClient(BaseModelClient):
             model: Идентификатор модели (env: QWEN_MODEL).
             ner_prompt_path: Путь к файлу NER-промпта (prompts/ner_prompt.md).
             re_prompt_path: Путь к файлу RE-промпта (prompts/re_prompt.md).
+            combined_prompt_path: Путь к файлу combined-промпта (prompts/combined_prompt.md).
         """
         self.base_url = base_url or os.environ.get(
             "QWEN_BASE_URL", "http://192.168.19.127:8888/v1"
@@ -72,6 +83,10 @@ class QwenClient(BaseModelClient):
             self._re_prompt = Path(re_prompt_path).read_text()
         else:
             self._re_prompt = ""
+        if combined_prompt_path:
+            self._combined_prompt = Path(combined_prompt_path).read_text()
+        else:
+            self._combined_prompt = ""
 
     # -----------------------------------------------------------------------
     # NER — извлечение сущностей
@@ -113,9 +128,11 @@ class QwenClient(BaseModelClient):
             return []
 
         # 4. Парсинг ответа
-        return self._parse_ner_response(response)
+        return self._parse_ner_response(response, entity_types)
 
-    def _parse_ner_response(self, response: str) -> list[PredictedEntity]:
+    def _parse_ner_response(
+        self, response: str, entity_types: list[str]
+    ) -> list[PredictedEntity]:
         """Распарсить NER-ответ модели в список PredictedEntity.
 
         Формат ответа: строки '("entity"<|>NAME<|>TYPE)', разделённые '##',
@@ -123,9 +140,11 @@ class QwenClient(BaseModelClient):
 
         Args:
             response: Сырой текст ответа модели.
+            entity_types: Список канонических типов сущностей для валидации.
 
         Returns:
-            Список PredictedEntity — только валидные строки.
+            Список PredictedEntity — только валидные строки, прошедшие
+            валидацию типа через normalize_type.
         """
         entities: list[PredictedEntity] = []
         lines = response.split(_SEPARATOR)
@@ -141,10 +160,22 @@ class QwenClient(BaseModelClient):
 
             match = _NER_LINE_RE.search(line)
             if match:
-                any_valid = True
                 name = match.group(1).strip()
                 ent_type = match.group(2).strip()
-                entities.append(PredictedEntity(name=name, type=ent_type))
+                # Валидация типа через normalize_type
+                canonical_type = normalize_type(ent_type, entity_types)
+                if canonical_type is not None:
+                    any_valid = True
+                    entities.append(
+                        PredictedEntity(name=name, type=canonical_type)
+                    )
+                else:
+                    logger.warning(
+                        "Skipping entity %r with unknown type %r (allowed: %s)",
+                        name,
+                        ent_type,
+                        entity_types,
+                    )
             elif line:
                 # Непустая строка, но не соответствует формату — пропускаем
                 logger.warning(
@@ -213,9 +244,11 @@ class QwenClient(BaseModelClient):
             return []
 
         # 5. Парсинг ответа
-        return self._parse_re_response(response)
+        return self._parse_re_response(response, relation_types)
 
-    def _parse_re_response(self, response: str) -> list[PredictedRelation]:
+    def _parse_re_response(
+        self, response: str, relation_types: list[str]
+    ) -> list[PredictedRelation]:
         """Распарсить RE-ответ модели в список PredictedRelation.
 
         Формат ответа: строки '("relationship"<|>SRC<|>TGT<|>TYPE)', разделённые
@@ -223,9 +256,11 @@ class QwenClient(BaseModelClient):
 
         Args:
             response: Сырой текст ответа модели.
+            relation_types: Список канонических типов отношений для валидации.
 
         Returns:
-            Список PredictedRelation — только валидные строки.
+            Список PredictedRelation — только валидные строки, прошедшие
+            валидацию типа через normalize_type.
         """
         relations: list[PredictedRelation] = []
         lines = response.split(_SEPARATOR)
@@ -241,13 +276,26 @@ class QwenClient(BaseModelClient):
 
             match = _RE_LINE_RE.search(line)
             if match:
-                any_valid = True
                 head = match.group(1).strip()
                 tail = match.group(2).strip()
                 rel_type = match.group(3).strip()
-                relations.append(
-                    PredictedRelation(head=head, tail=tail, type=rel_type)
-                )
+                # Валидация типа через normalize_type
+                canonical_type = normalize_type(rel_type, relation_types)
+                if canonical_type is not None:
+                    any_valid = True
+                    relations.append(
+                        PredictedRelation(
+                            head=head, tail=tail, type=canonical_type
+                        )
+                    )
+                else:
+                    logger.warning(
+                        "Skipping relation (%r, %r) with unknown type %r (allowed: %s)",
+                        head,
+                        tail,
+                        rel_type,
+                        relation_types,
+                    )
             elif line:
                 # Непустая строка, но не соответствует формату — пропускаем
                 logger.warning(
@@ -265,3 +313,121 @@ class QwenClient(BaseModelClient):
             )
 
         return relations
+
+    # -----------------------------------------------------------------------
+    # Combined (E3) — извлечение сущностей и отношений одним вызовом
+    # -----------------------------------------------------------------------
+
+    async def extract_entities_and_relations(
+        self, text: str, entity_types: list[str], relation_types: list[str]
+    ) -> tuple[list[PredictedEntity], list[PredictedRelation]]:
+        """Извлечь сущности и отношения ОДНИМ вызовом LLM (E3 combined_single_call).
+
+        Returns:
+            Кортеж (entities, relations).
+        """
+        if not self._combined_prompt:
+            logger.warning(
+                "Combined prompt is empty, cannot extract entities and relations"
+            )
+            return [], []
+
+        # 1. Форматирование combined-промпта
+        prompt = self._combined_prompt.format(
+            input_text=text,
+            entity_types=",".join(entity_types),
+            relation_types=",".join(relation_types),
+        )
+
+        # 2. Вызов LLM — ОДИН раз
+        response = await self.llm.generate(
+            messages=[{"role": "user", "content": prompt}],
+            model=self.model,
+        )
+
+        # 3. llm.generate() вернул None
+        if response is None:
+            logger.warning(
+                "llm.generate() returned None for combined request (model=%s)",
+                self.model,
+            )
+            return [], []
+
+        # 4. Парсинг combined-ответа
+        return self._parse_combined_response(response, entity_types, relation_types)
+
+    def _parse_combined_response(
+        self,
+        response: str,
+        entity_types: list[str],
+        relation_types: list[str],
+    ) -> tuple[list[PredictedEntity], list[PredictedRelation]]:
+        """Распарсить combined-ответ: сущности И отношения из одного текста.
+
+        Формат: строки ("entity"<|>NAME<|>TYPE) и ("relationship"<|>SRC<|>TGT<|>TYPE),
+        разделённые ##, с единым терминатором <|COMPLETE|>.
+        """
+        entities: list[PredictedEntity] = []
+        relations: list[PredictedRelation] = []
+        lines = response.split(_SEPARATOR)
+        has_complete = _COMPLETE_MARKER in response
+
+        for line in lines:
+            line = line.strip()
+            if line == _COMPLETE_MARKER:
+                break
+
+            # Пробуем NER
+            ner_match = _NER_LINE_RE.search(line)
+            if ner_match:
+                name = ner_match.group(1).strip()
+                ent_type = ner_match.group(2).strip()
+                # Валидация типа
+                canonical_type = normalize_type(ent_type, entity_types)
+                if canonical_type is not None:
+                    entities.append(
+                        PredictedEntity(name=name, type=canonical_type)
+                    )
+                else:
+                    logger.warning(
+                        "Combined response: skipping entity %r with unknown type %r (allowed: %s)",
+                        name,
+                        ent_type,
+                        entity_types,
+                    )
+                continue
+
+            # Пробуем RE
+            re_match = _RE_LINE_RE.search(line)
+            if re_match:
+                head = re_match.group(1).strip()
+                tail = re_match.group(2).strip()
+                rel_type = re_match.group(3).strip()
+                # Валидация типа
+                canonical_type = normalize_type(rel_type, relation_types)
+                if canonical_type is not None:
+                    relations.append(
+                        PredictedRelation(
+                            head=head, tail=tail, type=canonical_type
+                        )
+                    )
+                else:
+                    logger.warning(
+                        "Combined response: skipping relation (%r, %r) with unknown type %r (allowed: %s)",
+                        head,
+                        tail,
+                        rel_type,
+                        relation_types,
+                    )
+                continue
+
+            # Непустая строка без совпадений
+            if line:
+                logger.warning("Skipping unparseable combined line: %r", line[:200])
+
+        if not entities and not relations and not has_complete:
+            logger.warning(
+                "Combined response has no valid content and no <|COMPLETE|>"
+            )
+
+        return entities, relations

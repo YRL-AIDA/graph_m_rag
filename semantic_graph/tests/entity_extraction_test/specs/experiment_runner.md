@@ -28,7 +28,7 @@ class ExperimentSettings(BaseSettings):
         env_file = ".env"
 ```
 
-Все поля переопределяются через env-переменные с префиксом `EXPERIMENT_`. `max_samples` — лимит записей на датасет (`None` = без ограничений).
+Все поля переопределяются через env-переменные с префиксом `EXPERIMENT_`. `max_samples` — лимит записей на датасет (`None` = без ограничений). `prompts_dir` — директория с файлами промптов (`ner_prompt.md`, `re_prompt.md`, `combined_prompt.md`); используется для разрешения путей при создании `QwenClient` (см. ``run_all`` — алгоритм).
 
 ### ExperimentRunner (`runner/experiment_runner.py`)
 
@@ -71,7 +71,31 @@ class ExperimentRunner:
 
 ### `run_all` — алгоритм
 
-Создаёт клиенты моделей (`QwenClient`, `UniNerClient`, `GleanerClient`, `HybridClient`). Формирует матрицу экспериментов:
+Создаёт клиенты моделей (`QwenClient`, `UniNerClient`, `GleanerClient`, `OllamaClient`, `HybridClient`).
+
+Создаёт клиенты моделей (`QwenClient`, `UniNerClient`, `GleanerClient`, `HybridClient`). При создании `QwenClient` пути к файлам промптов разрешаются из `settings.prompts_dir`:
+
+```python
+prompts = Path(self.settings.prompts_dir)
+qwen_client = QwenClient(
+    base_url=self.settings.qwen_base_url,
+    api_key=self.settings.qwen_api_key,
+    model=self.settings.qwen_model,
+    ner_prompt_path=str(prompts / "ner_prompt.md"),
+    re_prompt_path=str(prompts / "re_prompt.md"),
+    combined_prompt_path=str(prompts / "combined_prompt.md"),
+)
+ollama_client = OllamaClient(
+    base_url=self.settings.ollama_base_url,
+    model=self.settings.ollama_model,
+    think=self.settings.ollama_think,
+    num_predict=self.settings.ollama_num_predict,
+    num_ctx=self.settings.ollama_num_ctx,
+    ner_prompt_path=str(prompts / "ner_prompt.md"),
+    re_prompt_path=str(prompts / "re_prompt.md"),
+    combined_prompt_path=str(prompts / "combined_prompt.md"),
+)
+``` Формирует матрицу экспериментов:
 
 - E1: UniNer NER, `re_mode="none"`
 - E2: Gleaner NER, `re_mode="none"`

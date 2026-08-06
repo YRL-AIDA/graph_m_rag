@@ -1,0 +1,6 @@
+("entity"<|>Apple Inc.<|>Organization)
+##
+("entity"<|>Steve Jobs<|>Person)
+##
+("entity"<|>Cupertino<|>Location)
+<|COMPLETE|>

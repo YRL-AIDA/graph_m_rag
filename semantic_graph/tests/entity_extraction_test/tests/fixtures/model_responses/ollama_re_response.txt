@@ -1,0 +1,4 @@
+("relationship"<|>Apple Inc.<|>Steve Jobs<|>founded_by)
+##
+("relationship"<|>Apple Inc.<|>Cupertino<|>located_in)
+<|COMPLETE|>

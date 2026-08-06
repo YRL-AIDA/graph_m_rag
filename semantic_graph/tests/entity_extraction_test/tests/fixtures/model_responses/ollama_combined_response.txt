@@ -1,0 +1,10 @@
+("entity"<|>Apple Inc.<|>Organization)
+##
+("entity"<|>Steve Jobs<|>Person)
+##
+("entity"<|>Cupertino<|>Location)
+##
+("relationship"<|>Apple Inc.<|>Steve Jobs<|>founded_by)
+##
+("relationship"<|>Apple Inc.<|>Cupertino<|>located_in)
+<|COMPLETE|>

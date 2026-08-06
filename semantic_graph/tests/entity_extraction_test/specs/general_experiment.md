@@ -1,11 +1,11 @@
 # Feature: Общий контракт экспериментального фреймворка NER/RE
 
 ## Motivation
-Создать изолированный экспериментальный фреймворк внутри `semantic_graph/tests/entity_extraction_test/` для воспроизводимой оценки F1 и скорости различных комбинаций NER/RE моделей на CoNLL04 и SCIERC. Фреймворк самодостаточен, за исключением переиспользования `AsyncLLMClient` из `graphrag.py` для Qwen. Статус: Experiments/Spikes (Constitution §5.2).
+Создать изолированный экспериментальный фреймворк внутри `semantic_graph/tests/entity_extraction_test/` для воспроизводимой оценки F1 и скорости различных комбинаций NER/RE моделей на CoNLL04 и SCIERC. Фреймворк самодостаточен, за исключением переиспользования `AsyncLLMClient` из `graphrag.py` для Qwen. OllamaClient использует свой транспорт через `httpx.AsyncClient` для нативного Ollama API. Статус: Experiments/Spikes (Constitution §5.2).
 
 ## Overview
 
-### Экспериментальная матрица (E1–E6)
+### Экспериментальная матрица (E1–E8)
 
 | ID | NER model | RE model | RE call type | Datasets |
 |----|-----------|----------|--------------|----------|
@@ -15,6 +15,8 @@
 | E4 | Qwen | Qwen | separate (NER затем RE) | CoNLL04, SCIERC |
 | E5 | UniNer | Qwen | hybrid (NER=UniNer, RE=Qwen) | CoNLL04, SCIERC |
 | E6 | Gleaner | Qwen | hybrid (NER=Gleaner, RE=Qwen) | CoNLL04, SCIERC |
+| E7 | Ollama | Ollama | combined_single_call (один API-вызов Ollama для NER+RE) | CoNLL04, SCIERC |
+| E8 | Ollama | Ollama | separate (NER затем RE) | CoNLL04, SCIERC |
 
 ### Модели
 
@@ -23,6 +25,7 @@
 | UniNer | `Universal-NER/UniNER-7B-all` | Generative LLM (7B) | FastAPI |
 | Gleaner | `urchade/gliner_large-v2.1` | Encoder bi-encoder (DeBERTa ~300M), НЕ generative | Кастомный FastAPI, OpenAI-совместимый эндпоинт |
 | Qwen | `Qwen/Qwen3-VL-32B-Thinking` | Generative VLM (32B) | Уже запущен: `http://192.168.19.127:8888/v1` |
+| Ollama | Любая модель в Ollama (по умолчанию `qwen3-coder:30b`) | Generative LLM | Нативный Ollama API: `http://192.168.55.242:7869` |
 
 ## Behaviour
 
@@ -119,7 +122,7 @@ def normalize_type(typ: str, allowed_types: list[str]) -> str | None:
 
 ### 4. Type Validation in Clients
 
-Все клиенты (`QwenClient`, `UniNerClient`, `GleanerClient`) при парсинге ответа модели **обязаны**:
+Все клиенты (`QwenClient`, `UniNerClient`, `GleanerClient`, `OllamaClient`) при парсинге ответа модели **обязаны**:
 
 1. **Для каждого извлечённого `PredictedEntity`**: вызвать `normalize_type(ent.type, entity_types)`.
    - Если вернулся `None` — пропустить эту сущность (не включать в результат).
@@ -189,6 +192,7 @@ Model Clients:
   UniNerClient  → extract_entities → list[PredictedEntity]
   GleanerClient → extract_entities → list[PredictedEntity]
   HybridClient  → делегирует NER → ner_client, RE → re_client
+  OllamaClient → extract_entities / extract_relations → list[PredictedEntity] / list[PredictedRelation]
      │
      ▼
 Metrics:

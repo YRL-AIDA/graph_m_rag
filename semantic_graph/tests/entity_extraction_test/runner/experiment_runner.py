@@ -2,6 +2,9 @@
 
 ExperimentRunner запускает эксперименты E1–E6 по матрице «эксперимент × датасет ×
 сплит», агрегирует метрики и сохраняет результаты в JSON и Markdown.
+
+Поддерживает async-батчинг: записи группируются в батчи и обрабатываются
+параллельно через ``asyncio.gather()`` с семафором для ограничения конкурентности.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ if _ENTITY_DIR not in sys.path:
 from clients.gliner_client import GleanerClient  # noqa: E402
 from clients.hybrid_client import HybridClient  # noqa: E402
 from clients.qwen_client import QwenClient  # noqa: E402
+from clients.ollama_client import OllamaClient  # noqa: E402
 from clients.uniner_client import UniNerClient  # noqa: E402
 from metrics.metrics import (  # noqa: E402
     compute_avg_response_time,
@@ -165,6 +169,7 @@ class ExperimentRunner:
                     "f1_re": 0.0,
                     "ner_entity_count": 0.0,
                     "avg_response_time_sec": 0.0,
+                    "avg_batch_time_sec": 0.0,
                     "total_samples": 0,
                     "failed_samples": 0,
                 },
@@ -181,9 +186,64 @@ class ExperimentRunner:
         )
         sample = records[:limit]
 
-        # --- Прогон по записям ---
+        # --- Группировка записей в батчи ---
+        batch_size = max(self.settings.batch_size, 1)
+        batches = [
+            sample[i : i + batch_size]
+            for i in range(0, len(sample), batch_size)
+        ]
+
+        # --- Параллельное выполнение батчей с семафором ---
+        sem = asyncio.Semaphore(self.settings.max_concurrent_batches)
+
+        async def _run_one_batch(
+            batch_idx: int,
+            batch_records: list[DatasetRecord],
+        ) -> list[tuple[DatasetRecord, object, float]]:
+            """Выполнить один батч: параллельный запуск _process_record для всех записей.
+
+            Args:
+                batch_idx: Порядковый номер батча (0-based) для логирования.
+                batch_records: Список записей в батче.
+
+            Returns:
+                Список кортежей ``(record, result_or_exception, batch_time)``.
+            """
+            async with sem:
+                logger.info(
+                    "Батч %d/%d: %d записей",
+                    batch_idx + 1,
+                    len(batches),
+                    len(batch_records),
+                )
+                t_batch_start = time.monotonic()
+                tasks = [
+                    self._process_record(
+                        ner_client=ner_client,
+                        re_client=re_client,
+                        re_mode=re_mode,
+                        record=r,
+                        entity_types=entity_types,
+                        relation_types=relation_types,
+                    )
+                    for r in batch_records
+                ]
+                raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+                t_batch_end = time.monotonic()
+                batch_time = t_batch_end - t_batch_start
+                return [
+                    (r, raw, batch_time)
+                    for r, raw in zip(batch_records, raw_results)
+                ]
+
+        all_batch_results = await asyncio.gather(
+            *[_run_one_batch(i, b) for i, b in enumerate(batches)],
+        )
+
+        # --- Агрегация результатов батчей ---
         ner_timings: list[float] = []
         re_timings: list[float] = []
+        batch_timings: list[float] = []
         ner_precisions: list[float] = []
         ner_recalls: list[float] = []
         ner_f1s: list[float] = []
@@ -194,54 +254,57 @@ class ExperimentRunner:
         successful = 0
         failed = 0
 
-        for record in sample:
-            try:
-                pred_entities, pred_relations, n_time, r_time = (
-                    await self._process_record(
-                        ner_client=ner_client,
-                        re_client=re_client,
-                        re_mode=re_mode,
-                        record=record,
-                        entity_types=entity_types,
-                        relation_types=relation_types,
+        for batch_output in all_batch_results:
+            for record, result, batch_time in batch_output:
+                if isinstance(result, ConnectionError):
+                    logger.exception(
+                        "Ошибка соединения на записи %s (эксперимент %s)",
+                        record.id,
+                        experiment_id,
                     )
+                    failed += 1
+                    continue
+                elif isinstance(result, Exception):
+                    logger.warning(
+                        "Неожиданная ошибка на записи %s (эксперимент %s): %s",
+                        record.id,
+                        experiment_id,
+                        result,
+                    )
+                    failed += 1
+                    continue
+
+                pred_entities, pred_relations, n_time, r_time = result
+                print(record.entities,pred_entities)
+                ner_timings.append(n_time)
+                if r_time is not None:
+                    re_timings.append(r_time)
+                batch_timings.append(batch_time)
+
+                ner_entity_counts.append(len(pred_entities))
+
+                # Метрики NER
+                ner_metrics = compute_ner_f1(
+                    record.entities, pred_entities, entity_types
                 )
-            except ConnectionError:
-                logger.exception(
-                    "Ошибка соединения на записи %s (эксперимент %s)",
-                    record.id,
-                    experiment_id,
+                ner_precisions.append(ner_metrics["precision"])
+                ner_recalls.append(ner_metrics["recall"])
+                ner_f1s.append(ner_metrics["f1"])
+
+                # Метрики RE
+                re_metrics = compute_re_f1(
+                    gold_entities=record.entities,
+                    gold_relations=record.relations,
+                    pred_entities=pred_entities,
+                    pred_relations=pred_relations,
+                    entity_types=entity_types,
+                    relation_types=relation_types,
                 )
-                failed += 1
-                continue
+                re_precisions.append(re_metrics["precision"])
+                re_recalls.append(re_metrics["recall"])
+                re_f1s.append(re_metrics["f1"])
 
-            ner_timings.append(n_time)
-            if r_time is not None:
-                re_timings.append(r_time)
-
-            ner_entity_counts.append(len(pred_entities))
-            print()
-            # Метрики NER
-            print (record.entities, pred_entities, entity_types)
-            ner_metrics = compute_ner_f1(record.entities, pred_entities, entity_types)
-            ner_precisions.append(ner_metrics["precision"])
-            ner_recalls.append(ner_metrics["recall"])
-            ner_f1s.append(ner_metrics["f1"])
-
-            # Метрики RE
-            re_metrics = compute_re_f1(
-                gold_entities=record.entities,
-                gold_relations=record.relations,
-                pred_entities=pred_entities,
-                pred_relations=pred_relations,
-                entity_types=entity_types,
-                relation_types=relation_types,
-            )
-            re_precisions.append(re_metrics["precision"])
-            re_recalls.append(re_metrics["recall"])
-            re_f1s.append(re_metrics["f1"])
-
-            successful += 1
+                successful += 1
 
         if successful == 0:
             logger.warning(
@@ -280,6 +343,7 @@ class ExperimentRunner:
                 "f1_re": _safe_mean(re_f1s),
                 "ner_entity_count": _safe_mean([float(c) for c in ner_entity_counts]),
                 "avg_response_time_sec": compute_avg_response_time(all_timings),
+                "avg_batch_time_sec": compute_avg_response_time(batch_timings),
                 "total_samples": successful,
                 "failed_samples": failed,
             },
@@ -429,10 +493,26 @@ class ExperimentRunner:
             комбинаций.
         """
         # --- Создание клиентов ---
+        prompts = Path(self.settings.prompts_dir)
+        ollama_client = OllamaClient(
+            base_url=self.settings.ollama_base_url,
+            model=self.settings.ollama_model,
+            think=self.settings.ollama_think,
+            num_predict=self.settings.ollama_num_predict,
+            num_ctx=self.settings.ollama_num_ctx,
+            keep_alive=self.settings.ollama_keep_alive,
+            ner_prompt_path=str(prompts / "ner_prompt.md"),
+            re_prompt_path=str(prompts / "re_prompt.md"),
+            combined_prompt_path=str(prompts / "combined_prompt.md"),
+        )
+
         qwen_client = QwenClient(
             base_url=self.settings.qwen_base_url,
             api_key=self.settings.qwen_api_key,
             model=self.settings.qwen_model,
+            ner_prompt_path=str(prompts / "ner_prompt.md"),
+            re_prompt_path=str(prompts / "re_prompt.md"),
+            combined_prompt_path=str(prompts / "combined_prompt.md"),
         )
         uniner_client = UniNerClient(base_url=self.settings.uniner_base_url)
         gliner_client = GleanerClient(
@@ -457,6 +537,8 @@ class ExperimentRunner:
             ("E4", qwen_client, qwen_client, "separate"),                  # Qwen NER + Qwen RE
             ("E5", hybrid_uniner_qwen, qwen_client, "separate"),           # Hybrid UniNer+Qwen
             ("E6", hybrid_gliner_qwen, qwen_client, "separate"),           # Hybrid Gleaner+Qwen
+            ("E7", ollama_client, None, "combined_single_call"),             # Ollama combined NER+RE (single call)
+            ("E8", ollama_client, ollama_client, "separate"),                  # Ollama NER + Ollama RE
         ]
 
         # --- Фильтрация матрицы ДО выполнения ---
@@ -479,6 +561,7 @@ class ExperimentRunner:
                         split,
                         re_mode,
                     )
+                    t_exp_start = time.monotonic()
                     try:
                         result = await self.run_experiment(
                             experiment_id=exp_id,
@@ -488,14 +571,18 @@ class ExperimentRunner:
                             dataset_name=dataset_name,
                             split=split,
                         )
+                        t_exp_end = time.monotonic()
+                        t_exp_elapsed = t_exp_end - t_exp_start
                         results.append(result)
                         logger.info(
-                            "%s/%s/%s — NER F1=%.4f  RE F1=%.4f",
+                            "%s/%s/%s — NER F1=%.4f  RE F1=%.4f | общее время=%.1fс  среднее/пример=%.2fс",
                             exp_id,
                             dataset_name,
                             split,
                             result.metrics["f1_ner"],
                             result.metrics["f1_re"],
+                            t_exp_elapsed,
+                            t_exp_elapsed / max(result.metrics["total_samples"], 1),
                         )
                     except RuntimeError as exc:
                         logger.error(
@@ -603,6 +690,7 @@ class ExperimentRunner:
             "QwenClient": "qwen",
             "UniNerClient": "uniner",
             "GleanerClient": "gliner",
+            "OllamaClient": "ollama",
             "HybridClient": "hybrid",
         }
         class_name = type(client).__name__
@@ -640,7 +728,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--experiment",
-        choices=[f"E{i}" for i in range(1, 7)],
+        choices=[f"E{i}" for i in range(1, 9)],
         default=None,
         help="Фильтр по конкретному эксперименту (по умолчанию: все)",
     )
@@ -661,6 +749,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Ограничение количества записей (по умолчанию: из настроек)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Размер батча (по умолчанию: EXPERIMENT_BATCH_SIZE)",
     )
     return parser
 
@@ -686,12 +780,15 @@ async def _main() -> None:
         settings.datasets = [args.dataset]
     if args.split is not None:
         settings.splits = [args.split]
+    if args.batch_size is not None:
+        settings.batch_size = args.batch_size
 
     logger.info(
-        "Настройки: datasets=%s, splits=%s, max_samples=%s",
+        "Настройки: datasets=%s, splits=%s, max_samples=%s, batch_size=%s",
         settings.datasets,
         settings.splits,
         settings.max_samples,
+        settings.batch_size,
     )
 
     # 3. Создание раннера и запуск

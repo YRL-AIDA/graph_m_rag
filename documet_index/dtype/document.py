@@ -1,9 +1,12 @@
 from .region import Region, Style, BBox
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Document:
-    def __init__(self, json_data, name, mode):
+    def __init__(self, json_data, name, mode, *, region_reclassify_enabled: bool = False, llm_client=None):
         self.mode = mode
         self.name = name
         if mode == "mineru":
@@ -11,6 +14,8 @@ class Document:
         else:
             raise ValueError('mode in ("mineru", ...)')
         self.json_data = json_data["results"]["result"]["results"]
+        self._region_reclassify_enabled = region_reclassify_enabled
+        self._llm_client = llm_client
 
 
     @property
@@ -22,6 +27,9 @@ class Document:
 
     def __parser_mineru(self, json_data) -> List[Region]:
         regions = []
+        # Inject region re-classification flags (A1 improvement)
+        json_data["_region_reclassify_enabled"] = self._region_reclassify_enabled
+        json_data["_region_llm_client"] = self._llm_client
         return create_graph_from_mineru_result(json_data, self.name)
 
         for i, element in enumerate(json_data["content_list"]):
@@ -141,6 +149,10 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
     if "content_list" in mineru_result:
         content_list = mineru_result["content_list"]
 
+    # Optional region type re-classifier (A1 improvement)
+    reclassify_enabled = mineru_result.get("_region_reclassify_enabled", False)
+    llm_client = mineru_result.get("_region_llm_client", None)
+
     # Build regions for all element types
     regions = []
     element_index = 0
@@ -156,6 +168,25 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
         # Skip discarded elements
         if element_type == "discarded":
             continue
+
+        # A1: Re-classify ambiguous image/table regions
+        if reclassify_enabled and element_type in ("image", "table"):
+            from documet_index.region_classifier import classify_region_type
+
+            corrected_type = classify_region_type(
+                element,
+                element_type,
+                use_llm=(llm_client is not None),
+                llm_client=llm_client,
+            )
+            if corrected_type != element_type:
+                logger.info(
+                    "Region %d reclassified: %s → %s",
+                    i,
+                    element_type,
+                    corrected_type,
+                )
+            element_type = corrected_type
 
         # Handle text elements - check for text_level to determine if it's a title
         if element_type == "text":

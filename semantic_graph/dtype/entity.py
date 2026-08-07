@@ -7,6 +7,7 @@ class EntityCreate(BaseModel):
     frequency: Optional[int] = 0
     description: Optional[str] = None
     degree: Optional[int] = 0
+    confidence: Optional[int] = 5
 
 class RelationshipCreate(BaseModel):
     source: str

@@ -1,7 +1,35 @@
-fastapi==0.115.0
-uvicorn==0.30.6
-pydantic==2.9.2
-requests
-pandas
-pyarrow
+# Core async HTTP
+aiohttp>=3.9,<4
 
+# Web framework + ASGI server
+fastapi>=0.104,<1
+uvicorn[standard]>=0.24,<1
+
+# Config & env
+python-dotenv>=1.0,<2
+
+# Data modelling
+pydantic>=2.5,<3
+pydantic-settings>=2.2,<3
+
+# Data processing
+pandas>=2.0,<3
+numpy>=1.26,<3
+
+# Graph database
+neo4j>=5.14,<6
+
+# Vector database
+qdrant-client>=1.16,<2
+
+# LLM client
+openai>=2.0,<3
+
+# NLP — lemmatizer (B5: _normalize_entity_title)
+nltk>=3.9,<4
+
+# Graph clustering (Leiden algorithm)
+graspologic-native>=1.2,<2
+
+# Sync HTTP client (Qdrant adapter + embedding client)
+requests>=2.31,<3

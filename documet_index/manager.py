@@ -1,5 +1,5 @@
 from neo4j import GraphDatabase
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 import logging
 import json
 
@@ -88,11 +88,95 @@ class Manager:
         self.conn = Neo4jConnection(config.uri, config.user, config.password)
         self.name_db = config.name_db
 
-    def add_document(self, document: Document) -> bool:
+    def _build_sections(self, document_name: str, regions: dict) -> list:
+        """Build section hierarchy from title regions (A3 improvement).
+
+        Identifies title regions and groups subsequent regions into sections.
+        Each section spans from one title to the next title.
+        Regions before the first title belong to a «Preamble» section.
+
+        Args:
+            document_name: Document identifier (file_hash)
+            regions: Dict of region data keyed by region id
+
+        Returns:
+            List of section dicts with keys:
+                section_id, title, regions, start_order, end_order
+        """
+        # Collect all regions with their order for sorting
+        region_list = []
+        for rid, reg_data in regions.items():
+            region_list.append({
+                "id": rid,
+                "label": reg_data.get("label", ""),
+                "text": reg_data.get("text", ""),
+                "order": reg_data.get("order", 0),
+            })
+
+        # Sort regions by order
+        region_list.sort(key=lambda r: r["order"])
+
+        # Identify title indices
+        title_indices = [
+            i for i, r in enumerate(region_list) if r["label"] == "title"
+        ]
+
+        if not title_indices:
+            # No titles found — return a single default section
+            return [{
+                "section_id": f"{document_name}|section_default",
+                "title": "Document",
+                "regions": [r["id"] for r in region_list],
+                "start_order": region_list[0]["order"] if region_list else 0,
+                "end_order": region_list[-1]["order"] if region_list else 0,
+            }]
+
+        sections = []
+
+        # Handle regions before the first title (preamble)
+        if title_indices[0] > 0:
+            preamble_regions = region_list[:title_indices[0]]
+            sections.append({
+                "section_id": f"{document_name}|section_preamble",
+                "title": "Preamble",
+                "regions": [r["id"] for r in preamble_regions],
+                "start_order": preamble_regions[0]["order"],
+                "end_order": preamble_regions[-1]["order"],
+            })
+
+        # Build sections from title boundaries
+        for i, ti in enumerate(title_indices):
+            title_region = region_list[ti]
+            # Extract clean title text (remove "Title: " prefix)
+            raw_text = title_region.get("text", "")
+            clean_title = raw_text.replace("Title: ", "").strip() if raw_text else "Untitled"
+
+            # Determine end of section: next title or end of list
+            if i + 1 < len(title_indices):
+                end_idx = title_indices[i + 1]
+            else:
+                end_idx = len(region_list)
+
+            # Extract regions in this section (including the title itself)
+            section_regions = region_list[ti:end_idx]
+
+            section_id = f"{document_name}|section_{i}"
+            sections.append({
+                "section_id": section_id,
+                "title": clean_title,
+                "regions": [r["id"] for r in section_regions],
+                "start_order": section_regions[0]["order"],
+                "end_order": section_regions[-1]["order"],
+            })
+
+        return sections
+
+    def add_document(self, document: Document, *, enable_sections: bool = True) -> bool:
         """Add a document to the graph database.
 
         Args:
             document: Document object to add
+            enable_sections: Whether to create hierarchical Section nodes (A3)
 
         Returns:
             True if document was added, False if it already exists
@@ -109,19 +193,48 @@ class Manager:
                 style = reg.get('style', {})
                 order = reg.get('order', 0)
                 element_data = reg.get('element_data', '')
+                # Generate region_id using file_hash and region id
+                region_id = f"{document.name}|{id}"
 
-                # Escape single quotes in text fields
-                text_escaped = text.replace("'", "\\'") if text else ''
-                image_escaped = image.replace("'", "\\'") if image else ''
-                element_data_escaped = str(element_data).replace("'", "\\'") if element_data else ''
+                # Escape backslashes and single quotes for Cypher string literals
+                text_escaped = text.replace("\\", "\\\\").replace("'", "\\'") if text else ''
+                image_escaped = image.replace("\\", "\\\\").replace("'", "\\'") if image else ''
+                element_data_escaped = str(element_data).replace("\\", "\\\\").replace("'", "\\'") if element_data else ''
 
                 # Convert bbox and style to JSON strings for storage
                 bbox_json = json.dumps(bbox) if bbox else '{}'
                 style_json = json.dumps(style) if style else '{}'
 
-                query += (f"CREATE (reg{id}:Region:{label} {{text: '{text_escaped}', image: '{image_escaped}', "
+                query += (f"CREATE (reg{id}:Region:{label} {{region_id: '{region_id}', text: '{text_escaped}', image: '{image_escaped}', "
                           f"bbox: '{bbox_json}', style: '{style_json}', order: {order}, element_data: "
                           f"'{element_data_escaped}'}})\n")
+
+            # A3: Build hierarchical section structure from title regions.
+            # Creates Section nodes with SECTION edges: Document → Section → Region.
+            if enable_sections and graph['nodes']['regions']:
+                sections = self._build_sections(
+                    document.name, graph['nodes']['regions']
+                )
+                for sec in sections:
+                    sec_id_norm = sec['section_id'].replace("'", "\\'").replace("|", "_")
+                    title_escaped = sec['title'].replace("'", "\\'")
+                    query += (
+                        f"CREATE (sec_{sec_id_norm}:Section {{section_id: "
+                        f"'{sec_id_norm}', title: '{title_escaped}', "
+                        f"start_order: {sec['start_order']}, "
+                        f"end_order: {sec['end_order']}}})\n"
+                    )
+                    # Document → Section
+                    query += f"CREATE (d) -[:SECTION]-> (sec_{sec_id_norm})\n"
+                    # Section → Region for each region in this section
+                    for rid in sec['regions']:
+                        query += (
+                            f"CREATE (sec_{sec_id_norm}) -[:SECTION]-> (reg{rid})\n"
+                        )
+                logger.info(
+                    "Built %d sections for document '%s'",
+                    len(sections), document.name,
+                )
 
             for order in graph['edges']['order']:
                 n1, n2 = order
@@ -222,8 +335,8 @@ class Manager:
             Dictionary with related context information
         """
         try:
-            # Escape single quotes in text
-            text_escaped = text.replace("'", "\\'")
+            # Escape backslashes and single quotes for Cypher string literals
+            text_escaped = text.replace("\\", "\\\\").replace("'", "\\'")
 
             related_context = {
                 "parent_element": None,
@@ -401,6 +514,102 @@ class Manager:
         except Exception as e:
             logger.error(f"Error getting semantic links: {e}")
             return []
+
+    def get_order_neighbors(
+        self,
+        region_ids: List[str],
+        window_size: int = 3,
+        include_parent: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Walk ±K steps in ORDER from matched Regions to gather surrounding context.
+
+        For each region_id, finds all Region nodes in the same Document
+        whose ``order`` falls within ``window_size`` steps.  Returns
+        text/label/order/region_id for every qualifying neighbour.
+
+        When *include_parent* is ``True``, also walks up the ``PARENT``
+        hierarchy (e.g. from ``image_caption`` to its parent ``image``
+        Region), including the parent node in the results.
+
+        Args:
+            region_ids:     List of region_id strings (format: '{file_hash}|{element_index}')
+            window_size:    Number of ORDER hops to walk in each direction (default 3)
+            include_parent: If True, include parent Region nodes via PARENT edges
+
+        Returns:
+            List of dicts with keys: region_id, label, text, order,
+            source_region_id, source (``'order'`` or ``'parent'``).
+        """
+        if not region_ids:
+            return []
+
+        query = """
+            MATCH (r:Region)-[:PART_OF]->(d:Document)
+            WHERE r.region_id IN $region_ids
+            MATCH (neighbor:Region)-[:PART_OF]->(d)
+            WHERE abs(neighbor.order - r.order) <= $window_size
+              AND neighbor.region_id <> r.region_id
+            RETURN DISTINCT
+                neighbor.region_id AS region_id,
+                neighbor.label    AS label,
+                neighbor.text     AS text,
+                neighbor.order    AS order,
+                r.region_id       AS source_region_id,
+                'order'           AS source
+            ORDER BY neighbor.order
+        """
+        try:
+            results = self.query(query, {
+                "region_ids": region_ids,
+                "window_size": window_size,
+            })
+        except Exception as e:
+            logger.error("Error getting order neighbors: %s", e)
+            results = []
+
+        items = [
+            {
+                "region_id": r.get("region_id", ""),
+                "label": r.get("label", ""),
+                "text": r.get("text", ""),
+                "order": r.get("order", 0),
+                "source_region_id": r.get("source_region_id", ""),
+                "source": r.get("source", "order"),
+            }
+            for r in (rec.data() for rec in results)
+        ]
+
+        # --- Optionally walk PARENT edges ---
+        if include_parent:
+            parent_query = """
+                MATCH (child:Region)-[:PARENT]->(parent:Region)
+                WHERE child.region_id IN $region_ids
+                RETURN DISTINCT
+                    parent.region_id AS region_id,
+                    parent.label     AS label,
+                    parent.text      AS text,
+                    parent.order     AS order,
+                    child.region_id  AS source_region_id,
+                    'parent'         AS source
+            """
+            try:
+                parent_results = self.query(
+                    parent_query, {"region_ids": region_ids},
+                )
+                for rec in parent_results:
+                    data = rec.data()
+                    items.append({
+                        "region_id": data.get("region_id", ""),
+                        "label": data.get("label", ""),
+                        "text": data.get("text", ""),
+                        "order": data.get("order", 0),
+                        "source_region_id": data.get("source_region_id", ""),
+                        "source": "parent",
+                    })
+            except Exception as e:
+                logger.error("Error getting parent neighbors: %s", e)
+
+        return items
 
     def close(self):
         """Close the database connection."""

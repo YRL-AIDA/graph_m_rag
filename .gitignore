@@ -227,19 +227,19 @@ mineru/test/
 .graph/
 .venv/
 
-# LaTeX build artifacts (keep source .tex, .cls, .png)
-artile/IEEE_Access_LaTeX_template/*.aux
-artile/IEEE_Access_LaTeX_template/*.log
-artile/IEEE_Access_LaTeX_template/*.pdf
-artile/IEEE_Access_LaTeX_template/*.out
-artile/IEEE_Access_LaTeX_template/*.toc
-artile/IEEE_Access_LaTeX_template/*.synctex.gz
-artile/IEEE_Access_LaTeX_template/*.fls
-artile/IEEE_Access_LaTeX_template/*.fdb_latexmk
-artile/IEEE_Access_LaTeX_template/*.bbl
-artile/IEEE_Access_LaTeX_template/*.blg
-artile/IEEE_Access_LaTeX_template/*.dvi
-artile/IEEE_Access_LaTeX_template/*.ps
+# Article — entire directory (LaTeX sources, materials, build artifacts)
+artile/
+
+# Agent plans and task descriptions
+plans/
+
+# AI agent workspace/config files (Kilo Code, CodeBuddy, Cursor, etc.)
+.kilocode/
+.kilocodeignore
+.codebuddy/
+.cursor/
+.cursorrules
+.copilot*
 
 # Extraction/generation caches
 semantic_graph/data/extraction_cache/

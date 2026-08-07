@@ -723,6 +723,27 @@
                     </label>
                 </div>
 
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <input type="checkbox" id="useSemanticGraph" name="useSemanticGraph" style="width: auto;">
+                        <span>🧠 Использовать семантический граф (сущности, связи, комьюнити)</span>
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <input type="checkbox" id="useStructuredGraph" name="useStructuredGraph" style="width: auto;">
+                        <span>📐 Использовать структурный граф (регионы, обход соседей)</span>
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <input type="checkbox" id="useIterativeSearch" name="useIterativeSearch" style="width: auto;">
+                        <span>🔄 Итеративный поиск (многошаговый)</span>
+                    </label>
+                </div>
+
                 <button type="submit" class="btn" id="submitBtn">
                     🔍 Найти ответ
                 </button>
@@ -741,6 +762,16 @@
         <div id="llmAnswer" class="card hidden">
             <h2 style="margin-bottom: 20px; color: #2c3e50;">🤖 Ответ от LLM</h2>
             <div id="llmAnswerContent" style="background: #f8f9fa; padding: 20px; border-radius: 6px; border-left: 4px solid #9b59b6; line-height: 1.8;"></div>
+        </div>
+
+        <div id="contextBlocks" class="card hidden">
+            <h2 style="margin-bottom: 20px; color: #2c3e50; display: flex; align-items: center; gap: 10px;">
+                📋 Блоки контекста LLM
+                <button onclick="toggleContextBlocks()" style="font-size: 0.8em; padding: 4px 12px; background: #e0e0e0; border: none; border-radius: 4px; cursor: pointer;" id="contextToggleBtn">
+                    🔽 Свернуть
+                </button>
+            </h2>
+            <div id="contextBlocksContent"></div>
         </div>
 
         <div id="results" class="card hidden">
@@ -887,7 +918,10 @@
                     body: JSON.stringify({
                         file_hash: fileHash,
                         question: question,
-                        limit: limit
+                        limit: limit,
+                        use_semantic_graph: document.getElementById('useSemanticGraph').checked,
+                        use_structured_graph: document.getElementById('useStructuredGraph').checked,
+                        use_iterative_search: document.getElementById('useIterativeSearch').checked
                     })
                 });
 
@@ -927,6 +961,57 @@
                 llmAnswerDiv.classList.remove('hidden');
             } else {
                 llmAnswerDiv.classList.add('hidden');
+            }
+
+            // Display context blocks if available
+            const contextBlocksDiv = document.getElementById('contextBlocks');
+            const contextBlocksContent = document.getElementById('contextBlocksContent');
+            if (data.context_blocks && data.context_blocks.length > 0) {
+                let ctxHtml = '';
+                data.context_blocks.forEach((block, idx) => {
+                    // Determine block type badge
+                    let badge = '';
+                    let badgeStyle = '';
+                    if (block.startsWith('=== ') && block.includes('IMAGE')) {
+                        badge = '🖼️ Изображение';
+                        badgeStyle = 'background: #e3f2fd; color: #1565c0;';
+                    } else if (block.startsWith('=== ') && block.includes('CAPTION')) {
+                        badge = '📷 Подпись';
+                        badgeStyle = 'background: #fce4ec; color: #c62828;';
+                    } else if (block.startsWith('=== ') && block.includes('FOOTNOTE')) {
+                        badge = '📝 Сноска';
+                        badgeStyle = 'background: #fff3e0; color: #e65100;';
+                    } else if (block.startsWith('--- Entity:')) {
+                        badge = '🧠 Сущность';
+                        badgeStyle = 'background: #e8f5e9; color: #2e7d32;';
+                    } else if (block.startsWith('--- Community:')) {
+                        badge = '🏘️ Комьюнити';
+                        badgeStyle = 'background: #f3e5f5; color: #6a1b9a;';
+                    } else if (block.startsWith('--- Region Bridge:')) {
+                        badge = '🌉 Связь графов';
+                        badgeStyle = 'background: #e0f7fa; color: #006064;';
+                    } else if (block.startsWith('--- Neighbor')) {
+                        badge = '📐 Соседний регион';
+                        badgeStyle = 'background: #ede7f6; color: #4527a0;';
+                    } else {
+                        badge = '📄 Текст';
+                        badgeStyle = 'background: #f5f5f5; color: #616161;';
+                    }
+                    ctxHtml += `
+                        <div class="context-block" style="margin-bottom: 12px; border: 1px solid #e0e0e0; border-radius: 6px; overflow: hidden;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 14px; background: #fafafa; border-bottom: 1px solid #e0e0e0;">
+                                <span style="font-weight: bold; font-size: 0.85em;">Блок #${idx + 1}</span>
+                                <span style="font-size: 0.8em; padding: 2px 10px; border-radius: 12px; ${badgeStyle}">${badge}</span>
+                            </div>
+                            <div style="padding: 14px; background: #fff; font-size: 0.9em; line-height: 1.6; white-space: pre-wrap; max-height: 300px; overflow-y: auto;">${escapeHtml(block)}</div>
+                        </div>
+                    `;
+                });
+                contextBlocksContent.innerHTML = ctxHtml;
+                contextBlocksDiv.classList.remove('hidden');
+                document.getElementById('contextToggleBtn').textContent = '🔽 Свернуть';
+            } else {
+                contextBlocksDiv.classList.add('hidden');
             }
 
             if (data.answers && data.answers.length > 0) {
@@ -997,6 +1082,18 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        function toggleContextBlocks() {
+            const content = document.getElementById('contextBlocksContent');
+            const btn = document.getElementById('contextToggleBtn');
+            if (content.style.display === 'none') {
+                content.style.display = '';
+                btn.textContent = '🔽 Свернуть';
+            } else {
+                content.style.display = 'none';
+                btn.textContent = '▶️ Развернуть';
+            }
         }
 
         // PDF Viewer functions with bbox visualization
@@ -1510,6 +1607,9 @@
             const limit = parseInt(document.getElementById('askLimit').value) || 10;
             const useLlm = document.getElementById('useLlm').checked;
             const useReranker = document.getElementById('useReranker').checked;
+            const useSemanticGraph = document.getElementById('useSemanticGraph').checked;
+            const useStructuredGraph = document.getElementById('useStructuredGraph').checked;
+            const useIterativeSearch = document.getElementById('useIterativeSearch').checked;
             const collectionSelect = document.getElementById('collectionSelect');
             const collectionName = collectionSelect.value;
 
@@ -1522,6 +1622,7 @@
             document.getElementById('loading').classList.remove('hidden');
             document.getElementById('results').classList.add('hidden');
             document.getElementById('llmAnswer').classList.add('hidden');
+            document.getElementById('contextBlocks').classList.add('hidden');
             document.getElementById('statusMessage').classList.add('hidden');
             document.getElementById('submitBtn').disabled = true;
 
@@ -1531,7 +1632,10 @@
                     question: question,
                     limit: limit,
                     use_llm: useLlm,
-                    use_reranker: useReranker
+                    use_reranker: useReranker,
+                    use_semantic_graph: useSemanticGraph,
+                    use_structured_graph: useStructuredGraph,
+                    use_iterative_search: useIterativeSearch
                 };
 
                 if (collectionName) {

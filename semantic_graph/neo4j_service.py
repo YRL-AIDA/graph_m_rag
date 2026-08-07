@@ -7,7 +7,7 @@ from MinerU processing results.
 
 import os
 import logging
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -181,33 +181,75 @@ class DocumentIndexService:
 
     def create_graph_from_graphrag_result(
             self,
-            entities: Dict[str, Any],
-            relationships: Dict[str, Any]
+            entities: List[Dict[str, Any]],
+            relationships: List[Dict[str, Any]]
     ) -> Optional[Dict]:
+        """Create a graph in Neo4j from GraphRAG processing result.
 
+        Converts entity and relationship dicts (e.g. from DataFrame
+        ``to_dict(orient='records')``) into :class:`EntityCreate` and
+        :class:`RelationshipCreate` models, then delegates to
+        :meth:`Manager.add_entities_batch`.
+
+        Args:
+            entities: List of entity dicts with keys: title, type, description,
+                text_unit_ids, frequency, degree.
+            relationships: List of relationship dicts with keys: source, target,
+                description, text_unit_ids, weight, combined_degree.
+
+        Returns:
+            Dictionary with counts of created/updated nodes and relationships,
+            or None on error.
+        """
         try:
-            # Import Document class
-            from .dtype import Document
+            from .dtype import EntityCreate, RelationshipCreate, EntitiesRequest
 
-            # Create Document object from MinerU result
-            document = Document(
-                json_data=mineru_result,
-                name=file_hash,
-                mode='mineru'
+            entity_models = [
+                EntityCreate(
+                    title=e.get("title", ""),
+                    type=e.get("type", ""),
+                    text_unit_ids=e.get("text_unit_ids", []) or [],
+                    frequency=e.get("frequency", 0) or 0,
+                    description=e.get("description"),
+                    degree=e.get("degree", 0) or 0,
+                )
+                for e in entities
+            ]
+
+            relationship_models = [
+                RelationshipCreate(
+                    source=r.get("source", ""),
+                    target=r.get("target", ""),
+                    text_unit_ids=r.get("text_unit_ids", []) or [],
+                    weight=r.get("weight", 1.0) or 1.0,
+                    description=r.get("description"),
+                    combined_degree=r.get("combined_degree", 0) or 0,
+                )
+                for r in relationships
+            ]
+
+            request = EntitiesRequest(
+                entities=entity_models,
+                relationships=relationship_models,
             )
 
-            # Add document to Neo4j
-            success = self.manager.add_document(document)
+            response = self.manager.add_entities_batch(request)
 
-            if success:
-                logger.info(f"Successfully created graph for document '{file_hash}'")
-            else:
-                logger.warning(f"Document '{file_hash}' already exists in graph database")
-
-            return success
+            result = {
+                "nodes_created": response.nodes_created,
+                "nodes_updated": response.nodes_updated,
+                "relationships_added": response.relationships_added,
+            }
+            logger.info(
+                "GraphRAG graph created: %d nodes, %d updated, %d relationships",
+                response.nodes_created,
+                response.nodes_updated,
+                response.relationships_added,
+            )
+            return result
 
         except Exception as e:
-            logger.error(f"Failed to create graph for document '{file_hash}': {e}")
+            logger.error(f"Failed to create graph from GraphRAG result: {e}")
             raise
 
 

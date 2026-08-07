@@ -34,7 +34,8 @@ def export_to_graphrag(df: pd.DataFrame, output_dir: str):
         "document_id",
         "text",
         "page",
-        "element_index"
+        "element_index",
+        "region_id"
     ]]
 
     text_units.to_csv(f"{output_dir}/text_units.csv", index=False)

@@ -32,16 +32,17 @@ def build_chunks_dataframe(adapter, doc_id_field=DOCUMENT_ID_FIELD, doc_id: Opti
         if not text:
             continue
 
-        doc_id_val = payload.get(doc_id_field, "unknown_doc")
-        element_index = payload.get("element_index", "0")
+        file_hash = payload.get("file_hash", "unknown_file")
+        region_id = payload.get("region_id", "0")
         rows.append({
-            "document_id": doc_id_val,
-            "chunk_id": f"{doc_id_val}|{element_index}",
+            "document_id": payload.get(doc_id_field, "unknown_doc"),
+            "chunk_id": f"{file_hash}|{region_id}",
             "collection": collection,
             "text": text,  # 👈 Теперь текст из original_element
             "page": original.get("page_idx"),
             "element_index": payload.get("element_index"),
             "created_at": payload.get("created_at"),
+            "region_id": payload.get("region_id")
         })
 
     df = pd.DataFrame(rows)

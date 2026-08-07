@@ -117,6 +117,7 @@ curl http://localhost:9595/create_community_report
 ```
 
 
+
 ---
 
 ## Функционал
@@ -311,7 +312,7 @@ class AsyncLLMClient:
 - Чанки фильтруются по полю `file_hash` (`DOCUMENT_ID_FIELD` в `config.py`).
 - Берутся только точки, у которых `payload.original_element.type == "text"`.
 - Текст читается из `payload.original_element.text`, а не из верхнеуровневого поля.
-- `chunk_id` формируется как `{file_hash}|{element_index}`.
+- `chunk_id` формируется как `{file_hash}|{region_id}`.
 
 ### Извлечение графа (LLM)
 

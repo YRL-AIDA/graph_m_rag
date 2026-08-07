@@ -24,8 +24,8 @@ class S3Settings(BaseSettings):
 class QdrantSettings(BaseSettings):
     """Qdrant vector database configuration."""
     QDRANT_HOST: str = Field(default="localhost", description="Qdrant host")
-    QDRANT_PORT: int = Field(default=6333, description="Qdrant HTTP port")
-    QDRANT_GRPC_PORT: int = Field(default=6334, description="Qdrant gRPC port")
+    QDRANT_PORT: int = Field(default=16333, description="Qdrant HTTP port")
+    QDRANT_GRPC_PORT: int = Field(default=16334, description="Qdrant gRPC port")
     QDRANT_API_KEY: Optional[str] = Field(default=None, description="Qdrant API key")
     QDRANT_COLLECTION_NAME: str = Field(default="documents", description="Default collection name")
 
@@ -73,6 +73,16 @@ class RerankerSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+
+class MMRSettings(BaseSettings):
+    """MMR (Maximal Marginal Relevance) configuration for context reranking."""
+    USE_MMR_RERANKING: bool = Field(default=True, description="Enable MMR diversity reranking for context blocks")
+    MMR_LAMBDA: float = Field(default=0.7, description="Relevance vs diversity tradeoff (1.0 = pure relevance, 0.0 = pure diversity)")
+    MMR_TOP_K: int = Field(default=20, description="Maximum number of context blocks to keep after MMR")
+    MMR_MIN_RELEVANCE: float = Field(default=0.0, description="Minimum relevance score for a context block to be considered")
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
 class LLMSettings(BaseSettings):
     """LLM service configuration."""
     LLM_BASE_URL: str = Field(default="http://192.168.19.127:8888/v1", description="LLM service URL")
@@ -80,6 +90,18 @@ class LLMSettings(BaseSettings):
     LLM_MODEL_NAME: str = Field(default="Qwen/Qwen3-VL-32B-Thinking", description="LLM model name")
     LLM_MAX_TOKENS: int = Field(default=2048, description="Max tokens for response")
     LLM_TEMPERATURE: float = Field(default=0.7, description="Temperature for generation")
+
+    # C5: Feedback-driven iterative retrieval
+    ITERATIVE_RETRIEVAL_ENABLED: bool = Field(
+        default=False,
+        description="Enable two-round retrieval with LLM-identified gap refinement",
+    )
+
+    # C6: Multi-hop question decomposition
+    QUESTION_DECOMPOSITION_ENABLED: bool = Field(
+        default=True,
+        description="Enable LLM-based decomposition of complex questions into sub-questions",
+    )
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -113,6 +135,7 @@ class Settings(BaseSettings):
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
+    mmr: MMRSettings = Field(default_factory=MMRSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     app: AppSettings = Field(default_factory=AppSettings)
 

@@ -1,8 +1,11 @@
 import asyncio
+import hashlib
 import html
 import json
 import logging
+import os
 import re
+from pathlib import Path
 from typing import Any, Coroutine, Dict, List, Optional, Tuple, Type, TypeVar, Union
 import requests
 import aiohttp
@@ -13,6 +16,8 @@ from pydantic import BaseModel
 from config import (
     COMPLETION_DELIMITER,
     CONTINUE_PROMPT,
+    DISAMBIGUATION_ENABLED,
+    DISAMBIGUATION_SIMILARITY_THRESHOLD,
     GRAPH_EXTRACTION_PROMPT,
     LLM_API_KEY,
     LLM_URL,
@@ -22,6 +27,7 @@ from config import (
     TOKENIZER_URL,
     TUPLE_DELIMITER,
 )
+from embeddings import disambiguate_entities
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -50,6 +56,21 @@ def remove_think_tags(text: str) -> str:
     return text.strip()
 
 
+def _update_compound_title(compound: str, title_map: Dict[str, str]) -> str:
+    """Update the title portion of a compound key ``"TITLE|TYPE"``.
+
+    Used after disambiguation renames an entity title: relationships store
+    sources/targets as ``"TITLE|TYPE"``, so the title part must be updated
+    to match the new disambiguated title.
+    """
+    if "|" not in compound:
+        return title_map.get(compound, compound)
+    title, _, rest = compound.partition("|")
+    if title in title_map:
+        return f"{title_map[title]}|{rest}"
+    return compound
+
+
 class AsyncLLMClient:
     """Асинхронная обертка над AsyncOpenAI и aiohttp для токенизатора."""
 
@@ -57,6 +78,7 @@ class AsyncLLMClient:
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.tokenizer_url = tokenizer_url
         self._session: Optional[aiohttp.ClientSession] = None
+        self._tokenizer_available: bool = True
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession()
@@ -93,7 +115,10 @@ class AsyncLLMClient:
             return None
 
     async def count_tokens(self, text: str, model: str) -> int:
-        """Асинхронный подсчет токенов."""
+        """Асинхронный подсчет токенов с fallback на word-count."""
+        if not self._tokenizer_available:
+            return int(len(text.split()) * 1.3)
+
         try:
             async with self.session.post(
                     self.tokenizer_url,
@@ -104,8 +129,9 @@ class AsyncLLMClient:
                 data = await response.json()
                 return data.get('count', len(text) // 4)
         except Exception as e:
-            logger.warning(f"Token counting failed, using fallback. Error: {e}")
-            return len(text) // 4 + 1
+            self._tokenizer_available = False
+            logger.warning(f"Tokenizer service unavailable, using word-count fallback. Error: {e}")
+            return int(len(text.split()) * 1.3)
 
     async def generate_structured(
             self,
@@ -141,9 +167,23 @@ class AsyncGraphExtractor:
         self.llm = llm_client
         self.model = model
         self.max_gleanings = max_gleanings
+        self._cache: dict[str, Tuple[pd.DataFrame, pd.DataFrame]] = {}
+        self._cache_dir: Path = Path(os.getenv("EXTRACTION_CACHE_DIR", "./data/extraction_cache"))
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     async def extract(self, text: str, entity_types: List[str], source_id: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         logger.info(f"Extracting graph for document ID: {source_id}")
+
+        # Check cache
+        cache_key = self._compute_cache_key(text)
+        if cache_key in self._cache:
+            logger.info(f"Memory cache hit for {source_id} (key {cache_key[:12]}...)")
+            return self._cache[cache_key]
+        disk_result = self._load_from_disk_cache(cache_key)
+        if disk_result is not None:
+            logger.info(f"Disk cache hit for {source_id} (key {cache_key[:12]}...)")
+            self._cache[cache_key] = disk_result
+            return disk_result
 
         prompt = GRAPH_EXTRACTION_PROMPT.format(
             input_text=text,
@@ -177,7 +217,209 @@ class AsyncGraphExtractor:
                 break
         out = self._parse_result(full_result, source_id)
         logger.info(f"parsing out: len={out[0] if response_text else 0}, ")
+        # Save to cache
+        self._cache[cache_key] = out
+        self._save_to_disk_cache(cache_key, out[0], out[1])
         return out
+
+    async def extract_batch(
+        self, chunks: List[Tuple[str, str]], entity_types: List[str]
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Извлекает сущности и связи из нескольких чанков за один вызов LLM.
+
+        Args:
+            chunks: Список кортежей (text, source_id).
+            entity_types: Типы сущностей для извлечения.
+
+        Returns:
+            Объединённые датафреймы сущностей и связей; source_id для каждой записи
+            определяется по наилучшему совпадению имени сущности в тексте чанка.
+        """
+        if not chunks:
+            return self._empty_dfs()
+
+        if len(chunks) == 1:
+            return await self.extract(chunks[0][0], entity_types, chunks[0][1])
+
+        # Check cache for each chunk
+        cached_entities: List[pd.DataFrame] = []
+        cached_relationships: List[pd.DataFrame] = []
+        uncached_items: List[Tuple[str, str, str]] = []
+
+        for text, source_id in chunks:
+            cache_key = self._compute_cache_key(text)
+            if cache_key in self._cache:
+                ent_df, rel_df = self._cache[cache_key]
+                cached_entities.append(ent_df)
+                cached_relationships.append(rel_df)
+                continue
+            disk_result = self._load_from_disk_cache(cache_key)
+            if disk_result is not None:
+                ent_df, rel_df = disk_result
+                self._cache[cache_key] = (ent_df, rel_df)
+                cached_entities.append(ent_df)
+                cached_relationships.append(rel_df)
+                continue
+            uncached_items.append((text, source_id, cache_key))
+
+        # Extract uncached items via LLM
+        if uncached_items:
+            batch_entities, batch_relationships = await self._extract_uncached(
+                uncached_items, entity_types
+            )
+            cached_entities.append(batch_entities)
+            cached_relationships.append(batch_relationships)
+            # Cache individual chunk results by splitting by source_id
+            for text, source_id, cache_key in uncached_items:
+                chunk_ent = (
+                    batch_entities[batch_entities["source_id"] == source_id]
+                    if not batch_entities.empty
+                    else batch_entities
+                )
+                chunk_rel = (
+                    batch_relationships[batch_relationships["source_id"] == source_id]
+                    if not batch_relationships.empty
+                    else batch_relationships
+                )
+                self._cache[cache_key] = (chunk_ent, chunk_rel)
+                self._save_to_disk_cache(cache_key, chunk_ent, chunk_rel)
+
+        # Merge all results
+        merged_entities = (
+            pd.concat(cached_entities, ignore_index=True)
+            if cached_entities
+            else self._empty_dfs()[0]
+        )
+        merged_relationships = (
+            pd.concat(cached_relationships, ignore_index=True)
+            if cached_relationships
+            else self._empty_dfs()[1]
+        )
+        return merged_entities, merged_relationships
+
+    async def _extract_uncached(
+        self,
+        items: List[Tuple[str, str, str]],
+        entity_types: List[str],
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Extract entities/relationships for uncached chunks as a combined batch.
+
+        Args:
+            items: List of (text, source_id, cache_key) tuples.
+            entity_types: Entity types to extract.
+
+        Returns:
+            Combined (entities_df, relationships_df) for all items.
+        """
+        chunk_map: Dict[str, str] = {}
+        combined_parts: List[str] = []
+        for text, source_id, _cache_key in items:
+            chunk_map[source_id] = text
+            combined_parts.append(f"--- CHUNK {source_id} ---\n{text}")
+
+        combined_text = "\n\n".join(combined_parts)
+        logger.info(
+            f"Extracting graph for batch of {len(items)} uncached chunks: "
+            f"{[sid for _, sid, _ in items]}"
+        )
+
+        prompt = GRAPH_EXTRACTION_PROMPT.format(
+            input_text=combined_text,
+            entity_types=",".join(entity_types)
+        )
+        messages = [{"role": "user", "content": prompt}]
+
+        response_text = await self.llm.generate(messages, self.model)
+        if not response_text:
+            return self._empty_dfs()
+
+        full_result = response_text
+        messages.append({"role": "assistant", "content": response_text})
+
+        for _ in range(self.max_gleanings):
+            messages.append({"role": "user", "content": CONTINUE_PROMPT})
+            continuation = await self.llm.generate(messages, self.model)
+            if not continuation or COMPLETION_DELIMITER in continuation:
+                full_result += continuation
+                break
+
+            full_result += continuation
+            messages.append({"role": "assistant", "content": continuation})
+
+            messages.append({"role": "user", "content": LOOP_PROMPT})
+            loop_decision = await self.llm.generate(messages, self.model, max_tokens=5)
+            if not loop_decision or loop_decision.strip().upper() != "Y":
+                break
+
+        return self._parse_result_batch(full_result, chunk_map)
+
+    def _parse_result_batch(
+        self, result: str, chunk_map: Dict[str, str]
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Парсит результат батчевого извлечения и сопоставляет source_id для каждой записи."""
+        entities, relationships = [], []
+        records = [r.strip() for r in result.split(RECORD_DELIMITER)]
+
+        for raw_record in records:
+            record = re.sub(r"^\(|\)$", "", raw_record.strip())
+            if not record or record == COMPLETION_DELIMITER:
+                continue
+
+            record_attributes = record.split(TUPLE_DELIMITER)
+            record_type = record_attributes[0]
+
+            if record_type == '"entity"' and len(record_attributes) >= 4:
+                entity_name = clean_str(record_attributes[1].upper())
+                entity_type = clean_str(record_attributes[2].upper())
+                entity_description = clean_str(record_attributes[3])
+                source_id = self._find_source(entity_name, chunk_map)
+                entities.append({
+                    "title": entity_name,
+                    "type": entity_type,
+                    "description": entity_description,
+                    "source_id": source_id,
+                })
+
+            if record_type == '"relationship"' and len(record_attributes) >= 5:
+                source = clean_str(record_attributes[1].upper())
+                target = clean_str(record_attributes[2].upper())
+                edge_description = clean_str(record_attributes[3])
+                try:
+                    weight = float(record_attributes[-1])
+                except ValueError:
+                    weight = 1.0
+                # Для связей используем source_id источника (первой сущности)
+                source_id = self._find_source(source, chunk_map)
+                relationships.append({
+                    "source": source,
+                    "target": target,
+                    "description": edge_description,
+                    "source_id": source_id,
+                    "weight": weight,
+                })
+
+        entities_df = pd.DataFrame(entities) if entities else self._empty_dfs()[0]
+        relationships_df = pd.DataFrame(relationships) if relationships else self._empty_dfs()[1]
+
+        if not entities_df.empty and not relationships_df.empty:
+            entity_map = dict(zip(entities_df['title'], entities_df['type']))
+            mask = relationships_df["source"].isin(entity_map) & relationships_df["target"].isin(entity_map)
+            relationships_df = relationships_df[mask].reset_index(drop=True)
+            relationships_df['source'] = relationships_df['source'].apply(lambda x: f"{x}|{entity_map[x]}")
+            relationships_df['target'] = relationships_df['target'].apply(lambda x: f"{x}|{entity_map[x]}")
+
+        logger.debug(f"Batch extracted entities:\n{entities_df}\nRelationships:\n{relationships_df}")
+        return entities_df, relationships_df
+
+    @staticmethod
+    def _find_source(entity_name: str, chunk_map: Dict[str, str]) -> str:
+        """Сопоставляет имя сущности с source_id по содержимому чанков."""
+        entity_lower = entity_name.lower()
+        for source_id, text in chunk_map.items():
+            if entity_lower in text.lower():
+                return source_id
+        # Fallback: возвращаем первый доступный source_id
+        return next(iter(chunk_map.keys())) if chunk_map else "unknown"
 
     # Методы _parse_result и _empty_dfs не выполняют I/O и остаются синхронными
     def _parse_result(self, result: str, source_id: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -196,11 +438,17 @@ class AsyncGraphExtractor:
                 entity_name = clean_str(record_attributes[1].upper())
                 entity_type = clean_str(record_attributes[2].upper())
                 entity_description = clean_str(record_attributes[3])
+                # Extract confidence if available (5th field, 1-10 scale)
+                try:
+                    entity_confidence = int(float(record_attributes[4])) if len(record_attributes) >= 5 else 5
+                except (ValueError, IndexError):
+                    entity_confidence = 5
                 entities.append({
                     "title": entity_name,
                     "type": entity_type,
                     "description": entity_description,
                     "source_id": source_id,
+                    "confidence": entity_confidence,
                 })
 
             if record_type == '"relationship"' and len(record_attributes) >= 5:
@@ -231,8 +479,50 @@ class AsyncGraphExtractor:
             
             relationships_df['source'] = relationships_df['source'].apply(lambda x: f"{x}|{entity_map[x]}")
             relationships_df['target'] = relationships_df['target'].apply(lambda x: f"{x}|{entity_map[x]}")
-        print(entities_df,relationships_df)
+        logger.debug(f"Extracted entities:\n{entities_df}\nRelationships:\n{relationships_df}")
         return entities_df, relationships_df
+
+    @staticmethod
+    def _compute_cache_key(text: str) -> str:
+        """Compute SHA256 hash of text for cache lookup."""
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _load_from_disk_cache(
+        self, cache_key: str
+    ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
+        """Try to load cached extraction result from disk."""
+        cache_file = self._cache_dir / f"{cache_key}.json"
+        if not cache_file.exists():
+            return None
+        try:
+            with open(cache_file) as f:
+                data = json.load(f)
+            entities_df = pd.DataFrame(data["entities"])
+            relationships_df = pd.DataFrame(data["relationships"])
+            logger.info(f"Cache hit for key {cache_key[:12]}...")
+            return entities_df, relationships_df
+        except Exception as e:
+            logger.warning(f"Failed to load cache {cache_key[:12]}...: {e}")
+            return None
+
+    def _save_to_disk_cache(
+        self,
+        cache_key: str,
+        entities_df: pd.DataFrame,
+        relationships_df: pd.DataFrame,
+    ):
+        """Save extraction result to disk cache."""
+        cache_file = self._cache_dir / f"{cache_key}.json"
+        try:
+            data = {
+                "entities": entities_df.to_dict(orient="records"),
+                "relationships": relationships_df.to_dict(orient="records"),
+            }
+            with open(cache_file, "w") as f:
+                json.dump(data, f)
+            logger.debug(f"Cached extraction result for key {cache_key[:12]}...")
+        except Exception as e:
+            logger.warning(f"Failed to write cache {cache_key[:12]}...: {e}")
 
     def _empty_dfs(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         return (
@@ -432,15 +722,20 @@ async def run_extraction_pipeline_async(
         max_gleanings: int = 1,
         max_summary_length: int = 500,
         max_input_tokens: int = 4000,
+        max_chunks_per_batch: int = 5,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Асинхронная версия основного пайплайна.
 
     Последовательность действий сохранена:
-    1. Извлечение графа (параллельно по чанкам)
+    1. Извлечение графа (параллельно по чанкам, с батчингом)
     2. Слияние результатов
     3. Суммаризация (параллельно по сущностям/связям)
     4. Формирование финальных датафреймов
+
+    Args:
+        max_chunks_per_batch: Количество чанков, объединяемых в один батч.
+            При 1 поведение идентично оригинальному (один вызов LLM на чанк).
     """
 
     async with AsyncLLMClient() as llm_client:
@@ -449,18 +744,78 @@ async def run_extraction_pipeline_async(
             llm_client, summarization_model, max_summary_length, max_input_tokens
         )
 
-        # ═══ Этап 1: Извлечение графа для каждого документа (параллельно) ═══
-        logger.info(f"Stage 1: Extracting graph from {len(text_units)} text units...")
-        extraction_tasks = [
-            extractor.extract(row['text'], entity_types, row['id'])
-            for _, row in text_units.iterrows()
+        # ═══ Этап 1: Извлечение графа (с батчингом) ═══
+        logger.info(f"Stage 1: Extracting graph from {len(text_units)} text units "
+                     f"(batch size: {max_chunks_per_batch})...")
+
+        chunks: List[Tuple[str, str]] = [
+            (row['text'], row['id']) for _, row in text_units.iterrows()
         ]
+
+        if max_chunks_per_batch <= 1:
+            # Оригинальное поведение: один чанк = один вызов
+            extraction_tasks = [
+                extractor.extract(text, entity_types, source_id)
+                for text, source_id in chunks
+            ]
+        else:
+            # Группируем чанки в батчи
+            batches = [
+                chunks[i:i + max_chunks_per_batch]
+                for i in range(0, len(chunks), max_chunks_per_batch)
+            ]
+            logger.info(f"Created {len(batches)} batch(es) for extraction")
+            extraction_tasks = [
+                extractor.extract_batch(batch, entity_types)
+                for batch in batches
+            ]
+
         extraction_results = await asyncio.gather(*extraction_tasks)
         logger.info("Stage 1 complete: All extractions finished.")
-        logger.info(f"extraction results {extraction_results}")
         entity_dfs = [res[0] for res in extraction_results]
         relationship_dfs = [res[1] for res in extraction_results]
-        
+
+        # ═══ Stage 1.5: Embedding-based entity disambiguation ═══
+        if DISAMBIGUATION_ENABLED and entity_dfs:
+            all_entities_df = pd.concat(entity_dfs, ignore_index=True)
+            if not all_entities_df.empty:
+                logger.info("Stage 1.5: Disambiguating entities via embedding similarity...")
+                entity_records = all_entities_df.to_dict(orient="records")
+                try:
+                    disambiguated = await disambiguate_entities(
+                        entity_records,
+                        llm_client.session,
+                        threshold=DISAMBIGUATION_SIMILARITY_THRESHOLD,
+                    )
+                    # Build old-title → new-title mapping for renamed entities
+                    title_map: Dict[str, str] = {}
+                    for old, new in zip(entity_records, disambiguated):
+                        if old.get("title") != new.get("title"):
+                            title_map[old["title"]] = new["title"]
+
+                    if title_map:
+                        # Update relationship DataFrames to reference new titles
+                        for rel_df in relationship_dfs:
+                            if rel_df.empty:
+                                continue
+                            for col in ("source", "target"):
+                                # Compound keys are "TITLE|TYPE"; replace the title part
+                                rel_df[col] = rel_df[col].apply(
+                                    lambda x: _update_compound_title(x, title_map)
+                                )
+
+                    # Replace entity_dfs with the disambiguated result
+                    entity_dfs = [pd.DataFrame(disambiguated)]
+                    logger.info(
+                        "Stage 1.5 complete: %d title(s) renamed.",
+                        len(title_map),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Entity disambiguation failed, proceeding with original entity titles.",
+                        exc_info=True,
+                    )
+
         # ═══ Этап 2: Слияние результатов ═══
         logger.info("Stage 2: Merging extraction results...")
         merged_entities = merge_entities(entity_dfs)

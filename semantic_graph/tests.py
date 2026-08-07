@@ -1,4 +1,5 @@
 import sys
+import logging
 from pathlib import Path
 
 _root = Path(__file__).resolve().parent
@@ -14,6 +15,8 @@ from dotenv import load_dotenv
 import os
 from manager import Manager, ManagerConfig, Neo4jConnection
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 class TestGetEntityRelationships(unittest.TestCase):
     """Тесты для метода get_entity_relationships класса Manager."""
@@ -148,10 +151,10 @@ class TestGetEntityRelationships(unittest.TestCase):
         self.manager = Manager(self.config)
         res = self.manager.status()
         if 'error' in res.keys():
-            print(res)
+            logger.error("Neo4j status error: %s", res)
         self.assertNotIn("error", res.keys())
         result = self.manager.get_entity_relationships()
-        print(result)
+        logger.info("get_entity_relationships result:\n%s", result)
         self.assertGreater(len(result), 0, "Должно быть больше 0")
 
 
@@ -174,7 +177,7 @@ class TestGetEntitiesAndCommunitiesIntegration(unittest.TestCase):
     def _assert_db_connected(self):
         res = self.manager.status()
         if 'error' in res:
-            print(res)
+            logger.error("Neo4j status error: %s", res)
         self.assertNotIn('error', res)
 
     def test01_get_entities(self):
@@ -182,7 +185,7 @@ class TestGetEntitiesAndCommunitiesIntegration(unittest.TestCase):
         self._assert_db_connected()
 
         result = self.manager.get_entities()
-        print(result)
+        logger.info("get_entities result:\n%s", result)
 
         expected_columns = [
             'id', 'title', 'type', 'description', 'data', 'updated_at', 'created_at',
@@ -202,7 +205,7 @@ class TestGetEntitiesAndCommunitiesIntegration(unittest.TestCase):
         self._assert_db_connected()
 
         result = self.manager.get_community()
-        print(result)
+        logger.info("get_community result:\n%s", result)
 
         expected_columns = ['id', 'title', 'level', 'parent', 'size', 'period']
         self.assertIsInstance(result, pd.DataFrame)

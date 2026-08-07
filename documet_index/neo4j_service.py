@@ -7,7 +7,7 @@ from MinerU processing results.
 
 import os
 import logging
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 
 from dotenv import load_dotenv
 
@@ -53,17 +53,26 @@ class DocumentIndexService:
 
         self.manager = Manager(config)
         logger.info(f"DocumentIndexService initialized with DB: {self.name_db}")
+    
+    @property
+    def driver(self):
+        """Property to access the underlying Neo4j driver through the manager."""
+        return self.manager.conn.graph
 
     def create_graph_from_mineru_result(
         self,
         mineru_result: Dict[str, Any],
-        file_hash: str
+        file_hash: str,
+        region_reclassify_enabled: bool = False,
+        llm_client=None,
     ) -> bool:
         """Create a graph in Neo4j from MinerU processing result.
 
         Args:
             mineru_result: JSON result from MinerU PDF processing
             file_hash: Unique hash identifier for the PDF file
+            region_reclassify_enabled: Enable A1 region type re-classification
+            llm_client: Optional LLM client for multimodal re-classification
 
         Returns:
             True if graph was created successfully, False if document already exists
@@ -71,6 +80,13 @@ class DocumentIndexService:
         try:
             # Import Document class
             from .dtype import Document
+
+            # Inject region re-classification flags (A1 improvement)
+            if region_reclassify_enabled:
+                mineru_result.setdefault("results", {}).setdefault("result", {}).setdefault("results", {})
+                mineru_result["results"]["result"]["results"]["_region_reclassify_enabled"] = True
+                if llm_client is not None:
+                    mineru_result["results"]["result"]["results"]["_region_llm_client"] = llm_client
 
             # Create Document object from MinerU result
             document = Document(
@@ -178,6 +194,47 @@ class DocumentIndexService:
             Dictionary with related context information
         """
         return self.manager.get_related_context(file_hash, element_type, text)
+
+    def get_order_neighbors(
+        self,
+        region_ids: List[str],
+        window_size: int = 3,
+        include_parent: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Walk ±K steps in ORDER from matched Regions to gather surrounding context.
+
+        Delegates to Manager.get_order_neighbors.
+        """
+        return self.manager.get_order_neighbors(
+            region_ids, window_size, include_parent=include_parent,
+        )
+
+    def get_cross_graph_bridge(
+        self,
+        region_ids: List[str],
+        max_regions: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Walk from structural Regions to Entities, expand semantically, then back.
+
+        Strategy D — Cross-Graph Bridge Walking.
+        Delegates to the semantic_graph Manager using the same Neo4j connection.
+        """
+        try:
+            from semantic_graph.manager import Manager as SemanticManager, ManagerConfig
+            config = ManagerConfig(
+                uri=self.uri,
+                user=self.user,
+                password=self.password,
+                name_db=self.name_db,
+            )
+            semantic_mgr = SemanticManager(config)
+            return semantic_mgr.get_cross_graph_bridge(region_ids, max_regions)
+        except ImportError as e:
+            logger.warning("Semantic graph manager not available for cross-graph bridge: %s", e)
+            return []
+        except Exception as e:
+            logger.error("Error in cross-graph bridge walk: %s", e)
+            return []
 
 # Convenience function for creating graph from MinerU result
 def create_neo4j_graph(mineru_result: Dict[str, Any], file_hash: str) -> bool:

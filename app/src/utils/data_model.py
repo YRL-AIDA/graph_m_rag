@@ -32,7 +32,15 @@ class QuestionRequest(BaseModel):
     limit: int = 10
     collection_name: Optional[str] = None  # Optional collection name
     use_llm: bool = False  # Option to generate answer using LLM
-    use_reranker: bool = False  # Option to use reranker for re-ranking results
+    use_reranker: bool = False  # Option to use API reranker for re-ranking results
+    use_mmr_reranker: bool = False  # Option to use MMR (Maximal Marginal Relevance) diversity-based reranking
+    mmr_lambda: float = 0.7  # MMR relevance-diversity tradeoff (1.0 = pure relevance)
+    mmr_min_relevance: float = 0.0  # MMR minimum relevance threshold
+    use_semantic_graph: bool = False  # Option to enrich context with Entity and Community nodes from semantic graph
+    use_structured_graph: bool = False  # Option to enrich context with structural graph neighbours (ORDER walk + cross-graph bridge)
+    use_iterative_search: bool = False  # Option to use iterative (feedback-driven) retrieval for multi-hop questions
+    use_question_decomposition: bool = False  # Option to decompose complex questions into sub-questions
+    answer_format: Optional[str] = None  # Expected answer format: 'Int', 'Float', 'List', 'Str', 'None'
 
 
 class QuestionResponse(BaseModel):
@@ -45,7 +53,7 @@ class QuestionResponse(BaseModel):
     indexed: bool
     collection_name: Optional[str] = None  # Collection name used
     llm_answer: Optional[str] = None  # LLM-generated answer if use_llm is True
-
+    context_blocks: Optional[List[str]] = None  # All context blocks sent to LLM
 class UploadedFileInfo(BaseModel):
     """Model for uploaded file information"""
     file_hash: str

@@ -1,6 +1,7 @@
 """Генерация отчётов по сообществам графа знаний."""
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Hashable, Iterable
 from dataclasses import dataclass
 from hashlib import sha512
@@ -10,8 +11,13 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 import config
-from config import COMMUNITY_REPORT_PROMPT, INPUT_TEXT_KEY, MAX_LENGTH_KEY
-from graphrag import AsyncLLMClient, logger
+from config import (
+    COMMUNITY_REPORT_PROMPT, INCREMENTAL_COMMUNITY_REPORTS,
+    INPUT_TEXT_KEY, MAX_LENGTH_KEY,
+)
+from graphrag import AsyncLLMClient
+
+logger = logging.getLogger(__name__)
 
 
 # --- Типы и модели ответа LLM ---
@@ -678,6 +684,8 @@ async def summarize_communities(
     model: str,
     max_input_length: int,
     max_concurrent: int,
+    incremental: bool | None = None,
+    existing_report_hashes: dict[int, str] | None = None,
 ) -> pd.DataFrame:
     reports: list[dict[str, Any]] = []
     community_hierarchy = (
@@ -686,6 +694,15 @@ async def summarize_communities(
         .rename({"children": "sub_community"}, axis=1)
         .loc[:, ["community", "level", "sub_community"]]
     ).dropna()
+
+    # Determine incremental mode
+    use_incremental = (
+        INCREMENTAL_COMMUNITY_REPORTS if incremental is None else incremental
+    )
+    if use_incremental and existing_report_hashes is None:
+        existing_report_hashes = {}
+    skipped_count = 0
+    skip_hash_cols = [config.CONTEXT_STRING]
 
     levels = get_levels(nodes)
     level_contexts = []
@@ -704,12 +721,22 @@ async def summarize_communities(
     for i, level_context in enumerate(level_contexts):
 
         async def run_generate(record: pd.Series) -> dict[str, Any] | None:
-            return await _generate_report(
+            cid = int(record[config.COMMUNITY_ID])
+            cur_hash = _community_content_hash(record, skip_hash_cols)
+            # Incremental check: skip if community content hash unchanged
+            if use_incremental and existing_report_hashes:
+                prev_hash = existing_report_hashes.get(cid)
+                if prev_hash and cur_hash == prev_hash:
+                    return None
+            report = await _generate_report(
                 extractor,
                 community_id=record[config.COMMUNITY_ID],
                 community_level=record[config.COMMUNITY_LEVEL],
                 community_context=record[config.CONTEXT_STRING],
             )
+            if report:
+                report["content_hash"] = cur_hash
+            return report
 
         local_reports = await _process_rows_async(
             level_context,
@@ -717,8 +744,21 @@ async def summarize_communities(
             max_concurrent=max_concurrent,
             progress_msg=f"level {levels[i]} summarize communities progress: ",
         )
-        reports.extend([lr for lr in local_reports if lr is not None])
+        valid = [lr for lr in local_reports if lr is not None]
+        skipped = len(local_reports) - len(valid)
+        reports.extend(valid)
+        skipped_count += skipped
+        if skipped:
+            logger.info(
+                "Level %s: generated %d, skipped %d (incremental)",
+                levels[i], len(valid), skipped,
+            )
 
+    if skipped_count:
+        logger.info(
+            "Incremental: skipped %d unchanged communities, generated %d",
+            skipped_count, len(reports),
+        )
     return pd.DataFrame(reports)
 
 
@@ -744,6 +784,12 @@ def finalize_community_reports(
 
 
     
+def _community_content_hash(row: pd.Series, columns: list[str]) -> str:
+    """Stable hash of a community's member list for incremental skip detection."""
+    content = "|".join(str(row.get(c, "")) for c in columns)
+    return sha512(content.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+
+
 async def run_community_reports_pipeline_async(
     relationships: pd.DataFrame,
     entities: pd.DataFrame,
@@ -753,6 +799,8 @@ async def run_community_reports_pipeline_async(
     max_input_length: int = 16000,
     max_report_length: int = 2000,
     max_concurrent: int = 4,
+    incremental: bool | None = None,
+    existing_report_hashes: dict[int, str] | None = None,
 ) -> pd.DataFrame:
     """
     Асинхронный пайплайн генерации отчётов по сообществам.
@@ -783,10 +831,8 @@ async def run_community_reports_pipeline_async(
         logger.info("Stage 2: Building local context for communities...")
         # Выводим все колонки по 4 строки (примеров) для nodes и edges: временно увеличиваем ширину вывода и число столбцов
         with pd.option_context('display.max_columns', None, 'display.width', 0):
-            print("Nodes sample:")
-            print(nodes.head(4))
-            print("Edges sample:")
-            print(edges.head(4))
+            logger.debug("Nodes sample:\n%s", nodes.head(4))
+            logger.debug("Edges sample:\n%s", edges.head(4))
  
         local_contexts = await build_local_context(
             nodes, edges, llm_client, model, max_input_length
@@ -808,6 +854,8 @@ async def run_community_reports_pipeline_async(
             model,
             max_input_length,
             max_concurrent,
+            incremental=incremental,
+            existing_report_hashes=existing_report_hashes,
         )
         logger.info(
             "Stage 3 complete: %s reports generated",

@@ -1,22 +1,79 @@
 """Unified configuration for semantic_graph modules."""
 
+import logging
+import os
+import uuid
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
 # --- LLM / model ---
 #MODEL_NAME = 'Qwen/Qwen3-4B-Instruct-2507'
-MODEL_NAME = 'Qwen/Qwen3-VL-32B-Thinking'
-N4G_URL = 'http://0.0.0.0:7474'
-LLM_API_KEY = 'EMPTY'
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-VL-32B-Thinking")
+N4G_URL = os.getenv("N4G_URL", "http://0.0.0.0:7474")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 
 # --- Qdrant ---
-QDRANT_URL = "http://localhost:6333/"
-QDRANT_API_KEY = None
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333/")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 OUTPUT_DIR = "data/processed"
 DOCUMENT_ID_FIELD = "file_hash"
 
 # --- Graph processing ---
 MAX_CLUSTER_SIZE = 10
-USE_LCC = False
+USE_LCC = True
 CLUSTERIZATION_SEED = 256
-ENTITY_TYPES = ['ORGANIZATION', 'PERSON', 'GEO', 'EVENT']
+ENTITY_TYPES = [
+    'ORGANIZATION',
+    'INSTITUTION',
+    'PERSON',
+    'GEO',
+    'EVENT',
+    'PRODUCT',
+    'CONCEPT',
+    'LAW',
+    'NUMBER',
+    'DATE',
+    'GPE',
+    'NORP',
+    'ANATOMY',
+    'SYMPTOM',
+    'DISEASE',
+    'PROCEDURE',
+    'STRUCTURE',
+    'COLOR',
+]
+MIN_ENTITY_CONFIDENCE = int(os.getenv("MIN_ENTITY_CONFIDENCE", "5"))
+ADAPTIVE_BUDGET_ALLOCATION = os.getenv("ADAPTIVE_BUDGET_ALLOCATION", "true").lower() in ("1", "true", "yes")
+DISAMBIGUATION_THRESHOLD = float(os.getenv("DISAMBIGUATION_THRESHOLD", "0.7"))
+# Weighted clustering: amplify edge-weight differences so Leiden distinguishes
+# strong from weak connections (LLM weights tend to cluster near 1.0).
+LEIDEN_WEIGHT_EXPONENT = float(os.getenv("LEIDEN_WEIGHT_EXPONENT", "1.5"))
+LEIDEN_MIN_WEIGHT = float(os.getenv("LEIDEN_MIN_WEIGHT", "0.1"))
+# B6: Auto-resolution for Leiden — compute resolution from graph statistics
+# (avg_degree / 10, clamped to [0.5, 2.0]) instead of using a fixed 1.0.
+LEIDEN_AUTO_RESOLUTION = os.getenv("LEIDEN_AUTO_RESOLUTION", "true").lower() in ("1", "true", "yes")
+# Incremental community reports: skip re-generation for communities whose
+# entity memberships and edges haven't changed since the last run.
+INCREMENTAL_COMMUNITY_REPORTS = os.getenv("INCREMENTAL_COMMUNITY_REPORTS", "true").lower() in ("1", "true", "yes")
+
+# C8: Entity-aware query expansion — enrich question entities with top-k similar
+# entities from Qdrant embeddings before running graph traversal.
+ENTITY_QUERY_EXPANSION_ENABLED = os.getenv("ENTITY_QUERY_EXPANSION_ENABLED", "true").lower() in ("1", "true", "yes")
+ENTITY_QUERY_EXPANSION_TOP_K = int(os.getenv("ENTITY_QUERY_EXPANSION_TOP_K", "3"))
+ENTITY_QUERY_EXPANSION_SIM_THRESHOLD = float(os.getenv("ENTITY_QUERY_EXPANSION_SIM_THRESHOLD", "0.7"))
+
+# D2: Weighted bridge connections — entity confidence multiplier for bridge edge
+# weights (0-1).  Confidence/10 maps 1..10 → 0.1..1.0.  Multiplier scales that.
+BRIDGE_WEIGHT_CONFIDENCE_MULTIPLIER = float(os.getenv("BRIDGE_WEIGHT_CONFIDENCE_MULTIPLIER", "1.0"))
+BRIDGE_WEIGHT_PROXIMITY_DECAY = float(os.getenv("BRIDGE_WEIGHT_PROXIMITY_DECAY", "0.15"))
+
+# C3: Hybrid search — combine dense vector similarity with keyword-based BM25-alike
+# scoring.  When enabled, text-block search results are re-ranked using both the
+# Qdrant cosine score and a keyword overlap score.  Requires no re-indexing.
+HYBRID_SEARCH_ENABLED = os.getenv("HYBRID_SEARCH_ENABLED", "true").lower() in ("1", "true", "yes")
+# alpha=1.0 → dense-only, alpha=0.0 → keyword-only, 0.7 is a good default.
+HYBRID_SEARCH_ALPHA = float(os.getenv("HYBRID_SEARCH_ALPHA", "0.7"))
 
 # --- API server ---
 API_HOST = "0.0.0.0"
@@ -28,6 +85,25 @@ MAX_LENGTH_KEY = "max_report_length"
 
 # --- Document content ---
 CONTENT_LABELS = ['text', 'table', 'image']
+
+# --- Embedding service ---
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://192.168.19.127:10115/embedding")
+EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", "30"))
+EMBEDDING_MAX_CONCURRENCY = int(os.getenv("EMBEDDING_MAX_CONCURRENCY", "8"))
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "0"))  # 0 = auto-detect from first response
+EMBEDDING_RETRY_COUNT = int(os.getenv("EMBEDDING_RETRY_COUNT", "3"))
+EMBEDDING_RETRY_BASE_DELAY = float(os.getenv("EMBEDDING_RETRY_BASE_DELAY", "1.0"))
+ENTITY_EMBEDDINGS_COLLECTION = os.getenv("ENTITY_EMBEDDINGS_COLLECTION", "entity_embeddings")
+ENTITY_EMBEDDINGS_BATCH_SIZE = int(os.getenv("ENTITY_EMBEDDINGS_BATCH_SIZE", "100"))
+ENTITY_EMBEDDINGS_NAMESPACE = uuid.UUID(os.getenv("ENTITY_EMBEDDINGS_NAMESPACE", "a7f1b2c3-4d5e-6f78-9abc-def012345678"))
+
+COMMUNITY_EMBEDDINGS_COLLECTION = os.getenv("COMMUNITY_EMBEDDINGS_COLLECTION", "community_embeddings")
+COMMUNITY_EMBEDDINGS_BATCH_SIZE = int(os.getenv("COMMUNITY_EMBEDDINGS_BATCH_SIZE", "100"))
+COMMUNITY_EMBEDDINGS_NAMESPACE = uuid.UUID(os.getenv("COMMUNITY_EMBEDDINGS_NAMESPACE", "b8e2c3d4-5e6f-7a89-bcde-f01234567890"))
+
+# --- Disambiguation ---
+DISAMBIGUATION_ENABLED: bool = os.getenv("DISAMBIGUATION_ENABLED", "true").lower() == "true"
+DISAMBIGUATION_SIMILARITY_THRESHOLD: float = float(os.getenv("DISAMBIGUATION_SIMILARITY_THRESHOLD", "0.85"))
 
 
 # --- DataFrame field names and column schemas ---
@@ -42,6 +118,7 @@ TYPE = "type"
 # POST-PREP NODE TABLE SCHEMA
 NODE_DEGREE = "degree"
 NODE_FREQUENCY = "frequency"
+CONFIDENCE = "confidence"
 NODE_DETAILS = "node_details"
 
 # POST-PREP EDGE TABLE SCHEMA
@@ -172,8 +249,18 @@ DOCUMENTS_FINAL_COLUMNS = [
 #LLM_URL = 'http://192.168.19.127:9886/v1'
 #TOKENIZER_URL = "http://localhost:9886/tokenize"
 #LLM_URL = 'http://localhost:9886/v1'
-TOKENIZER_URL = "http://192.168.19.127:8888/tokenize"
-LLM_URL = 'http://192.168.19.127:8888/v1'
+TOKENIZER_URL = os.getenv("TOKENIZER_URL", "http://192.168.19.127:8888/tokenize")
+LLM_URL = os.getenv("LLM_URL", "http://192.168.19.127:8888/v1")
+
+# --- Query extraction model (separate from main model) ---
+QUERY_EXTRACTION_MODEL_NAME = os.getenv("QUERY_EXTRACTION_MODEL_NAME", MODEL_NAME)
+QUERY_EXTRACTION_LLM_URL = os.getenv("QUERY_EXTRACTION_LLM_URL", LLM_URL)
+QUERY_EXTRACTION_API_KEY = os.getenv("QUERY_EXTRACTION_API_KEY", LLM_API_KEY)
+QUERY_EXTRACTION_TOKENIZER_URL = os.getenv("QUERY_EXTRACTION_TOKENIZER_URL", TOKENIZER_URL)
+
+# --- Qdrant collections ---
+DOCUMENTS_COLLECTION = os.getenv("DOCUMENTS_COLLECTION", "documents")
+
 TUPLE_DELIMITER = "<|>"
 RECORD_DELIMITER = "##"
 COMPLETION_DELIMITER = "<|COMPLETE|>"
@@ -193,7 +280,7 @@ Description List: {description_list}
 Output:
 """
 
-GRAPH_EXTRACTION_PROMPT = """
+INLINE_GRAPH_EXTRACTION_PROMPT = """
 -Goal-
 Given a text document that is potentially relevant to this activity and a list of entity types, identify all entities of those types from the text and all relationships among the identified entities.
  
@@ -202,7 +289,8 @@ Given a text document that is potentially relevant to this activity and a list o
 - entity_name: Name of the entity, capitalized
 - entity_type: One of the following types: [{entity_types}]
 - entity_description: Comprehensive description of the entity's attributes and activities
-Format each entity as ("entity"<|><entity_name><|><entity_type><|><entity_description>)
+Format each entity as ("entity"<|><entity_name><|><entity_type><|><entity_description><|><entity_confidence>)
+where entity_confidence is an integer 1-10 indicating how confident you are that this is a distinct and meaningful entity (10 = very clearly defined, 1 = uncertain/vague).
  
 2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that are *clearly related* to each other.
 For each pair of related entities, extract the following information:
@@ -225,11 +313,11 @@ Text:
 The Verdantis's Central Institution is scheduled to meet on Monday and Thursday, with the institution planning to release its latest policy decision on Thursday at 1:30 p.m. PDT, followed by a press conference where Central Institution Chair Martin Smith will take questions. Investors expect the Market Strategy Committee to hold its benchmark interest rate steady in a range of 3.5%-3.75%.
 ######################
 Output:
-("entity"<|>CENTRAL INSTITUTION<|>ORGANIZATION<|>The Central Institution is the Federal Reserve of Verdantis, which is setting interest rates on Monday and Thursday)
+("entity"<|>CENTRAL INSTITUTION<|>ORGANIZATION<|>The Central Institution is the Federal Reserve of Verdantis, which is setting interest rates on Monday and Thursday<|>9)
 ##
-("entity"<|>MARTIN SMITH<|>PERSON<|>Martin Smith is the chair of the Central Institution)
+("entity"<|>MARTIN SMITH<|>PERSON<|>Martin Smith is the chair of the Central Institution<|>8)
 ##
-("entity"<|>MARKET STRATEGY COMMITTEE<|>ORGANIZATION<|>The Central Institution committee makes key decisions about interest rates and the growth of Verdantis's money supply)
+("entity"<|>MARKET STRATEGY COMMITTEE<|>ORGANIZATION<|>The Central Institution committee makes key decisions about interest rates and the growth of Verdantis's money supply<|>7)
 ##
 ("relationship"<|>MARTIN SMITH<|>CENTRAL INSTITUTION<|>Martin Smith is the Chair of the Central Institution and will answer questions at a press conference<|>9)
 <|COMPLETE|>
@@ -243,9 +331,9 @@ TechGlobal's (TG) stock skyrocketed in its opening day on the Global Exchange Th
 TechGlobal, a formerly public company, was taken private by Vision Holdings in 2014. The well-established chip designer says it powers 85% of premium smartphones.
 ######################
 Output:
-("entity"<|>TECHGLOBAL<|>ORGANIZATION<|>TechGlobal is a stock now listed on the Global Exchange which powers 85% of premium smartphones)
+("entity"<|>TECHGLOBAL<|>ORGANIZATION<|>TechGlobal is a stock now listed on the Global Exchange which powers 85% of premium smartphones<|>8)
 ##
-("entity"<|>VISION HOLDINGS<|>ORGANIZATION<|>Vision Holdings is a firm that previously owned TechGlobal)
+("entity"<|>VISION HOLDINGS<|>ORGANIZATION<|>Vision Holdings is a firm that previously owned TechGlobal<|>7)
 ##
 ("relationship"<|>TECHGLOBAL<|>VISION HOLDINGS<|>Vision Holdings formerly owned TechGlobal from 2014 until present<|>5)
 <|COMPLETE|>
@@ -265,26 +353,26 @@ They were welcomed by senior Aurelian officials and are now on their way to Aure
 The Aurelians include 39-year-old businessman Samuel Namara, who has been held in Tiruzia's Alhamia Prison, as well as journalist Durke Bataglani, 59, and environmentalist Meggie Tazbah, 53, who also holds Bratinas nationality.
 ######################
 Output:
-("entity"<|>FIRUZABAD<|>GEO<|>Firuzabad held Aurelians as hostages)
+("entity"<|>FIRUZABAD<|>GEO<|>Firuzabad held Aurelians as hostages<|>8)
 ##
-("entity"<|>AURELIA<|>GEO<|>Country seeking to release hostages)
+("entity"<|>AURELIA<|>GEO<|>Country seeking to release hostages<|>7)
 ##
-("entity"<|>QUINTARA<|>GEO<|>Country that negotiated a swap of money in exchange for hostages)
+("entity"<|>QUINTARA<|>GEO<|>Country that negotiated a swap of money in exchange for hostages<|>7)
 ##
 ##
-("entity"<|>TIRUZIA<|>GEO<|>Capital of Firuzabad where the Aurelians were being held)
+("entity"<|>TIRUZIA<|>GEO<|>Capital of Firuzabad where the Aurelians were being held<|>6)
 ##
-("entity"<|>KROHAARA<|>GEO<|>Capital city in Quintara)
+("entity"<|>KROHAARA<|>GEO<|>Capital city in Quintara<|>6)
 ##
-("entity"<|>CASHION<|>GEO<|>Capital city in Aurelia)
+("entity"<|>CASHION<|>GEO<|>Capital city in Aurelia<|>6)
 ##
-("entity"<|>SAMUEL NAMARA<|>PERSON<|>Aurelian who spent time in Tiruzia's Alhamia Prison)
+("entity"<|>SAMUEL NAMARA<|>PERSON<|>Aurelian who spent time in Tiruzia's Alhamia Prison<|>8)
 ##
-("entity"<|>ALHAMIA PRISON<|>GEO<|>Prison in Tiruzia)
+("entity"<|>ALHAMIA PRISON<|>GEO<|>Prison in Tiruzia<|>7)
 ##
-("entity"<|>DURKE BATAGLANI<|>PERSON<|>Aurelian journalist who was held hostage)
+("entity"<|>DURKE BATAGLANI<|>PERSON<|>Aurelian journalist who was held hostage<|>8)
 ##
-("entity"<|>MEGGIE TAZBAH<|>PERSON<|>Bratinas national and environmentalist who was held hostage)
+("entity"<|>MEGGIE TAZBAH<|>PERSON<|>Bratinas national and environmentalist who was held hostage<|>8)
 ##
 ("relationship"<|>FIRUZABAD<|>AURELIA<|>Firuzabad negotiated a hostage exchange with Aurelia<|>2)
 ##
@@ -308,6 +396,140 @@ Output:
 <|COMPLETE|>
 
 ######################
+Example 4:
+Entity_types: ORGANIZATION,INSTITUTION,PERSON,GEO,EVENT,PRODUCT,CONCEPT,LAW,NUMBER,DATE,GPE,NORP,ANATOMY,SYMPTOM,DISEASE,PROCEDURE,STRUCTURE,COLOR
+Text:
+Costco Wholesale Corporation reported net sales of $226.95 billion for fiscal year 2024, an increase of 5.0% from $216.1 billion in 2023. The company, subject to Sarbanes-Oxley Act Section 404 compliance, operates 871 warehouses globally. On January 12, 2024, the Board declared a quarterly cash dividend of $1.16 per share. The Kirkland Signature brand accounted for 28% of total revenue. The SEC filed a comment letter on March 3, 2024 regarding goodwill impairment testing methodology under ASC 350. The company's effective income tax rate was 24.5% for fiscal 2024, compared to 23.1% in the prior year, due to changes in OECD Pillar Two global minimum tax rules effective from January 1, 2024. The workforce includes Americans, Canadians, Japanese, Mexicans, and British employees. The Democratic and Republican lawmakers debated the OECD tax treaty ratification in Congress. The Kirkland Signature appliance series launched in midnight black and arctic white color variants. In a separate medical study, a barium swallow examination revealed abnormal esophageal motility with tertiary contractions in the distal esophagus. The patient presented with dysphagia and retrosternal chest pain, and was diagnosed with diffuse esophageal spasm. The recommended procedure was endoscopic balloon dilation of the lower esophageal sphincter.
+######################
+Output:
+("entity"<|>COSTCO WHOLESALE CORPORATION<|>ORGANIZATION<|>Costco is a wholesale retailer reporting $226.95 billion in net sales for fiscal 2024<|>10)
+##
+("entity"<|>SEC<|>INSTITUTION<|>The Securities and Exchange Commission is a federal regulatory agency that filed a comment letter to Costco<|>9)
+##
+("entity"<|>BOARD OF DIRECTORS<|>INSTITUTION<|>Costco's Board declared a quarterly cash dividend of $1.16 per share on January 12, 2024<|>8)
+##
+("entity"<|>KIRKLAND SIGNATURE<|>PRODUCT<|>Kirkland Signature is Costco's private-label brand accounting for 28% of total revenue<|>9)
+##
+("entity"<|>$226.95 BILLION<|>NUMBER<|>Net sales for fiscal year 2024<|>10)
+##
+("entity"<|>$216.1 BILLION<|>NUMBER<|>Net sales for fiscal year 2023<|>9)
+##
+("entity"<|>$1.16<|>NUMBER<|>Quarterly cash dividend per share declared on January 12, 2024<|>9)
+##
+("entity"<|>24.5%<|>NUMBER<|>Effective income tax rate for fiscal 2024<|>10)
+##
+("entity"<|>23.1%<|>NUMBER<|>Effective income tax rate for the prior year<|>9)
+##
+("entity"<|>28%<|>NUMBER<|>Percentage of total revenue from Kirkland Signature brand<|>9)
+##
+("entity"<|>SOX SECTION 404<|>LAW<|>Sarbanes-Oxley Act Section 404 requires management assessment of internal controls<|>9)
+##
+("entity"<|>ASC 350<|>LAW<|>Accounting Standards Codification 350 governs goodwill impairment testing methodology<|>9)
+##
+("entity"<|>OECD PILLAR TWO<|>LAW<|>OECD global minimum tax rules effective January 1, 2024 affecting multinational tax rates<|>9)
+##
+("entity"<|>GOODWILL IMPAIRMENT TESTING<|>CONCEPT<|>Methodology for testing whether goodwill value on balance sheet has declined<|>8)
+##
+("entity"<|>FISCAL YEAR 2024<|>DATE<|>Costco's fiscal year 2024 reporting period<|>9)
+##
+("entity"<|>JANUARY 12, 2024<|>DATE<|>Date when Board declared quarterly dividend<|>10)
+##
+("entity"<|>MARCH 3, 2024<|>DATE<|>Date when SEC filed comment letter to Costco<|>10)
+##
+("entity"<|>JANUARY 1, 2024<|>DATE<|>Effective date of OECD Pillar Two global minimum tax rules<|>10)
+##
+("entity"<|>UNITED STATES<|>GPE<|>Country where Costco is headquartered and primary market<|>10)
+##
+("entity"<|>CANADA<|>GPE<|>Country with significant Costco warehouse operations<|>9)
+##
+("entity"<|>JAPAN<|>GPE<|>Country with Costco international warehouse operations<|>9)
+##
+("entity"<|>MEXICO<|>GPE<|>Country with Costco international warehouse operations<|>8)
+##
+("entity"<|>UNITED KINGDOM<|>GPE<|>Country with Costco international warehouse operations<|>7)
+##
+("entity"<|>AMERICANS<|>NORP<|>Nationality group of US-based Costco employees<|>9)
+##
+("entity"<|>CANADIANS<|>NORP<|>Nationality group of Canadian Costco employees<|>8)
+##
+("entity"<|>JAPANESE<|>NORP<|>Nationality group of Japanese Costco employees<|>8)
+##
+("entity"<|>DEMOCRATS<|>NORP<|>Democratic party lawmakers debating OECD tax treaty ratification in Congress<|>8)
+##
+("entity"<|>REPUBLICANS<|>NORP<|>Republican party lawmakers debating OECD tax treaty ratification in Congress<|>8)
+##
+("entity"<|>DISTAL ESOPHAGUS<|>ANATOMY<|>Lower portion of the esophagus where tertiary contractions were observed<|>9)
+##
+("entity"<|>LOWER ESOPHAGEAL SPHINCTER<|>ANATOMY<|>Muscular ring at the gastroesophageal junction targeted for dilation<|>9)
+##
+("entity"<|>DYSPHAGIA<|>SYMPTOM<|>Difficulty swallowing reported by the patient<|>10)
+##
+("entity"<|>RETROSTERNAL CHEST PAIN<|>SYMPTOM<|>Pain behind the sternum experienced by the patient<|>9)
+##
+("entity"<|>DIFFUSE ESOPHAGEAL SPASM<|>DISEASE<|>Motility disorder characterized by tertiary contractions in the esophagus<|>10)
+##
+("entity"<|>BARIUM SWALLOW EXAMINATION<|>PROCEDURE<|>Diagnostic imaging test used to evaluate esophageal motility<|>9)
+##
+("entity"<|>ENDOSCOPIC BALLOON DILATION<|>PROCEDURE<|>Therapeutic procedure to widen the lower esophageal sphincter<|>10)
+##
+("entity"<|>TERTIARY CONTRACTIONS<|>STRUCTURE<|>Abnormal simultaneous esophageal contractions observed on barium swallow<|>9)
+##
+("entity"<|>MIDNIGHT BLACK<|>COLOR<|>Color variant of Kirkland Signature appliance series<|>8)
+##
+("entity"<|>ARCTIC WHITE<|>COLOR<|>Color variant of Kirkland Signature appliance series<|>8)
+##
+("relationship"<|>COSTCO WHOLESALE CORPORATION<|>$226.95 BILLION<|>Costco reported net sales of $226.95 billion for fiscal 2024<|>10)
+##
+("relationship"<|>COSTCO WHOLESALE CORPORATION<|>$216.1 BILLION<|>Costco reported net sales of $216.1 billion in 2023<|>9)
+##
+("relationship"<|>COSTCO WHOLESALE CORPORATION<|>BOARD OF DIRECTORS<|>Costco's Board declared a quarterly cash dividend<|>8)
+##
+("relationship"<|>BOARD OF DIRECTORS<|>$1.16<|>Board declared a quarterly dividend of $1.16 per share<|>9)
+##
+("relationship"<|>COSTCO WHOLESALE CORPORATION<|>KIRKLAND SIGNATURE<|>Costco owns and sells Kirkland Signature brand products<|>10)
+##
+("relationship"<|>KIRKLAND SIGNATURE<|>MIDNIGHT BLACK<|>Kirkland Signature appliance series available in midnight black<|>8)
+##
+("relationship"<|>KIRKLAND SIGNATURE<|>ARCTIC WHITE<|>Kirkland Signature appliance series available in arctic white<|>8)
+##
+("relationship"<|>KIRKLAND SIGNATURE<|>28%<|>Kirkland Signature accounted for 28% of Costco's total revenue<|>9)
+##
+("relationship"<|>COSTCO WHOLESALE CORPORATION<|>SEC<|>SEC filed a comment letter to Costco<|>8)
+##
+("relationship"<|>SEC<|>GOODWILL IMPAIRMENT TESTING<|>SEC inquired about goodwill impairment testing methodology<|>8)
+##
+("relationship"<|>GOODWILL IMPAIRMENT TESTING<|>ASC 350<|>ASC 350 governs goodwill impairment testing methodology<|>9)
+##
+("relationship"<|>COSTCO WHOLESALE CORPORATION<|>SOX SECTION 404<|>Costco is subject to Sarbanes-Oxley Act Section 404 compliance requirements<|>9)
+##
+("relationship"<|>COSTCO WHOLESALE CORPORATION<|>24.5%<|>Costco's effective income tax rate was 24.5% for fiscal 2024<|>10)
+##
+("relationship"<|>COSTCO WHOLESALE CORPORATION<|>23.1%<|>Costco's prior year effective tax rate was 23.1%<|>9)
+##
+("relationship"<|>24.5%<|>OECD PILLAR TWO<|>Change in tax rate from 23.1% to 24.5% driven by OECD Pillar Two rules<|>8)
+##
+("relationship"<|>BOARD OF DIRECTORS<|>JANUARY 12, 2024<|>Board declared dividend on January 12, 2024<|>10)
+##
+("relationship"<|>SEC<|>MARCH 3, 2024<|>SEC filed comment letter on March 3, 2024<|>10)
+##
+("relationship"<|>OECD PILLAR TWO<|>JANUARY 1, 2024<|>OECD Pillar Two rules became effective on January 1, 2024<|>9)
+##
+("relationship"<|>BARIUM SWALLOW EXAMINATION<|>DISTAL ESOPHAGUS<|>Barium swallow revealed abnormal motility in the distal esophagus<|>9)
+##
+("relationship"<|>DIFFUSE ESOPHAGEAL SPASM<|>TERTIARY CONTRACTIONS<|>Diffuse esophageal spasm is characterized by tertiary contractions<|>10)
+##
+("relationship"<|>DYSPHAGIA<|>DIFFUSE ESOPHAGEAL SPASM<|>Dysphagia is a symptom of diffuse esophageal spasm<|>9)
+##
+("relationship"<|>RETROSTERNAL CHEST PAIN<|>DIFFUSE ESOPHAGEAL SPASM<|>Retrosternal chest pain is a symptom of diffuse esophageal spasm<|>9)
+##
+("relationship"<|>ENDOSCOPIC BALLOON DILATION<|>LOWER ESOPHAGEAL SPHINCTER<|>Endoscopic balloon dilation targets the lower esophageal sphincter<|>10)
+##
+("relationship"<|>ENDOSCOPIC BALLOON DILATION<|>DIFFUSE ESOPHAGEAL SPASM<|>Endoscopic balloon dilation is a treatment for diffuse esophageal spasm<|>9)
+##
+("relationship"<|>TERTIARY CONTRACTIONS<|>DISTAL ESOPHAGUS<|>Tertiary contractions were observed in the distal esophagus<|>9)
+<|COMPLETE|>
+
+######################
 -Real Data-
 ######################
 Entity_types: {entity_types}
@@ -317,6 +539,22 @@ Output:"""
 
 CONTINUE_PROMPT = "MANY entities and relationships were missed in the last extraction. Remember to ONLY emit entities that match any of the previously extracted types. Add them below using the same format:\n"
 LOOP_PROMPT = "It appears some entities and relationships may have still been missed. Answer Y if there are still entities or relationships that need to be added, or N if there are none. Please answer with a single letter Y or N.\n"
+
+
+# --- Prompt loading helper (defined after INLINE_GRAPH_EXTRACTION_PROMPT
+#     so the fallback reference is resolved at definition time) ---
+def _load_prompt() -> str:
+    """Load GRAPH_EXTRACTION_PROMPT from file, fallback to inline string."""
+    try:
+        prompt_path = Path(__file__).parent / "prompts" / "graph-extraction.md"
+        if prompt_path.is_file():
+            return prompt_path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return INLINE_GRAPH_EXTRACTION_PROMPT
+
+
+GRAPH_EXTRACTION_PROMPT = _load_prompt()
 
 
 # --- Community report prompt ---
@@ -467,3 +705,42 @@ Do not include information where the supporting evidence for it is not provided.
 Limit the total report length to {max_report_length} words.
 
 Output:"""
+
+
+# ──────────────────────────────────────────────
+#  Configuration validation and diagnostics
+# ──────────────────────────────────────────────
+
+_SENSITIVE_KEYS = {"LLM_API_KEY", "QDRANT_API_KEY"}
+
+
+def validate_config() -> list[str]:
+    """Check critical configuration values and return a list of warnings."""
+    warnings: list[str] = []
+
+    if not LLM_API_KEY:
+        warnings.append("LLM_API_KEY is empty – LLM authentication may fail.")
+    if not QDRANT_URL:
+        warnings.append("QDRANT_URL is empty.")
+    if QDRANT_API_KEY is None:
+        warnings.append("QDRANT_API_KEY is not set (None).")
+
+    return warnings
+
+
+def print_config_summary() -> None:
+    """Log non-sensitive configuration values at INFO level."""
+    for name in sorted(vars()):
+        if name.startswith("_") or not name.isupper():
+            continue
+        value = vars()[name]
+        if callable(value):
+            continue
+        if name in _SENSITIVE_KEYS:
+            continue
+        # Skip long string prompts – only log short scalar values
+        if isinstance(value, str) and len(value) > 200:
+            continue
+        logger.info("Config %s = %s", name, repr(value))
+
+

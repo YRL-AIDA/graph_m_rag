@@ -1,5 +1,8 @@
+import asyncio
+from dataclasses import dataclass
+
 from neo4j import GraphDatabase
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 import logging
 import json
 from dtype import Document,  EntityCreate, RelationshipCreate,EntitiesRequest, EntitiesResponse
@@ -92,34 +95,15 @@ class Neo4jConnection:
         finally:
             session.close()
 
-    def query(self, query: str, params: Optional[Dict[str, Any]] = None) -> list:
-        """Execute a Cypher query on the database.
 
-        Args:
-            query: Cypher query string
-            params: Optional dictionary of parameters for the query
-
-        Returns:
-            List of query results
-        """
-        return self.conn.query(query, self.name_db, params)
+@dataclass
 class ManagerConfig:
-    """Configuration for Document Manager."""
+    """Configuration for semantic graph Manager."""
 
-    def __init__(self, uri: str, user: str, password: str, name_db: str):
-        """Initialize manager configuration.
-
-        Args:
-            uri: Neo4j connection URI
-            user: Database username
-            password: Database password
-            name_db: Database name
-        """
-        self.uri = uri
-        self.user = user
-        self.password = password
-        self.name_db = name_db
-        logger.debug(f"ManagerConfig initialized with URI: {uri}, DB: {name_db}")
+    uri: str
+    user: str
+    password: str
+    name_db: str
 
 
 class Manager:
@@ -374,16 +358,17 @@ class Manager:
             logger.error(f"Error getting related context for {element_type}: {e}")
             return {"parent_element": None, "sibling_captions": [], "sibling_footnotes": []}
 
-    def query(self, query: str) -> list:
+    def query(self, query: str, params: Optional[Dict[str, Any]] = None) -> list:
         """Execute a Cypher query on the database.
 
         Args:
             query: Cypher query string
+            params: Optional dictionary of parameters for the query
 
         Returns:
             List of query results
         """
-        return self.conn.query(query, self.name_db)
+        return self.conn.query(query, self.name_db, params)
 
     def status(self) -> dict:
         """Get database status information.
@@ -1012,3 +997,297 @@ class Manager:
     def close(self):
         """Close the database connection."""
         self.conn.close()
+
+    # ---------------------------------------------------------------------
+    # Cross-graph query methods (Entity ↔ Region via semantic_link bridge)
+    # ---------------------------------------------------------------------
+
+    async def run_cypher(self, cypher: str, **params):
+        """Execute a Cypher query asynchronously."""
+        return await asyncio.to_thread(
+            self.conn.query, cypher, self.name_db, params
+        )
+
+    def get_entities_by_region_ids(
+        self, region_ids: List[str], limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Return Entity nodes linked to the given Region IDs via
+        ``semantic_link`` edges."""
+        query = f"""
+        MATCH (e:Entity)-[sl:semantic_link]->(r:Region)
+        WHERE r.region_id IN $region_ids
+        WITH e, sl, r
+        ORDER BY COALESCE(sl.weight, 0.5) DESC
+        LIMIT $limit
+        RETURN DISTINCT
+            e.{TITLE} AS title,
+            e.{TYPE} AS type,
+            e.{DESCRIPTION} AS description,
+            COALESCE(e.{NODE_DEGREE}, 0) AS degree,
+            sl.weight AS weight,
+            r.region_id AS region_id
+        """
+        try:
+            results = self.query(query, {
+                "region_ids": region_ids, "limit": limit,
+            })
+            return [r.data() for r in results]
+        except Exception as e:
+            logger.warning("get_entities_by_region_ids failed: %s", e)
+            return []
+
+    def get_communities_by_region_ids(
+        self, region_ids: List[str], limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Return Community nodes whose entities are linked (via CONSISTS_OF
+        + semantic_link) to the given Region IDs.  Includes community
+        report findings, rating, and full content."""
+        query = f"""
+        MATCH (c:Community)-[:CONSISTS_OF]->(e:Entity)-[sl:semantic_link]->(r:Region)
+        WHERE r.region_id IN $region_ids
+        WITH c, e, sl, r
+        ORDER BY COALESCE(sl.weight, 0.5) DESC
+        LIMIT $limit
+        RETURN DISTINCT
+            c.{TITLE} AS title,
+            c.{SUMMARY} AS summary,
+            c.{SIZE} AS size,
+            c.{FINDINGS} AS findings,
+            c.{RATING} AS rating,
+            c.{EXPLANATION} AS rating_explanation,
+            c.{FULL_CONTENT} AS full_content,
+            r.region_id AS region_id
+        """
+        try:
+            results = self.query(query, {
+                "region_ids": region_ids, "limit": limit,
+            })
+            return [r.data() for r in results]
+        except Exception as e:
+            logger.warning("get_communities_by_region_ids failed: %s", e)
+            return []
+
+    def get_cross_graph_bridge(
+        self, region_ids: List[str], max_regions: int = 15
+    ) -> List[Dict[str, Any]]:
+        """Discover new Region nodes reachable through the Entity graph:
+        Region →(semantic_link)→ Entity →(RELATED)→ Entity →(semantic_link)→ Region."""
+        query = f"""
+        MATCH (r1:Region)<-[sl1:semantic_link]-(e1:Entity)-[rel:RELATED]-(e2:Entity)-[sl2:semantic_link]->(r2:Region)
+        WHERE r1.region_id IN $region_ids
+          AND NOT r2.region_id IN $region_ids
+          AND e1 <> e2
+        WITH r2, sl2.weight AS bridge_weight
+        ORDER BY bridge_weight DESC
+        LIMIT $max_regions
+        RETURN DISTINCT
+            r2.region_id AS region_id,
+            labels(r2) AS labels,
+            r2.text AS text
+        """
+        try:
+            results = self.query(query, {
+                "region_ids": region_ids, "max_regions": max_regions,
+            })
+            return [r.data() for r in results]
+        except Exception as e:
+            logger.warning("get_cross_graph_bridge failed: %s", e)
+            return []
+
+    def get_entities_linked_to_region(
+        self, region_id: str, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Return Entity nodes linked to a single Region via ``semantic_link``."""
+        query = f"""
+        MATCH (e:Entity)-[sl:semantic_link]->(r:Region)
+        WHERE r.region_id = $region_id
+        RETURN DISTINCT
+            e.{TITLE} AS title,
+            e.{TYPE} AS type,
+            e.{DESCRIPTION} AS description,
+            COALESCE(e.{NODE_DEGREE}, 0) AS degree,
+            sl.weight AS weight
+        ORDER BY sl.weight DESC
+        LIMIT $limit
+        """
+        try:
+            results = self.query(query, {
+                "region_id": region_id, "limit": limit,
+            })
+            return [r.data() for r in results]
+        except Exception as e:
+            logger.warning("get_entities_linked_to_region failed: %s", e)
+            return []
+
+    def get_regions_linked_to_entity(
+        self, entity_title: str, entity_type: str, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Return Region nodes linked to an Entity via ``semantic_link``."""
+        query = f"""
+        MATCH (e:Entity)-[sl:semantic_link]->(r:Region)
+        WHERE e.{TITLE} = $entity_title AND e.{TYPE} = $entity_type
+        RETURN DISTINCT
+            r.region_id AS region_id,
+            r.text AS text,
+            sl.weight AS weight
+        ORDER BY sl.weight DESC
+        LIMIT $limit
+        """
+        try:
+            results = self.query(query, {
+                "entity_title": entity_title,
+                "entity_type": entity_type,
+                "limit": limit,
+            })
+            return [r.data() for r in results]
+        except Exception as e:
+            logger.warning("get_regions_linked_to_entity failed: %s", e)
+            return []
+
+    def get_regions_linked_to_community(
+        self, community_id: str, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Return Region nodes reachable from a Community:
+        Community →(CONSISTS_OF)→ Entity →(semantic_link)→ Region."""
+        query = f"""
+        MATCH (c:Community)-[:CONSISTS_OF]->(e:Entity)-[sl:semantic_link]->(r:Region)
+        WHERE c.{COMMUNITY_ID} = toInteger($community_id)
+           OR c.{ID} = $community_id
+        RETURN DISTINCT
+            r.region_id AS region_id,
+            r.text AS text,
+            sl.weight AS weight,
+            '2hop' AS source
+        ORDER BY sl.weight DESC
+        LIMIT $limit
+        """
+        try:
+            results = self.query(query, {
+                "community_id": community_id,
+                "limit": limit,
+            })
+            return [r.data() for r in results]
+        except Exception as e:
+            logger.warning("get_regions_linked_to_community failed: %s", e)
+            return []
+
+    def get_community_siblings(
+        self, entity_title: str, entity_type: str, max_siblings: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Return other entities in the same communities as the given entity."""
+        query = f"""
+        MATCH (e:Entity {{{TITLE}: $entity_title, {TYPE}: $entity_type}})<-[:CONSISTS_OF]-(c:Community)-[:CONSISTS_OF]->(sib:Entity)
+        WHERE sib.{TITLE} <> $entity_title OR sib.{TYPE} <> $entity_type
+        RETURN DISTINCT
+            sib.{TITLE} AS title,
+            sib.{TYPE} AS type,
+            sib.{DESCRIPTION} AS description,
+            COALESCE(sib.{NODE_DEGREE}, 0) AS degree,
+            c.{COMMUNITY_ID} AS community_id,
+            c.{TITLE} AS community_title
+        LIMIT $max_siblings
+        """
+        try:
+            results = self.query(query, {
+                "entity_title": entity_title,
+                "entity_type": entity_type,
+                "max_siblings": max_siblings,
+            })
+            return [r.data() for r in results]
+        except Exception as e:
+            logger.warning("get_community_siblings failed: %s", e)
+            return []
+
+    def get_community_members(
+        self, community_id: str, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Return Entity members of a Community node."""
+        query = f"""
+        MATCH (c:Community)-[:CONSISTS_OF]->(e:Entity)
+        WHERE c.{COMMUNITY_ID} = toInteger($community_id)
+           OR c.{ID} = $community_id
+        RETURN DISTINCT
+            e.{TITLE} AS title,
+            e.{TYPE} AS type,
+            e.{DESCRIPTION} AS description,
+            COALESCE(e.{NODE_DEGREE}, 0) AS degree
+        LIMIT $limit
+        """
+        try:
+            results = self.query(query, {
+                "community_id": community_id,
+                "limit": limit,
+            })
+            return [r.data() for r in results]
+        except Exception as e:
+            logger.warning("get_community_members failed: %s", e)
+            return []
+
+    def get_related_entities_2hop(
+        self,
+        entity_title: str,
+        entity_type: str,
+        max_degree: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Return entities reachable from the given entity via 1-hop and
+        2-hop ``RELATED`` edges."""
+        query = f"""
+        MATCH (e:Entity {{{TITLE}: $entity_title, {TYPE}: $entity_type}})
+        OPTIONAL MATCH (e)-[r1:RELATED]-(hop1:Entity)
+        OPTIONAL MATCH (hop1)-[r2:RELATED]-(hop2:Entity)
+        WHERE hop2 <> e
+        RETURN DISTINCT
+            hop1.{TITLE} AS title_1,
+            hop1.{TYPE} AS type_1,
+            hop1.{DESCRIPTION} AS desc_1,
+            COALESCE(r1.{EDGE_WEIGHT}, 0.5) AS weight_1,
+            1 AS hop_depth,
+            hop2.{TITLE} AS title_2,
+            hop2.{TYPE} AS type_2,
+            hop2.{DESCRIPTION} AS desc_2,
+            COALESCE(r2.{EDGE_WEIGHT}, 0.3) AS weight_2,
+            2 AS hop_depth_2
+        LIMIT $max_degree
+        """
+        try:
+            rows = self.query(query, {
+                "entity_title": entity_title,
+                "entity_type": entity_type,
+                "max_degree": max_degree,
+            })
+            # Normalise: if a row has hop2 fields, emit a 2-hop row;
+            # otherwise emit a 1-hop row.
+            entities: List[Dict[str, Any]] = []
+            seen: set = set()
+            for record in rows:
+                data = record.data()
+                # 1-hop
+                t1 = data.get("title_1")
+                if t1:
+                    key = f"{t1}|{data.get('type_1', '')}"
+                    if key not in seen:
+                        seen.add(key)
+                        entities.append({
+                            "title": t1,
+                            "type": data.get("type_1", ""),
+                            "description": data.get("desc_1", ""),
+                            "weight": data.get("weight_1", 0.5),
+                            "hop_depth": 1,
+                        })
+                # 2-hop
+                t2 = data.get("title_2")
+                if t2:
+                    key = f"{t2}|{data.get('type_2', '')}"
+                    if key not in seen:
+                        seen.add(key)
+                        entities.append({
+                            "title": t2,
+                            "type": data.get("type_2", ""),
+                            "description": data.get("desc_2", ""),
+                            "weight": data.get("weight_2", 0.3),
+                            "hop_depth": 2,
+                        })
+            return entities
+        except Exception as e:
+            logger.warning("get_related_entities_2hop failed: %s", e)
+            return []

@@ -53,12 +53,20 @@ services:
     image: qdrant/qdrant:latest
     container_name: rag-qdrant
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "16333:6333"
+      - "16334:6334"
     networks:
       - rag-network
     environment:
       - API_KEY=${QDRANT_API_KEY}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "/usr/bin/bash", "-c", "echo > /dev/tcp/localhost/6333"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 10s
 
   neo4j:
     image: neo4j:5.26.24-ubi9
@@ -67,11 +75,51 @@ services:
       - "7474:7474"
       - "7687:7687"
     environment:
-      NEO4J_AUTH: ${NEO4J_AUTH}
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
     volumes:
       - neo4j_data:/neo4j_data
     networks:
       - rag-network
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "echo > /dev/tcp/localhost/7687"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 40s
+
+  semantic_index:
+    build:
+      context: .
+      dockerfile: semantic_graph/Dockerfile
+    container_name: rag-semantic-index
+    ports:
+      - "9595:9595"
+    environment:
+      - URL=${NEO4J_URL:-neo4j}
+      - USER_NEO4J=${NEO4J_USER:-neo4j}
+      - PASSWORD=${NEO4J_PASSWORD:-password}
+      - NAME_DB=${NEO4J_DB:-neo4j}
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333/}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - LLM_URL=${LLM_URL:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - MODEL_NAME=${MODEL_NAME:-Qwen/Qwen3-VL-32B-Thinking}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-http://embedding:8000}
+      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-2048}
+      - N4G_URL=${N4G_URL:-http://neo4j:7474}
+    networks:
+      - rag-network
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9595/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
 networks:
   rag-network:

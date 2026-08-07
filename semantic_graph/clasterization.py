@@ -4,14 +4,18 @@ import pandas as pd
 import logging
 import html
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any, Optional, cast
 from uuid import uuid4
 
 import numpy as np
 import graspologic_native as gn
 from collections import defaultdict
 
-from config import COMMUNITIES_FINAL_COLUMNS
+from config import (
+    CLUSTERIZATION_SEED, COMMUNITIES_FINAL_COLUMNS,
+    LEIDEN_MIN_WEIGHT, LEIDEN_WEIGHT_EXPONENT, MAX_CLUSTER_SIZE, USE_LCC,
+    LEIDEN_AUTO_RESOLUTION,
+)
 
 logger = logging.getLogger(__name__)
 Communities = list[tuple[int, int, int, list[str]]]
@@ -44,6 +48,26 @@ def cluster_graph(
             results.append((level, cluster_id, parent_mapping[cluster_id], nodes))
     return results
 
+def _compute_auto_resolution(n_nodes: int, n_edges: int) -> float:
+    """Compute Leiden resolution from graph statistics.
+
+    resolution = max(0.5, min(2.0, avg_degree / 10))
+    where avg_degree = 2 * |E| / |V|.
+
+    Higher avg_degree → higher resolution → more, smaller communities.
+    Lower avg_degree → lower resolution → fewer, larger communities.
+    """
+    if n_nodes <= 1:
+        return 1.0
+    avg_degree = 2.0 * n_edges / n_nodes
+    resolution = max(0.5, min(2.0, avg_degree / 10.0))
+    logger.info(
+        "Auto-resolution: avg_degree=%.2f, resolution=%.3f",
+        avg_degree, resolution,
+    )
+    return resolution
+
+
 def _compute_leiden_communities(
     edges: pd.DataFrame,
     max_cluster_size: int,
@@ -62,14 +86,38 @@ def _compute_leiden_communities(
     edge_df["target"] = hi
     edge_df.drop_duplicates(subset=["source", "target"], keep="last", inplace=True)
 
-#    if use_lcc:
- #       edge_df = stable_lcc(edge_df)
+    if use_lcc:
+        # Validate LCC result is non-empty before proceeding
+        if edge_df.empty:
+            raise ValueError(
+                "Cannot apply LCC filter: edge list is empty"
+            )
+        edge_df_lcc = stable_lcc(edge_df)
+        if edge_df_lcc.empty:
+            logger.warning(
+                "LCC filtering produced an empty graph. "
+                "Falling back to unfiltered graph."
+            )
+        else:
+            edge_df = edge_df_lcc
 
-    weights = (
-        edge_df["weight"].astype(float)
-        if "weight" in edge_df.columns
-        else pd.Series(1.0, index=edge_df.index)
-    )
+    has_weight = "weight" in edge_df.columns
+    weights = edge_df["weight"].astype(float) if has_weight else pd.Series(1.0, index=edge_df.index)
+    # Amplify weight differences: LLM weights cluster near 1.0, so exponentiate
+    # to spread the signal and apply a minimum floor so weak edges aren't dropped.
+    if has_weight:
+        raw_stats = weights.describe()
+        weights = weights.clip(lower=LEIDEN_MIN_WEIGHT)
+        if LEIDEN_WEIGHT_EXPONENT != 1.0:
+            weights = weights ** LEIDEN_WEIGHT_EXPONENT
+        weights = weights.clip(lower=LEIDEN_MIN_WEIGHT)
+        logger.debug(
+            "Edge weights transformed: raw mean=%.3f std=%.3f -> mean=%.3f std=%.3f "
+            "(exp=%.2f, floor=%.3f)",
+            raw_stats["mean"], raw_stats["std"],
+            weights.mean(), weights.std(),
+            LEIDEN_WEIGHT_EXPONENT, LEIDEN_MIN_WEIGHT,
+        )
     edge_list: list[tuple[str, str, float]] = sorted(
         zip(
             edge_df["source"].astype(str),
@@ -79,8 +127,15 @@ def _compute_leiden_communities(
         )
     )
 
+    # Compute Leiden resolution from graph statistics (auto or fixed 1.0).
+    resolution: float = 1.0
+    if LEIDEN_AUTO_RESOLUTION:
+        nodes_set = set(edge_df["source"].astype(str)) | set(edge_df["target"].astype(str))
+        resolution = _compute_auto_resolution(len(nodes_set), len(edge_list))
+
     community_mapping = hierarchical_leiden(
-        edge_list, max_cluster_size=max_cluster_size, random_seed=seed
+        edge_list, max_cluster_size=max_cluster_size, random_seed=seed,
+        resolution=resolution,
     )
     results: dict[int, dict[str, int]] = {}
     hierarchy: dict[int, int] = {}
@@ -100,6 +155,7 @@ def hierarchical_leiden(
     edges: list[tuple[str, str, float]],
     max_cluster_size: int = 10,
     random_seed: int | None = 0xDEADBEEF,
+    resolution: float = 1.0,
 ) -> list[gn.HierarchicalCluster]:
     """Run hierarchical leiden on an edge list."""
     return gn.hierarchical_leiden(
@@ -107,7 +163,7 @@ def hierarchical_leiden(
         max_cluster_size=max_cluster_size,
         seed=random_seed,
         starting_communities=None,
-        resolution=1.0,
+        resolution=resolution,
         randomness=0.001,
         use_modularity=True,
         iterations=1,
@@ -289,15 +345,14 @@ async def create_communities(
     max_cluster_size: int,
     use_lcc: bool,
     seed: int | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Build communities from clustered relationships and stream rows to the table.
+
+    Also computes inter-community edges (edges where source and target entities
+    belong to different communities).
 
     Args
     ----
-        communities_table: Table
-            Output table to write community rows to.
-        entities_table: Table
-            Table containing entity rows.
         relationships: pd.DataFrame
             Relationships DataFrame with source, target, weight,
             text_unit_ids columns.
@@ -310,8 +365,9 @@ async def create_communities(
 
     Returns
     -------
-        list[dict[str, Any]]
-            Sample of up to 5 community rows for logging.
+        tuple[list[dict], list[dict]]
+            (community_rows, inter_community_edges) where inter_community_edges
+            have keys: source_community, target_community, shared_entities, weight, level.
     """
     # clusters содержит список кортежей вида (level, community, parent, [title]), где:
     # - level: уровень иерархии (int)
@@ -324,7 +380,7 @@ async def create_communities(
         use_lcc,
         seed=seed,
     )
-    print(clusters)
+    logger.debug("Clusters: %s", clusters)
 
 
     communities = pd.DataFrame(
@@ -404,6 +460,43 @@ async def create_communities(
         lambda x: sorted(set(x))
     )
 
+    # --- Inter-community edges ---
+    # Compute cross-community edges: edges whose source and target
+    # belong to different communities at the same level.
+    inter_level_results = []
+    for level in communities["level"].unique():
+        level_comms = communities[communities["level"] == level]
+        with_source = relationships.merge(
+            level_comms, left_on="source", right_on="title", how="inner"
+        )
+        with_both = with_source.merge(
+            level_comms, left_on="target", right_on="title", how="inner",
+            suffixes=("_src", "_tgt"),
+        )
+        inter = with_both[with_both["community_src"] != with_both["community_tgt"]]
+        if inter.empty:
+            continue
+        inter_grouped = (
+            inter
+            .groupby(["community_src", "community_tgt"])
+            .agg(
+                shared_entities=("title_src", "count"),
+                total_weight=("weight", "sum") if "weight" in inter.columns else ("title_src", "count"),
+            )
+            .reset_index()
+        )
+        inter_grouped["level"] = level
+        inter_level_results.append(inter_grouped)
+
+    inter_community_edges: list[dict[str, Any]] = []
+    if inter_level_results:
+        inter_all = pd.concat(inter_level_results, ignore_index=True)
+        inter_all = inter_all.rename(columns={
+            "community_src": "source_community",
+            "community_tgt": "target_community",
+            "total_weight": "weight",
+        })
+        inter_community_edges = inter_all.to_dict("records")
 
     # join it all up and add some new fields
     final_communities = all_grouped.merge(entity_ids, on="community", how="inner")
@@ -435,7 +528,7 @@ async def create_communities(
     final_communities["size"] = final_communities.loc[:, "entity_ids"].apply(len)
 
     output = final_communities.loc[:, COMMUNITIES_FINAL_COLUMNS]
-    return [_sanitize_row(row) for row in output.to_dict("records")]
+    return [_sanitize_row(row) for row in output.to_dict("records")], inter_community_edges
 
 
 
@@ -452,3 +545,73 @@ def _sanitize_row(row: dict[str, Any]) -> dict[str, Any]:
         else:
             sanitized[key] = value
     return sanitized
+
+
+async def clastrize_graph(
+    manager: Any,
+    max_cluster_size: int = MAX_CLUSTER_SIZE,
+    document_id: Optional[str] = None,
+) -> Optional[tuple[list, list]]:
+    """Cluster entities into communities, optionally scoped to a single document.
+
+    When `document_id` is provided, only entities linked to that document
+    are clustered and the resulting communities are tagged with `document_id`.
+    When `document_id` is None, all entities in the graph are clustered
+    (backward-compatible global clustering).
+
+    Args:
+        manager: Manager instance with Neo4j connection.
+        max_cluster_size: Maximum cluster size for Leiden.
+        document_id: Optional document to scope clustering to.
+
+    Returns:
+        Tuple of (community_rows, inter_community_edges) or None if
+        no entities were found.
+    """
+    if document_id is not None:
+        # Document-scoped path: fetch only entities belonging to this document
+        relations_df = manager.get_document_entity_relationships(document_id)
+        n_entities = (
+            len(pd.unique(relations_df[["source", "target"]].values.ravel()))
+            if not relations_df.empty
+            else 0
+        )
+        logger.info(
+            "Clustering document %s: found %s entities, %s relationships",
+            document_id,
+            n_entities,
+            len(relations_df),
+        )
+    else:
+        # Global clustering (backward-compatible)
+        relations_df = manager.get_entity_relationships()
+        logger.info("Clustering entire graph")
+
+    if relations_df.empty:
+        logger.warning("No relationships found for clustering")
+        return None
+
+    communities, inter_community_edges = await create_communities(
+        relations_df,
+        max_cluster_size=max_cluster_size,
+        use_lcc=USE_LCC,
+        seed=CLUSTERIZATION_SEED,
+    )
+
+    if document_id is not None:
+        n_clusters = len(communities) if communities else 0
+        logger.info(
+            "Clustering document %s: found %s entities, %s communities, %s inter-edges",
+            document_id,
+            n_entities,
+            n_clusters,
+            len(inter_community_edges),
+        )
+    else:
+        logger.info(
+            "Global clustering: %s communities, %s inter-community edges",
+            len(communities) if communities else 0,
+            len(inter_community_edges),
+        )
+
+    return communities, inter_community_edges

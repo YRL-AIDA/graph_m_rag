@@ -217,6 +217,50 @@ __marimo__/
 
 # MinerU
 mineru/models
+mineru/test/
+
+# ============================================================
+# Project-specific ignores
+# ============================================================
+
+# Virtual environments in project root
+.graph/
+.venv/
+
+# LaTeX build artifacts (keep source .tex, .cls, .png)
+artile/IEEE_Access_LaTeX_template/*.aux
+artile/IEEE_Access_LaTeX_template/*.log
+artile/IEEE_Access_LaTeX_template/*.pdf
+artile/IEEE_Access_LaTeX_template/*.out
+artile/IEEE_Access_LaTeX_template/*.toc
+artile/IEEE_Access_LaTeX_template/*.synctex.gz
+artile/IEEE_Access_LaTeX_template/*.fls
+artile/IEEE_Access_LaTeX_template/*.fdb_latexmk
+artile/IEEE_Access_LaTeX_template/*.bbl
+artile/IEEE_Access_LaTeX_template/*.blg
+artile/IEEE_Access_LaTeX_template/*.dvi
+artile/IEEE_Access_LaTeX_template/*.ps
+
+# Extraction/generation caches
+semantic_graph/data/extraction_cache/
+
+# Test data — large PDF documents used for evaluation
+app/tests/data/
+app/tests/SmallerDataset/documents/
+
+# Generated test results, answers, and evaluation outputs
+app/tests/answers.json
+app/tests/SmallerDataset_answers*.json
+app/tests/MMLongDoc_answers.json
+app/tests/strategy_grid_results/
+app/tests/proceeding_time*.txt
+app/tests/file_hash_comparison.json
+
+# Test dump files
+documet_index/test_file.json
+
+# VS Code workspace settings
+.vscode/
 
 #InteliJ IDE
 

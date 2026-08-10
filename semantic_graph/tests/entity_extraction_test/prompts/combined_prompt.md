@@ -8,8 +8,10 @@ You are a combined Named Entity Recognition and Relation Extraction system. Your
 **Entity types to extract:**
 {entity_types}
 
-**Relation types to extract:**
+**Relation types to extract (with entity type constraints):**
 {relation_types}
+
+**IMPORTANT:** The `TYPE` field for relations must take EXACTLY one of the following values: {allowed_relation_types}
 
 ## Instructions
 
@@ -29,8 +31,9 @@ Where:
 
 ### Part 2 — Relation Extraction
 
-4. Using the entities extracted in Part 1, identify all relations of the specified relation types that exist between pairs of those entities, based on the information in the text.
-5. For each identified relation, output exactly one line in the following format:
+4. Using the entities extracted in Part 1, identify all relations of the specified relation types that exist between pairs of those entities, based on the information in the text. Pay attention to the entity type constraints for each relation type.
+5. If no relation of the specified types exists between a pair of entities, the relation type is "None".
+6. For each identified relation (including "None"), output exactly one line in the following format:
 
 ```
 ("relationship"<|>HEAD_NAME<|>TAIL_NAME<|>TYPE)
@@ -39,14 +42,14 @@ Where:
 Where:
 - `HEAD_NAME` — the name of the head entity in the relation (must match an entity name from Part 1 exactly).
 - `TAIL_NAME` — the name of the tail entity in the relation (must match an entity name from Part 1 exactly).
-- `TYPE` — one of the specified relation types.
+- `TYPE` — one of the values from the allowed list above.
 
 ### Output rules
 
-6. Output entity lines first, then relation lines.
-7. Separate each line (both entity and relation) with `##`.
-8. Output ONLY the formatted lines — no explanations, no commentary, no additional text.
-9. End your entire response with `<|COMPLETE|>`.
+7. Output entity lines first, then relation lines.
+8. Separate each line (both entity and relation) with `##`.
+9. Output ONLY the formatted lines — no explanations, no commentary, no additional text.
+10. End your entire response with `<|COMPLETE|>`.
 
 ## Output format example
 

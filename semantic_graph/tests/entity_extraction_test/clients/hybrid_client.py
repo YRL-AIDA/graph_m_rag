@@ -34,6 +34,12 @@ class HybridClient(BaseModelClient):
         text: str,
         entities: list[PredictedEntity],
         relation_types: list[str],
+        relation_type_descriptions: str | None = None,
+        allowed_relation_types: str | None = None,
     ) -> list[PredictedRelation]:
         """Делегирует извлечение отношений RE-клиенту."""
-        return await self.re_client.extract_relations(text, entities, relation_types)
+        return await self.re_client.extract_relations(
+            text, entities, relation_types,
+            relation_type_descriptions=relation_type_descriptions,
+            allowed_relation_types=allowed_relation_types,
+        )

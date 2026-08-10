@@ -46,6 +46,16 @@ _CONLL04_RELATION_TYPES: list[str] = [
     "Live_In",
     "Kill",
 ]
+
+_CONLL04_RELATION_DESCRIPTIONS: str = (
+    "Work_For: Person -> Organization\n"
+    "Kill: Person -> Person\n"
+    "OrgBased_In: Organization -> Location\n"
+    "Live_In: Person -> Location\n"
+    "Located_In: Location -> Location\n"
+    "None: Если между парой сущностей нет ни одного из вышеперечисленных отношений."
+)
+
 _CONLL04_SPLITS: list[str] = ["train", "validation", "test"]
 
 
@@ -74,6 +84,12 @@ class Conll04Loader(DatasetLoader):
     def relation_types(self) -> list[str]:
         """Типы отношений CoNLL-04: Located_In, Work_For, OrgBased_In, Live_In, Kill."""
         return _CONLL04_RELATION_TYPES
+
+    @property
+    def relation_type_descriptions(self) -> str:
+        """Форматированное описание типов отношений CoNLL-04
+        с указанием entity-типов head и tail + None."""
+        return _CONLL04_RELATION_DESCRIPTIONS
 
     # ------------------------------------------------------------------ #
     #  Splits

@@ -40,6 +40,7 @@ from testdata.base_loader import (  # noqa: E402
     ExperimentResult,
 )
 from testdata.conll04_loader import Conll04Loader  # noqa: E402
+from testdata.ontonotes5_loader import Ontonotes5Loader  # noqa: E402
 from testdata.scierc_loader import SciERCLoader  # noqa: E402
 
 from .config import ExperimentSettings  # noqa: E402
@@ -91,6 +92,8 @@ class ExperimentRunner:
                 self._loaders[dataset_name] = SciERCLoader(
                     data_path=self.settings.scierc_data_path,
                 )
+            elif dataset_name == "ontonotes5":
+                self._loaders[dataset_name] = Ontonotes5Loader()
             else:
                 raise ValueError(f"Неизвестный датасет: {dataset_name}")
         return self._loaders[dataset_name]
@@ -179,6 +182,8 @@ class ExperimentRunner:
         # --- Ограничение количества записей ---
         entity_types = loader.entity_types
         relation_types = loader.relation_types
+        relation_type_descriptions = loader.relation_type_descriptions
+        allowed_relation_types = str(loader.allowed_relation_types)
         limit = (
             min(self.settings.max_samples, len(records))
             if self.settings.max_samples is not None
@@ -225,6 +230,8 @@ class ExperimentRunner:
                         record=r,
                         entity_types=entity_types,
                         relation_types=relation_types,
+                        relation_type_descriptions=relation_type_descriptions,
+                        allowed_relation_types=allowed_relation_types,
                     )
                     for r in batch_records
                 ]
@@ -275,7 +282,7 @@ class ExperimentRunner:
                     continue
 
                 pred_entities, pred_relations, n_time, r_time = result
-                print(record.entities,pred_entities)
+                print(record.entities,record.relations,pred_entities,pred_relations)
                 ner_timings.append(n_time)
                 if r_time is not None:
                     re_timings.append(r_time)
@@ -362,6 +369,8 @@ class ExperimentRunner:
         record: DatasetRecord,
         entity_types: list[str],
         relation_types: list[str],
+        relation_type_descriptions: str = "",
+        allowed_relation_types: str = "",
     ) -> tuple[
         list,  # pred_entities
         list,  # pred_relations
@@ -390,7 +399,9 @@ class ExperimentRunner:
             t0 = time.monotonic()
             try:
                 pred_entities, pred_relations = await ner_client.extract_entities_and_relations(
-                    record.text, entity_types, relation_types
+                    record.text, entity_types, relation_types,
+                    relation_type_descriptions=relation_type_descriptions,
+                    allowed_relation_types=allowed_relation_types,
                 )
             except NotImplementedError:
                 logger.warning(
@@ -448,7 +459,9 @@ class ExperimentRunner:
             t2 = time.monotonic()
             try:
                 pred_relations = await re_client.extract_relations(
-                    record.text, pred_entities, relation_types
+                    record.text, pred_entities, relation_types,
+                    relation_type_descriptions=relation_type_descriptions,
+                    allowed_relation_types=allowed_relation_types,
                 )
             except NotImplementedError:
                 logger.warning(
@@ -734,7 +747,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dataset",
-        choices=["conll04", "scierc"],
+        choices=["conll04", "scierc", "ontonotes5"],
         default=None,
         help="Фильтр по датасету (по умолчанию: все из настроек)",
     )

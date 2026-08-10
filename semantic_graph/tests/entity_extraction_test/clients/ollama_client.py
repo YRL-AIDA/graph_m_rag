@@ -316,6 +316,8 @@ class OllamaClient(BaseModelClient):
         text: str,
         entities: list[PredictedEntity],
         relation_types: list[str],
+        relation_type_descriptions: str | None = None,
+        allowed_relation_types: str | None = None,
     ) -> list[PredictedRelation]:
         """Извлечь отношения между заданными сущностями.
 
@@ -340,7 +342,8 @@ class OllamaClient(BaseModelClient):
         prompt = self._re_prompt.format(
             input_text=text,
             entities_list=entities_list,
-            relation_types=",".join(relation_types),
+            relation_types=relation_type_descriptions or ",".join(relation_types),
+            allowed_relation_types=allowed_relation_types or str(relation_types + ["None"]),
         )
 
         # 3. Вызов LLM через Ollama /api/chat
@@ -431,7 +434,9 @@ class OllamaClient(BaseModelClient):
     # -----------------------------------------------------------------------
 
     async def extract_entities_and_relations(
-        self, text: str, entity_types: list[str], relation_types: list[str]
+        self, text: str, entity_types: list[str], relation_types: list[str],
+        relation_type_descriptions: str | None = None,
+        allowed_relation_types: str | None = None,
     ) -> tuple[list[PredictedEntity], list[PredictedRelation]]:
         """Извлечь сущности и отношения ОДНИМ вызовом LLM (E3 combined_single_call).
 
@@ -448,7 +453,8 @@ class OllamaClient(BaseModelClient):
         prompt = self._combined_prompt.format(
             input_text=text,
             entity_types=",".join(entity_types),
-            relation_types=",".join(relation_types),
+            relation_types=relation_type_descriptions or ",".join(relation_types),
+            allowed_relation_types=allowed_relation_types or str(relation_types + ["None"]),
         )
 
         # 2. Вызов LLM — ОДИН раз

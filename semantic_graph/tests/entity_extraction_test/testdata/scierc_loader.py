@@ -35,6 +35,19 @@ SCIERC_RELATION_TYPES: list[str] = [
     "PART-OF",
 ]
 
+# Форматированное описание типов отношений SciERC + None
+SCIERC_RELATION_DESCRIPTIONS: str = (
+    "USED-FOR: Method/Material -> Task\n"
+    "FEATURE-OF: OtherScientificTerm/Metric -> Method/Task (Свойство или метрика описывает метод или задачу)\n"
+    "HYPONYM-OF: Method/Task -> Method/Task (Первая сущность является подтипом или примером второй)\n"
+    "CONJUNCTION: Any -> Any (Сущности просто перечисляются через 'и'/'или' без строгой семантической связи)\n"
+    "COMPARE: Method/Task -> Method/Task (Сущности сравниваются в тексте)\n"
+    "EVALUATE-FOR: Metric/Method -> Task/Material (Метрика используется для оценки задачи ИЛИ метод оценивается на датасете)\n"
+    "PART-OF: Method/Task -> Method/Task (Первая сущность является компонентом второй)\n"
+    "None: Если между парой сущностей нет ни одного из вышеперечисленных отношений"
+)
+
+
 # Маппинг имени сплита → имя JSON-файла
 SPLIT_FILE_MAP: dict[str, str] = {
     "train": "train.json",
@@ -86,6 +99,11 @@ class SciERCLoader(DatasetLoader):
     def relation_types(self) -> list[str]:
         """Фиксированный список типов отношений SciERC (7 типов)."""
         return self._relation_types
+
+    @property
+    def relation_type_descriptions(self) -> str:
+        """Форматированное описание типов отношений SciERC + None."""
+        return SCIERC_RELATION_DESCRIPTIONS
 
     # ------------------------------------------------------------------
     # Public API (ABC DatasetLoader)

@@ -15,16 +15,18 @@ class ExperimentSettings(BaseSettings):
     Переменные окружения с префиксом ``EXPERIMENT_`` переопределяют любое поле.
     """
 
-    #qwen_base_url: str = "http://192.168.19.127:8888/v1"
-    #qwen_api_key: str = "EMPTY"
-    #qwen_model: str = "Qwen/Qwen3-VL-32B-Thinking"
     qwen_base_url: str = "http://192.168.19.127:8888/v1"
     qwen_api_key: str = "EMPTY"
     qwen_model: str = "Qwen/Qwen3-VL-32B-Thinking"
+    #qwen_base_url: str = "http://192.168.19.127:9886/v1"
+    #qwen_api_key: str = "EMPTY"
+    #qwen_model: str = "Qwen/Qwen3-4B-Instruct-2507" #"Qwen/Qwen3-VL-32B-Thinking"
     uniner_base_url: str = "http://192.168.19.127:9898/v1"
 
-    gliner_base_url: str = "http://192.168.19.127:9596/v1"
+    #gliner_base_url: str = 'http://localhost:9596/v1'#
+    gliner_base_url: str ="http://192.168.19.127:9596/v1"
     gliner_api_key: str = "EMPTY"
+    #gliner_model: str = "/home/ivan/work/ooo/train/GLiNER/models/checkpoint-10000"
     gliner_model: str = "gliner-community/gliner_small-v2.5"
 
     ollama_base_url: str = "http://192.168.55.242:7869"
@@ -39,11 +41,11 @@ class ExperimentSettings(BaseSettings):
     prompts_dir: str = str(Path(__file__).parent.parent / "prompts")
     results_dir: str = str(Path(__file__).parent.parent / "results")
 
-    datasets: list[str] = ["conll04", "scierc"]
+    datasets: list[str] = ["conll04", "scierc", "ontonotes5"]
     splits: list[str] = ["test"]
     max_samples: int | None = None
 
-    batch_size: int = 5
+    batch_size: int = 16
     """Размер батча (записей, обрабатываемых параллельно). 1 = последовательно (как сейчас)."""
 
     max_concurrent_batches: int = 2

@@ -114,6 +114,22 @@ class DatasetLoader(ABC):
         """Возвращает список типов отношений для датасета."""
         ...
 
+    @property
+    @abstractmethod
+    def relation_type_descriptions(self) -> str:
+        """Возвращает форматированное описание типов отношений с указанием
+        entity-типов head и tail (например, "Work_For: Person -> Organization")
+        плюс описание None-отношения."""
+        ...
+
+    @property
+    def allowed_relation_types(self) -> list[str]:
+        """relation_types + ["None"] — полный список допустимых значений TYPE
+        для подстановки в промпт. None используется в промпте, но игнорируется
+        при подсчёте метрик."""
+        return self.relation_types + ["None"]
+
+
     @abstractmethod
     def load(self, split: str) -> list[DatasetRecord]:
         """Загружает и нормализует указанный сплит датасета."""

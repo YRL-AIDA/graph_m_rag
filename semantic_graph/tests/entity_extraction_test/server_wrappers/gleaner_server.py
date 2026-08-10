@@ -31,7 +31,7 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     """Тело запроса ``POST /v1/chat/completions``."""
     messages: list[ChatMessage]
-    model: str = "gliner-community/gliner_small-v2.5"
+    model: str = "/home/ivan/work/ooo/train/GLiNER/models/checkpoint-10000"
 
 class Choice(BaseModel):
     """Вариант ответа."""
@@ -104,7 +104,7 @@ def _build_response(model: str, entities: list[dict[str, str]]) -> ChatCompletio
 async def lifespan(app: FastAPI):
     """Загружает модель при старте, освобождает ресурсы при остановке."""
     global _model, _model_name
-    _model_name = os.getenv("GLINER_MODEL_NAME", "gliner-community/gliner_small-v2.5")
+    _model_name = os.getenv("GLINER_MODEL_NAME", "/home/ivan/work/ooo/train/GLiNER/models/checkpoint-10000")
     logger.info("Загрузка модели GLiNER: %s", _model_name)
     try:
         from gliner import GLiNER  # noqa: PLC0415 — отложенный импорт

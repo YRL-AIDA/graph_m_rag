@@ -78,7 +78,7 @@ class MMRSettings(BaseSettings):
     """MMR (Maximal Marginal Relevance) configuration for context reranking."""
     USE_MMR_RERANKING: bool = Field(default=True, description="Enable MMR diversity reranking for context blocks")
     MMR_LAMBDA: float = Field(default=0.7, description="Relevance vs diversity tradeoff (1.0 = pure relevance, 0.0 = pure diversity)")
-    MMR_TOP_K: int = Field(default=20, description="Maximum number of context blocks to keep after MMR")
+    MMR_TOP_K: int = Field(default=30, description="Maximum number of context blocks to keep after MMR")
     MMR_MIN_RELEVANCE: float = Field(default=0.0, description="Minimum relevance score for a context block to be considered")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

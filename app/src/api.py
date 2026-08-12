@@ -1463,6 +1463,8 @@ async def ask_document(request: QuestionRequest,
         logger.info(f"Document {file_hash} successfully indexed in collection '{actual_collection_name}'")
 
     try:
+        server_start = time.time()
+
         # C6: Multi-hop question decomposition — break complex questions
         # into sub-questions and search each independently.
         # Controlled by request flag OR global settings flag.
@@ -1502,12 +1504,14 @@ async def ask_document(request: QuestionRequest,
         )
 
         # Search for relevant chunks (retrieve more candidates for reranking)
+        # Phase 2: aggressive retrieval — 5x multiplier + floor of 50-60
+        # to reduce false N/A caused by missing relevant chunks at the retrieval stage.
+        # Reranker / MMR will later filter to the final top-k.
         rerank_top_n = settings.reranker.RERANKER_TOP_N if hasattr(settings.reranker, 'RERANKER_TOP_N') else limit
         if use_reranker:
-            search_limit = max(limit * 4, rerank_top_n)  # Get 4x candidates for reranking
+            search_limit = max(limit * 5, rerank_top_n)
         else:
-            # Phase 2: more aggressive retrieval — retrieve 3x to reduce false N/A
-            search_limit = max(limit * 3, 15)
+            search_limit = max(limit * 5, 50)
 
         # --- Run search (multi-query if decomposed, single otherwise) ---
         if sub_questions and len(sub_questions) > 1:
@@ -1820,17 +1824,17 @@ async def ask_document(request: QuestionRequest,
                     messages=documents_to_rerank
                 )
 
-                # Reorder answers based on reranker scores
+                # Reorder answers based on reranker scores — take top `limit` results
+                rerank_messages = sorted(
+                    rerank_result.messages, reverse=True, key=lambda x: x.score
+                )
                 reranked_answers = []
-                rerank_messages = sorted(rerank_result.messages, reverse=True, key=lambda x: x.score)
-
-                for res in rerank_messages:
-                    if 0 <= res.message_id < limit:
-                        answer_copy = answers[res.message_id].copy()
-                        answer_copy["reranker_score"] = res.score
-                        answer_copy["original_score"] = answer_copy["score"]
-                        answer_copy["score"] = res.score  # Use reranker score as primary
-                        reranked_answers.append(answer_copy)
+                for res in rerank_messages[:limit]:
+                    answer_copy = answers[res.message_id].copy()
+                    answer_copy["reranker_score"] = res.score
+                    answer_copy["original_score"] = answer_copy["score"]
+                    answer_copy["score"] = res.score  # Use reranker score as primary
+                    reranked_answers.append(answer_copy)
 
                 answers = reranked_answers
                 logger.info(f"Reranking applied: {len(answers)} results reordered")
@@ -1906,6 +1910,9 @@ async def ask_document(request: QuestionRequest,
                     logger.debug("Not enough items with embeddings for MMR reranking")
             except Exception as e:
                 logger.warning("MMR reranking failed: %s. Using original results.", e)
+
+        # Server-side timing checkpoint — end of search/rerank phase
+        search_end = time.time()
 
         # Generate LLM answer if requested
         llm_answer = None
@@ -2580,7 +2587,33 @@ ANSWER RULES:
 7. Always answer in ENGLISH regardless of the question language
 8. Pay attention to confidence ratings in communities — higher rating means more reliable findings
 {format_hint}
-9. Format: start your response with the direct answer value on its own line"""
+9. Format: start your response with the tag [FINAL_ANSWER]: followed by the direct answer value on its own line. Then optionally add supporting reasoning on subsequent lines.
+
+NUMERICAL ACCURACY RULES:
+10. When extracting numbers from tables, ALWAYS double-check the row AND column labels. The number must correspond to the EXACT intersection of the question's row and column. For example, if asked "What was Revenue in FY2023?", find the row labeled "Revenue" (or its equivalent) AND the column labeled "FY2023" — then report the value at their intersection.
+11. Report the EXACT number as it appears in the context. Do not round, approximate, or convert units unless the question explicitly asks for it. If the table says "17,564", report "17564" (for Int) or vice versa as appropriate.
+12. Before finalizing a numerical answer, scan the surrounding context for another occurrence of the same metric — if two numbers differ significantly (e.g., more than 20% apart), state the discrepancy and report the one that best matches the question's scope.
+13. For financial documents: pay close attention to whether a number is in millions, billions, or raw units. Check table headers and footnotes for units and multipliers.
+
+FEW-SHOT EXAMPLES (numerical extraction from tables):
+
+Example 1 — Financial table row/column identification:
+Context: "Table: Revenue by Year (in millions). Row 'Total Revenue', Columns: 'FY2021'=18078, 'FY2022'=19500, 'FY2023'=21000"
+Question: "What was the total revenue COSTCO FY2021?"
+Correct answer: 18078
+Why: Row='Total Revenue', Column='FY2021', cell value=18078. Not FY2022 or FY2023.
+
+Example 2 — Avoiding row confusion in financial statements:
+Context: "Balance Sheet Data. Row 'Common Equity', FY2021 column shows 18078. Row 'Long-term Debt', FY2021 column shows 10314."
+Question: "Common equity COSTCO FY2021"
+Correct answer: 18078
+Why: Identified row 'Common Equity' (not 'Long-term Debt'), column 'FY2021', value=18078. The number 10314 belongs to a DIFFERENT row — do not report it.
+
+Example 3 — Percentage and ratio values:
+Context: "Financial Ratios table: 'Total debt to total assets' = 0.192 (19.2%). 'Current ratio' = 0.1264."
+Question: "What is the total debt to total assets ratio?"
+Correct answer: 0.192
+Why: Row 'Total debt to total assets' has value 0.192, NOT 0.1264 (which is 'Current ratio' — a completely different metric)."""
 
                 system_message = ModelMessageDict(role='system')
                 system_message.add_text_content(system_prompt)
@@ -2602,13 +2635,19 @@ ANSWER RULES:
                 # ===== END LOG =====
 
                 # Call LLM (skip if iterative retrieval already produced an answer)
+                enrichment_end = generation_start = generation_end = time.time()
                 if not iterative_used:
+                    # Server-side timing — end of enrichment/context assembly
+                    enrichment_end = time.time()
+                    generation_start = time.time()
+
                     success, llm_responses = llm_client.send_message(
                         messages=[system_message, user_message],
                         max_tokens=4096,
                         temperature=0.1,
                         top_p=0.95
                     )
+                    generation_end = time.time()
 
                     if success and llm_responses:
                         llm_answer = llm_responses[0]
@@ -2664,7 +2703,16 @@ ANSWER RULES:
             indexed=is_indexed,
             collection_name=actual_collection_name,
             llm_answer=llm_answer,
-            context_blocks=context_parts if use_llm else None
+            context_blocks=context_parts if use_llm else None,
+            response_metadata={
+                "search_ms": round((search_end - server_start) * 1000),
+                "enrichment_ms": round((enrichment_end - search_end) * 1000),
+                "llm_generation_ms": round((generation_end - generation_start) * 1000),
+                "total_ms": round((generation_end - server_start) * 1000),
+            } if use_llm and answers else {
+                "search_ms": round((search_end - server_start) * 1000),
+                "total_ms": round((search_end - server_start) * 1000),
+            }
         )
 
     except Exception as e:
@@ -3530,3 +3578,4 @@ def run_api(
 
 if __name__ == "__main__":
     run_api()
+

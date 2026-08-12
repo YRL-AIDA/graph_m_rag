@@ -38,6 +38,7 @@ class QuestionRequest(BaseModel):
     mmr_min_relevance: float = 0.0  # MMR minimum relevance threshold
     use_semantic_graph: bool = False  # Option to enrich context with Entity and Community nodes from semantic graph
     use_structured_graph: bool = False  # Option to enrich context with structural graph neighbours (ORDER walk + cross-graph bridge)
+    use_structural_parent_only: bool = False  # When use_structured_graph=True: only walk PARENT edges (skip ORDER neighbours)
     use_iterative_search: bool = False  # Option to use iterative (feedback-driven) retrieval for multi-hop questions
     use_question_decomposition: bool = False  # Option to decompose complex questions into sub-questions
     answer_format: Optional[str] = None  # Expected answer format: 'Int', 'Float', 'List', 'Str', 'None'
@@ -54,6 +55,11 @@ class QuestionResponse(BaseModel):
     collection_name: Optional[str] = None  # Collection name used
     llm_answer: Optional[str] = None  # LLM-generated answer if use_llm is True
     context_blocks: Optional[List[str]] = None  # All context blocks sent to LLM
+    response_metadata: Optional[Dict[str, Any]] = None  # Server-side timing breakdown:
+    #   search_ms          — Qdrant search time
+    #   enrichment_ms      — Neo4j + semantic graph enrichment + context building
+    #   llm_generation_ms  — LLM call time
+    #   total_ms           — server-side total (excludes network serialisation)
 class UploadedFileInfo(BaseModel):
     """Model for uploaded file information"""
     file_hash: str

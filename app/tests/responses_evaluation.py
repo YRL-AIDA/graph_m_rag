@@ -34,7 +34,10 @@ if __name__=='__main__':
         else:
 
             try:
-                pred_ans = extracted_res.split("Answer format:")[0].split("Extracted answer:")[1].strip()
+                # rsplit to find the LAST "Extracted answer:" to avoid
+                # picking up template placeholders like "[answer]"
+                after_extracted = extracted_res.rsplit("Extracted answer:", 1)[-1]
+                pred_ans = after_extracted.split("Answer format:")[0].strip()
                 score = eval_score(sample["answer"], pred_ans, sample["answer_format"])
             except:
                 pred_ans = "Failed to extract"

@@ -252,7 +252,8 @@ app/tests/SmallerDataset/documents/
 app/tests/answers.json
 app/tests/SmallerDataset_answers*.json
 app/tests/MMLongDoc_answers.json
-app/tests/strategy_grid_results/
+app/tests/strategy_grid_results_partial_third/
+app/tests/strategy_grid_results_first/
 app/tests/proceeding_time*.txt
 app/tests/file_hash_comparison.json
 

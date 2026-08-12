@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Strategy Grid Test — exhaustive evaluation of all retrieval / context / generation
-combinations on the SmallerDataset.
+Strategy Grid Test — runs all retrieval / context / generation
+combinations on the SmallerDataset and saves raw results.
+
+This is a TEST RUNNER only — it does NOT evaluate results.
+Evaluation is handled by the separate evaluate_strategies.py script.
 
 Usage:
     python app/tests/strategy_grid_test.py
     python app/tests/strategy_grid_test.py --list-strategies
     python app/tests/strategy_grid_test.py --base-url http://host:9191
-
-The script hits the /ask-document API with every strategy combination,
-saves per-strategy results, evaluates them, and produces a visual HTML report.
+    python app/tests/strategy_grid_test.py --strategies baseline,reranker
 
 Strategies grid (3 dimensions):
   - Retrieval:   none | reranker | mmr_lambda0.5 | mmr_lambda0.7 | mmr_lambda0.9
@@ -18,6 +19,7 @@ Strategies grid (3 dimensions):
 
 Total: 5 x 4 x 3 = 60 combinations  (subset to 20 most meaningful by default)
 """
+
 from __future__ import annotations
 
 import json
@@ -30,12 +32,40 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from evaluate_strategies import SORT_KEYS, SORT_BY_CHOICES  # type: ignore[import]
 
-# --- Strategy Definitions ---------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Answer extraction (optional, mirrors smallerdataset_eval_via_api.py)
+# ---------------------------------------------------------------------------
+
+def extract_answer_qwen_api(question: str, output: str, prompt: str) -> str:
+    """Extract short answer from LLM output using custom Qwen API."""
+    try:
+        import utils.qwen_qa_utils as custom_qwen  # type: ignore[import]
+    except ImportError:
+        return "Failed to extract"
+
+    tt = custom_qwen.ModelMessageDict()
+    tt.add_text_content(prompt)
+    answer = f"Question: {question}\nAnalysis:{output}"
+    tt.add_text_content(answer)
+    result = custom_qwen.send_messasge(
+        messages=[tt], base_url=os.environ.get(
+            'QWEN_EXTRACT_URL', 'http://192.168.19.127:8888/v1'
+        )
+    )
+    return result[1][0]
+
+
+# ---------------------------------------------------------------------------
+# Strategy Definitions
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Strategy:
     """A single strategy configuration for the ask-document endpoint."""
+
     name: str           # short identifier, e.g. "baseline"
     label: str          # human-readable, e.g. "Baseline (Qdrant + LLM)"
     use_reranker: bool = False
@@ -44,11 +74,12 @@ class Strategy:
     mmr_min_relevance: float = 0.0
     use_semantic_graph: bool = False
     use_structured_graph: bool = False
+    use_structural_parent_only: bool = False
     use_iterative_search: bool = False
     use_question_decomposition: bool = False
 
     def to_payload(self, file_hash: str, question: str,
-                   limit: int = 10) -> dict:
+                   limit: int = 30) -> dict:
         """Build the JSON payload for /ask-document."""
         return {
             "file_hash": file_hash,
@@ -61,74 +92,100 @@ class Strategy:
             "mmr_min_relevance": self.mmr_min_relevance,
             "use_semantic_graph": self.use_semantic_graph,
             "use_structured_graph": self.use_structured_graph,
+            "use_structural_parent_only": self.use_structural_parent_only,
             "use_iterative_search": self.use_iterative_search,
             "use_question_decomposition": self.use_question_decomposition,
         }
 
+    def flags_summary(self) -> List[str]:
+        """Human-readable list of active flags for this strategy."""
+        flags: List[str] = []
+        if self.use_reranker:
+            flags.append("reranker")
+        if self.use_mmr_reranker:
+            flags.append(f"mmr(λ={self.mmr_lambda})")
+        if self.use_semantic_graph:
+            flags.append("semantic")
+        if self.use_structured_graph:
+            if self.use_structural_parent_only:
+                flags.append("structural(parent-only)")
+            else:
+                flags.append("structural")
+        if self.use_iterative_search:
+            flags.append("iterative")
+        if self.use_question_decomposition:
+            flags.append("decompose")
+        return flags if flags else ["baseline"]
+
+
+# --- Strategy definitions: 20 combinations from strategy_reference.md ---
 
 STRATEGIES: List[Strategy] = [
-    # --- Baseline ---
+
+    # ----- Baseline -----
     Strategy("baseline", "Baseline (Qdrant + LLM)"),
 
-    # --- Retrieval variants ---
+    # ----- Retrieval variants -----
     Strategy("reranker", "Reranker",
              use_reranker=True),
-    Strategy("mmr_07", "MMR (lambda=0.7)",
+    Strategy("mmr_07", "MMR (λ=0.7)",
              use_mmr_reranker=True, mmr_lambda=0.7),
-    Strategy("mmr_05", "MMR (lambda=0.5)",
+    Strategy("mmr_05", "MMR (λ=0.5)",
              use_mmr_reranker=True, mmr_lambda=0.5),
-    Strategy("mmr_09", "MMR (lambda=0.9)",
+    Strategy("mmr_09", "MMR (λ=0.9)",
              use_mmr_reranker=True, mmr_lambda=0.9),
 
-    # --- Context enrichment ---
+    # ----- Single-graph context enrichment -----
     Strategy("semantic", "Semantic Graph",
              use_semantic_graph=True),
-    Strategy("structural", "Structural Graph",
+    Strategy("structural", "Structural Graph (ORDER + Parent)",
              use_structured_graph=True),
-    Strategy("both_graphs", "Semantic + Structural",
-             use_semantic_graph=True, use_structured_graph=True),
+    Strategy("structural_parent_only", "Structural Graph (Parent Only)",
+             use_structured_graph=True, use_structural_parent_only=True),
 
-    # --- Context + Reranker ---
-    Strategy("both_reranker", "Both Graphs + Reranker",
-             use_semantic_graph=True, use_structured_graph=True,
-             use_reranker=True),
-    Strategy("both_mmr07", "Both Graphs + MMR lambda=0.7",
-             use_semantic_graph=True, use_structured_graph=True,
-             use_mmr_reranker=True, mmr_lambda=0.7),
+    # ----- Single-graph + Reranker -----
     Strategy("semantic_reranker", "Semantic + Reranker",
              use_semantic_graph=True, use_reranker=True),
     Strategy("structural_reranker", "Structural + Reranker",
              use_structured_graph=True, use_reranker=True),
 
-    # --- Question processing ---
+    # ----- Query processing variants -----
     Strategy("decompose", "Question Decomposition",
-             use_question_decomposition=True,
-             use_semantic_graph=True, use_structured_graph=True),
+             use_semantic_graph=True, use_structured_graph=True,
+             use_question_decomposition=True),
     Strategy("iterative", "Iterative Search",
-             use_iterative_search=True,
-             use_semantic_graph=True, use_structured_graph=True),
+             use_semantic_graph=True, use_structured_graph=True,
+             use_iterative_search=True),
 
-    # --- Full system ---
+    # ----- Dual-graph (activates BFS Crawler C10) -----
+    Strategy("both_graphs", "Semantic + Structural",
+             use_semantic_graph=True, use_structured_graph=True),
+    Strategy("both_reranker", "Both Graphs + Reranker",
+             use_semantic_graph=True, use_structured_graph=True,
+             use_reranker=True),
+    Strategy("both_mmr07", "Both Graphs + MMR λ=0.7",
+             use_semantic_graph=True, use_structured_graph=True,
+             use_mmr_reranker=True, mmr_lambda=0.7),
+
+    # ----- Full system variants -----
     Strategy("full_system", "Full System (All)",
              use_reranker=True,
              use_semantic_graph=True, use_structured_graph=True,
              use_iterative_search=True),
-
-    # --- Full + MMR variants ---
-    Strategy("full_mmr07", "Full + MMR lambda=0.7",
+    Strategy("full_mmr07", "Full + MMR λ=0.7",
              use_mmr_reranker=True, mmr_lambda=0.7,
              use_semantic_graph=True, use_structured_graph=True,
              use_iterative_search=True),
-    Strategy("full_mmr05", "Full + MMR lambda=0.5",
+    Strategy("full_mmr05", "Full + MMR λ=0.5",
              use_mmr_reranker=True, mmr_lambda=0.5,
              use_semantic_graph=True, use_structured_graph=True,
              use_iterative_search=True),
-    Strategy("full_mmr09", "Full + MMR lambda=0.9",
+    Strategy("full_mmr09", "Full + MMR λ=0.9",
              use_mmr_reranker=True, mmr_lambda=0.9,
              use_semantic_graph=True, use_structured_graph=True,
              use_iterative_search=True),
 
-    # --- Graph-only + iterative ---
+    # ----- Graph-only + Iterative -----
     Strategy("semantic_iterative", "Semantic + Iterative",
              use_semantic_graph=True, use_iterative_search=True),
     Strategy("structural_iterative", "Structural + Iterative",
@@ -136,8 +193,9 @@ STRATEGIES: List[Strategy] = [
 ]
 
 
-# --- Helpers ----------------------------------------------------------------
-
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def read_json(filename: str) -> Any:
     """Load a JSON file."""
@@ -150,14 +208,67 @@ def ask_document(base_url: str, strategy: Strategy,
                  limit: int = 10, timeout: int = 300) -> Dict[str, Any]:
     """Call /ask-document with the given strategy."""
     payload = strategy.to_payload(file_hash, question, limit)
-    url = f"{base_url.rstrip('/')}/ask-document"
+
+    # Send all graph/processing flags as query params so FastAPI picks
+    # them up directly (API uses OR-logic: query_param OR body_field).
+    query_params = {
+        "use_semantic_graph": str(strategy.use_semantic_graph).lower(),
+        "use_structured_graph": str(strategy.use_structured_graph).lower(),
+        "use_structural_parent_only": str(strategy.use_structural_parent_only).lower(),
+        "use_iterative_search": str(strategy.use_iterative_search).lower(),
+        "use_question_decomposition": str(strategy.use_question_decomposition).lower(),
+    }
+    qs = "&".join(f"{k}={v}" for k, v in query_params.items())
+    url = f"{base_url.rstrip('/')}/ask-document?{qs}"
     resp = requests.post(url, json=payload, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
 
-# --- Main grid test ---------------------------------------------------------
+def _build_result_entry(
+    doc_id: str,
+    question: str,
+    correct_answer: str,
+    result: Dict[str, Any],
+    file_hash: str,
+    model_answer_time: float,
+    model_extract_time: float,
+    extracted_res: Optional[str],
+) -> dict:
+    """Build a single result entry dict from an API response."""
+    answers = result.get("answers", [])
+    retrieves = []
+    for elem in answers:
+        retrieves.append({
+            "qdrant_id": elem.get("element_index", 0),
+            "type": elem.get("element_type", "unknown"),
+            "file_hash": file_hash,
+            "content": elem.get("text", ""),
+            "page_idx": elem.get("page_idx", 0),
+            "score": elem.get("score", 0),
+        })
 
+    return {
+        "doc_id": doc_id,
+        "question": question,
+        "answer": correct_answer,
+        "file_hash": file_hash,
+        "response": result.get("llm_answer", ""),
+        "llm_answer": result.get("llm_answer", ""),
+        "extracted_res": extracted_res,
+        "retrieves": retrieves,
+        "context_blocks": result.get("context_blocks", []),
+        "status": "completed",
+        "elapsed": round(model_answer_time, 2),
+        "answers_count": len(answers),
+        "model_answer_time": round(model_answer_time, 2),
+        "model_extract_time": round(model_extract_time, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main test runner
+# ---------------------------------------------------------------------------
 
 def run_grid_test(
     base_url: str = "http://0.0.0.0:9191",
@@ -165,10 +276,38 @@ def run_grid_test(
     file_hash_map_path: str = "",
     output_dir: str = "",
     limit: int = 10,
+    strategy_filter: Optional[List[str]] = None,
+    skip_extraction: bool = False,
+    sort_reference: str = "",
+    sort_by: str = "accuracy",
 ):
-    """Run all strategies against the SmallerDataset and save results."""
+    """Run all (or filtered) strategies against the SmallerDataset.
 
-    # Resolve paths
+    Parameters
+    ----------
+    base_url : str
+        Base URL of the API server.
+    dataset_path : str
+        Path to SmallerDataset samples.json.
+    file_hash_map_path : str
+        Path to file_hash_comparison.json (maps doc_id → file_hash).
+    output_dir : str
+        Directory for per-strategy JSON result files.
+    limit : int
+        Max Qdrant results per query.
+    strategy_filter : list of str or None
+        If provided, only run strategies whose `name` is in this list.
+    skip_extraction : bool
+        If True, skip the Qwen answer-extraction step.
+    sort_reference : str
+        Path to a strategy_summary.json from a previous evaluation.
+        If provided, strategies are reordered by the metric in sort_by
+        (highest first), so the most promising strategies run first.
+    sort_by : str
+        Metric to sort strategies by when sort_reference is provided.
+        One of: accuracy, f1, avg_score, avg_elapsed, priority.
+    """
+    # --- Resolve paths ---
     script_dir = Path(__file__).resolve().parent
     if not dataset_path:
         dataset_path = str(script_dir / "SmallerDataset" / "samples.json")
@@ -178,59 +317,96 @@ def run_grid_test(
         output_dir = str(script_dir / "strategy_grid_results")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load dataset
+    # --- Load dataset ---
     hash_map = read_json(file_hash_map_path)
     dataset = read_json(dataset_path)
 
-    # Load extraction prompt (optional, for evaluation)
-    extract_prompt_path = script_dir / "MMLongDocEval" / \
-        "prompt_for_answer_extraction.md"
+    # --- Load extraction prompt (optional) ---
+    extract_prompt_path = (
+        script_dir / "MMLongDocEval" / "prompt_for_answer_extraction.md"
+    )
     extract_prompt = ""
-    if extract_prompt_path.exists():
+    if not skip_extraction and extract_prompt_path.exists():
         extract_prompt = extract_prompt_path.read_text(encoding="utf-8")
 
-    print(f"Dataset: {len(dataset)} questions")
-    print(f"Strategies: {len(STRATEGIES)}")
-    print(f"Output: {output_dir}")
+    # --- Filter strategies ---
+    selected = STRATEGIES
+    if strategy_filter:
+        filter_set = set(strategy_filter)
+        selected = [s for s in STRATEGIES if s.name in filter_set]
+        if not selected:
+            print(f"ERROR: no strategies matched filter {strategy_filter}")
+            sys.exit(1)
+        missing = filter_set - {s.name for s in selected}
+        if missing:
+            print(f"WARNING: unknown strategy names: {missing}")
+
+    # --- Optional: reorder strategies by reference metrics ---
+    if sort_reference and os.path.exists(sort_reference):
+        ref_data = read_json(sort_reference)
+        name_to_metric: Dict[str, dict] = {
+            m["name"]: m for m in ref_data if isinstance(m, dict)
+        }
+        key_fn = SORT_KEYS.get(sort_by, SORT_KEYS["accuracy"])
+        selected = sorted(
+            selected,
+            key=lambda s: key_fn(name_to_metric.get(s.name, {})),
+            reverse=True,
+        )
+        print(
+            f"Reordered {len(selected)} strategies by '{sort_by}' "
+            f"from {sort_reference}"
+        )
+        # Print order for visibility
+        for i, s in enumerate(selected):
+            metrics = name_to_metric.get(s.name, {})
+            acc = metrics.get("accuracy", "?")
+            f1_val = metrics.get("f1", "?")
+            t = metrics.get("avg_elapsed", "?")
+            print(
+                f"  {i + 1:2d}. {s.name:25s} "
+                f"acc={acc}% f1={f1_val} time={t}s"
+            )
+        print()
+
+    # --- Header ---
+    print(f"Dataset:     {len(dataset)} questions")
+    print(f"Strategies:  {len(selected)} of {len(STRATEGIES)} total")
+    if strategy_filter:
+        print(f"Filter:      {strategy_filter}")
+    print(f"Output:      {output_dir}")
+    print(f"Extraction:  {'enabled' if extract_prompt else 'skipped'}")
     print("=" * 70)
 
     all_strategy_results: Dict[str, List[dict]] = {}
 
-    for si, strategy in enumerate(STRATEGIES):
-        strategy_label = (
-            f"[{si + 1}/{len(STRATEGIES)}] {strategy.label}"
-        )
+    for si, strategy in enumerate(selected):
         print(f"\n{'=' * 70}")
-        print(f"  {strategy_label}")
+        print(f"  [{si + 1}/{len(selected)}] {strategy.label}")
+        print(f"  Flags: {', '.join(strategy.flags_summary())}")
         print(f"{'=' * 70}")
 
         strategy_results: List[dict] = []
         strategy_output = os.path.join(output_dir, f"{strategy.name}.json")
 
-        # Resume from partial if exists
+        # Resume from partial results if present
         if os.path.exists(strategy_output):
             strategy_results = read_json(strategy_output)
-            print(
-                f"  Resuming from {len(strategy_results)} already processed"
-            )
+            print(f"  Resuming from {len(strategy_results)} already processed")
 
         for qi, case in enumerate(dataset):
-            already = (
-                qi < len(strategy_results)
-                and strategy_results[qi].get("llm_answer")
-            )
-            if already:
-                continue  # already processed
+            # Skip if already processed (check qi index and llm_answer)
+            if (qi < len(strategy_results)
+                    and strategy_results[qi].get("llm_answer")):
+                continue
 
             doc_id = case.get("doc_id", "")
             question = case.get("question", "")
             correct_answer = case.get("answer", "")
 
             if doc_id not in hash_map:
-                print(
-                    f"  [{qi}/{len(dataset)}] SKIP: {doc_id} "
-                    f"not in hash map"
-                )
+                print(f"  [{qi}/{len(dataset)}] SKIP: {doc_id} "
+                      f"not in hash map")
                 strategy_results.append({
                     "doc_id": doc_id,
                     "question": question,
@@ -246,27 +422,44 @@ def run_grid_test(
                 result = ask_document(
                     base_url, strategy, file_hash, question, limit,
                 )
-                elapsed = time.time() - start
+                model_answer_time = time.time() - start
 
                 llm_answer = result.get("llm_answer", "")
-                answers_count = len(result.get("answers", []))
 
-                strategy_results.append({
-                    "doc_id": doc_id,
-                    "question": question,
-                    "answer": correct_answer,
-                    "file_hash": file_hash,
-                    "llm_answer": llm_answer,
-                    "retrieves": result.get("answers", []),
-                    "context_blocks": result.get("context_blocks", []),
-                    "status": "completed",
-                    "elapsed": round(elapsed, 2),
-                    "answers_count": answers_count,
-                })
+                # --- Optional: Extract short answer via Qwen API ---
+                extract_start = time.time()
+                extracted_res = None
+                if llm_answer and extract_prompt and not skip_extraction:
+                    try:
+                        extracted_res = extract_answer_qwen_api(
+                            question, llm_answer, extract_prompt,
+                        )
+                    except Exception as exc:
+                        print(f"    Extraction failed: {exc}")
+                        extracted_res = "Failed to extract"
+                model_extract_time = time.time() - extract_start
+
+                entry = _build_result_entry(
+                    doc_id=doc_id,
+                    question=question,
+                    correct_answer=correct_answer,
+                    result=result,
+                    file_hash=file_hash,
+                    model_answer_time=model_answer_time,
+                    model_extract_time=model_extract_time,
+                    extracted_res=extracted_res,
+                )
+                strategy_results.append(entry)
+
+                answers_count = entry["answers_count"]
                 print(
-                    f"  [{qi}/{len(dataset)}] OK ({elapsed:.1f}s) - "
+                    f"  [{qi}/{len(dataset)}] OK "
+                    f"(answer: {model_answer_time:.1f}s, "
+                    f"extract: {model_extract_time:.1f}s) - "
                     f"{len(llm_answer)} chars, {answers_count} retrieves"
                 )
+                if extracted_res:
+                    print(f">>> Extracted answer:\n{extracted_res}\n")
 
             except Exception as exc:
                 elapsed = time.time() - start
@@ -282,286 +475,62 @@ def run_grid_test(
             # Save checkpoint every 10 questions
             if (qi + 1) % 10 == 0:
                 with open(strategy_output, "w", encoding="utf-8") as f:
-                    json.dump(
-                        strategy_results, f, ensure_ascii=False, indent=2,
-                    )
+                    json.dump(strategy_results, f, ensure_ascii=False,
+                              indent=2)
 
-        # Final save
+        # --- Final save for this strategy ---
         with open(strategy_output, "w", encoding="utf-8") as f:
             json.dump(strategy_results, f, ensure_ascii=False, indent=2)
 
         all_strategy_results[strategy.name] = strategy_results
-        print(
-            f"  Done: {len(strategy_results)} results -> {strategy_output}"
+        completed = sum(
+            1 for r in strategy_results if r.get("status") == "completed"
         )
+        errors = sum(
+            1 for r in strategy_results
+            if r.get("status", "").startswith("error:")
+        )
+        print(f"  Done: {len(strategy_results)} results "
+              f"({completed} ok, {errors} errors) → {strategy_output}")
 
-    # --- Evaluate and generate report ---
+    # --- Final summary ---
     print(f"\n{'=' * 70}")
-    print("  Evaluating all strategies...")
+    print("  Grid test complete.")
     print(f"{'=' * 70}")
-
-    report = evaluate_all(
-        all_strategy_results, output_dir, extract_prompt,
-    )
-    print(f"\nReport saved to {report}")
-
-
-# --- Evaluation -------------------------------------------------------------
+    print(f"\nResults saved to: {output_dir}/")
+    print(f"\nTo evaluate results, run:")
+    print(f"  python app/tests/evaluate_strategies.py "
+          f"--results-dir {output_dir}")
 
 
-def evaluate_all(
-    all_results: Dict[str, List[dict]],
-    output_dir: str,
-    extract_prompt: str,
-) -> str:
-    """Score every strategy using exact-match, then produce HTML report."""
+# ---------------------------------------------------------------------------
+# List strategies (--list-strategies)
+# ---------------------------------------------------------------------------
 
-    # Try to import eval utilities
-    eval_available = False
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from MMLongDocEval.eval_score import eval_score  # noqa: F401
-        eval_available = True
-    except ImportError:
+def print_strategy_table(strategies: List[Strategy]) -> None:
+    """Print a formatted table of all strategies."""
+    print(f"\n{'=' * 70}")
+    print(f"  Strategy Grid: {len(strategies)} combinations")
+    print(f"{'=' * 70}")
+    for i, s in enumerate(strategies):
+        flags = s.flags_summary()
         print(
-            "  WARNING: MMLongDocEval not available, "
-            "using substring matching"
+            f"  [{i + 1:2d}] {s.name:25s}  "
+            f"{s.label:40s}  [{', '.join(flags)}]"
         )
 
-    rows: List[Dict[str, Any]] = []
 
-    for strategy in STRATEGIES:
-        results = all_results.get(strategy.name, [])
-        completed = [
-            r for r in results
-            if r.get("status") == "completed" and r.get("llm_answer")
-        ]
-        total = len(results)
-        completed_count = len(completed)
-
-        scores: List[float] = []
-        correct_count = 0
-
-        for r in completed:
-            llm_answer = r.get("llm_answer", "")
-            correct_answer = r.get("answer", "")
-
-            if eval_available:
-                try:
-                    score = float(eval_score(llm_answer, correct_answer))
-                except Exception:
-                    score = 0.0
-            else:
-                ans_lower = correct_answer.strip().lower()
-                llm_lower = llm_answer.strip().lower()
-                score = 1.0 if ans_lower and ans_lower in llm_lower else 0.0
-
-            scores.append(score)
-            if score >= 0.5:
-                correct_count += 1
-
-            r["score"] = score
-
-        avg_score = sum(scores) / len(scores) if scores else 0.0
-        accuracy = (
-            (correct_count / completed_count * 100)
-            if completed_count else 0.0
-        )
-        times = [r.get("elapsed", 0) for r in completed]
-        avg_elapsed = sum(times) / len(times) if times else 0.0
-
-        rows.append({
-            "name": strategy.name,
-            "label": strategy.label,
-            "total": total,
-            "completed": completed_count,
-            "accuracy": round(accuracy, 1),
-            "avg_score": round(avg_score, 3),
-            "avg_time": round(avg_elapsed, 1),
-            "correct": correct_count,
-        })
-
-    # Sort by accuracy descending
-    rows.sort(key=lambda r: r["accuracy"], reverse=True)
-
-    # Generate HTML report
-    html_path = os.path.join(output_dir, "strategy_comparison.html")
-    _write_html_report(html_path, rows, STRATEGIES)
-
-    # Also save JSON summary
-    json_path = os.path.join(output_dir, "strategy_summary.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, ensure_ascii=False, indent=2)
-
-    return html_path
-
-
-def _write_html_report(
-    path: str,
-    rows: List[dict],
-    strategies: List[Strategy],
-):
-    """Generate a self-contained HTML comparison table."""
-
-    max_acc = max(r["accuracy"] for r in rows) if rows else 100.0
-
-    def _row_color(acc: float) -> str:
-        ratio = acc / max(max_acc, 0.01)
-        if ratio >= 0.9:
-            return "#d4edda"  # green
-        if ratio >= 0.7:
-            return "#fff3cd"  # yellow
-        if ratio >= 0.5:
-            return "#ffeeba"
-        return "#f8d7da"  # red
-
-    table_rows = ""
-    for i, r in enumerate(rows):
-        medal = ""
-        if i == 0:
-            medal = " (1st)"
-        elif i == 1:
-            medal = " (2nd)"
-        elif i == 2:
-            medal = " (3rd)"
-
-        rb = _row_color(r["accuracy"])
-        table_rows += f"""
-        <tr style="background:{rb}">
-          <td style="text-align:right">{i + 1}</td>
-          <td><strong>{r['label']}{medal}</strong><br>
-            <code>{r['name']}</code></td>
-          <td style="text-align:right"><strong>{r['accuracy']}%</strong></td>
-          <td style="text-align:right">{r['avg_score']:.3f}</td>
-          <td style="text-align:right">{r['correct']}/{r['completed']}</td>
-          <td style="text-align:right">{r['avg_time']:.1f}s</td>
-        </tr>"""
-
-    strategy_rows = "\n".join(
-        f"<tr><td><code>{s.name}</code></td><td>{s.label}</td></tr>"
-        for s in strategies
-    )
-
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Graph M-RAG Strategy Grid Comparison</title>
-<style>
-  body {{
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-                 sans-serif;
-    max-width: 1100px; margin: 40px auto; padding: 0 20px; color: #333;
-  }}
-  h1 {{ border-bottom: 2px solid #2c3e50; padding-bottom: 10px; }}
-  h2 {{ color: #2c3e50; margin-top: 30px; }}
-  table {{
-    border-collapse: collapse; width: 100%; margin: 15px 0;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  }}
-  th {{
-    background: #2c3e50; color: white; padding: 10px 12px;
-    text-align: left; font-size: 0.9em;
-  }}
-  td {{
-    padding: 8px 12px; border-bottom: 1px solid #ddd; font-size: 0.9em;
-  }}
-  tr:hover {{ filter: brightness(0.95); }}
-  .legend {{
-    display: flex; gap: 15px; margin: 15px 0; font-size: 0.85em;
-  }}
-  .legend-item {{
-    display: flex; align-items: center; gap: 5px;
-  }}
-  .legend-swatch {{
-    width: 20px; height: 20px; border-radius: 3px;
-    border: 1px solid #ccc;
-  }}
-  .footer {{
-    margin-top: 30px; font-size: 0.8em; color: #888;
-    border-top: 1px solid #eee; padding-top: 10px;
-  }}
-  code {{
-    font-size: 0.8em; color: #555; background: #f5f5f5;
-    padding: 1px 4px; border-radius: 3px;
-  }}
-</style>
-</head>
-<body>
-<h1>Graph M-RAG &mdash; Strategy Grid Comparison</h1>
-<p>
-  Dataset: <strong>SmallerDataset</strong>
-  (12 documents, 105 questions, 5 types).
-  Results from combinatorial testing of retrieval,
-  context enrichment, and generation strategies.
-</p>
-
-<div class="legend">
-  <div class="legend-item">
-    <div class="legend-swatch" style="background:#d4edda"></div>
-    90%+ of best
-  </div>
-  <div class="legend-item">
-    <div class="legend-swatch" style="background:#fff3cd"></div>
-    70-90% of best
-  </div>
-  <div class="legend-item">
-    <div class="legend-swatch" style="background:#ffeeba"></div>
-    50-70% of best
-  </div>
-  <div class="legend-item">
-    <div class="legend-swatch" style="background:#f8d7da"></div>
-    <50% of best
-  </div>
-</div>
-
-<h2>Accuracy Ranking</h2>
-<table>
-<thead>
-<tr>
-  <th>#</th>
-  <th>Strategy</th>
-  <th>Accuracy</th>
-  <th>Avg Score</th>
-  <th>Correct</th>
-  <th>Avg Time</th>
-</tr>
-</thead>
-<tbody>
-{table_rows}
-</tbody>
-</table>
-
-<h2>Strategy Descriptions</h2>
-<table>
-<thead>
-<tr><th>Name</th><th>Components</th></tr>
-</thead>
-<tbody>
-{strategy_rows}
-</tbody>
-</table>
-
-<div class="footer">
-Generated by <code>app/tests/strategy_grid_test.py</code> &mdash;
-Graph M-RAG: Multi-Strategy Graph-Enhanced
-Retrieval-Augmented Generation
-</div>
-</body>
-</html>"""
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(html)
-
-
-# --- Entry point ------------------------------------------------------------
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import argparse
 
-    ap = argparse.ArgumentParser(description="Strategy Grid Test")
+    ap = argparse.ArgumentParser(
+        description="Strategy Grid Test — run retrieval/context/generation "
+                    "combinations against the SmallerDataset."
+    )
     ap.add_argument(
         "--base-url", default="http://0.0.0.0:9191",
         help="Base URL of the API server",
@@ -576,42 +545,52 @@ if __name__ == "__main__":
     )
     ap.add_argument(
         "--output-dir", default="",
-        help="Directory for strategy results",
+        help="Directory for strategy result files",
     )
     ap.add_argument(
         "--limit", type=int, default=10,
         help="Number of retrieves per query",
     )
     ap.add_argument(
+        "--strategies", default="",
+        help="Comma-separated list of strategy names to run "
+             "(default: all 20). E.g.: --strategies baseline,reranker",
+    )
+    ap.add_argument(
+        "--skip-extraction", action="store_true",
+        help="Skip Qwen answer-extraction step",
+    )
+    ap.add_argument(
+        "--sort-reference", default="",
+        help="Path to strategy_summary.json from a previous evaluation. "
+             "If provided, strategies are reordered by --sort-by metric "
+             "(highest first) so the best candidates run first.",
+    )
+    ap.add_argument(
+        "--sort-by",
+        choices=SORT_BY_CHOICES,
+        default="accuracy",
+        help=(
+            "Metric to sort strategies by when --sort-reference is used. "
+            f"Choices: {', '.join(SORT_BY_CHOICES)}. "
+            "(default: accuracy)"
+        ),
+    )
+    ap.add_argument(
         "--list-strategies", action="store_true",
-        help="Just print the strategy grid and exit",
+        help="Print the strategy grid and exit",
     )
     args = ap.parse_args()
 
     if args.list_strategies:
-        print(f"\n{'=' * 70}")
-        print(f"  Strategy Grid: {len(STRATEGIES)} combinations")
-        print(f"{'=' * 70}")
-        for i, s in enumerate(STRATEGIES):
-            flags: List[str] = []
-            if s.use_reranker:
-                flags.append("reranker")
-            if s.use_mmr_reranker:
-                flags.append(f"mmr(l={s.mmr_lambda})")
-            if s.use_semantic_graph:
-                flags.append("semantic")
-            if s.use_structured_graph:
-                flags.append("structural")
-            if s.use_iterative_search:
-                flags.append("iterative")
-            if s.use_question_decomposition:
-                flags.append("decompose")
-            flag_str = ", ".join(flags) if flags else "none"
-            print(
-                f"  [{i + 1:2d}] {s.name:25s}  "
-                f"{s.label:40s}  [{flag_str}]"
-            )
+        print_strategy_table(STRATEGIES)
         sys.exit(0)
+
+    strategy_filter = None
+    if args.strategies:
+        strategy_filter = [
+            name.strip() for name in args.strategies.split(",") if name.strip()
+        ]
 
     run_grid_test(
         base_url=args.base_url,
@@ -619,4 +598,8 @@ if __name__ == "__main__":
         file_hash_map_path=args.hash_map,
         output_dir=args.output_dir,
         limit=args.limit,
+        strategy_filter=strategy_filter,
+        skip_extraction=args.skip_extraction,
+        sort_reference=args.sort_reference,
+        sort_by=args.sort_by,
     )

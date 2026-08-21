@@ -148,6 +148,7 @@ RATING = "rank"
 EXPLANATION = "rating_explanation"
 FULL_CONTENT = "full_content"
 FULL_CONTENT_JSON = "full_content_json"
+CONTENT_HASH = "content_hash"
 
 ENTITY_IDS = "entity_ids"
 RELATIONSHIP_IDS = "relationship_ids"
@@ -220,6 +221,7 @@ COMMUNITY_REPORTS_FINAL_COLUMNS = [
     EXPLANATION,
     FINDINGS,
     FULL_CONTENT_JSON,
+    CONTENT_HASH,
     PERIOD,
     SIZE,
 ]

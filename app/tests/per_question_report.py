@@ -427,11 +427,21 @@ def generate_html(
 
                 # Prediction cell with tooltip showing LLM preview
                 display_pred = pred[:150] + ("..." if len(pred) > 150 else "")
-                # Flag obviously bad predictions (extraction failures)
-                pred_extra_class = (
-                    " pred-bad" if pred in ("Failed to extract", "[answer]",
-                                           "[answer]\n", "—") else ""
+                # Flag obviously bad predictions (extraction failures and
+                # unfilled template placeholders like "[answer]", "[answer].")
+                stripped = pred.strip().strip('"').strip("'").strip("`").rstrip(
+                    ".,;:!?%"
+                ).strip()
+                is_bad = (
+                    stripped == "—"
+                    or stripped.lower().startswith("failed to extract")
+                    or (
+                        stripped.startswith("[")
+                        and stripped.endswith("]")
+                        and " " not in stripped
+                    )
                 )
+                pred_extra_class = " pred-bad" if is_bad else ""
                 html.append(f'<td class="pred-text{pred_extra_class}">')
                 if pred and llm_preview:
                     html.append(

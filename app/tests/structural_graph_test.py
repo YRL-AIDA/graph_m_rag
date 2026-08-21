@@ -78,7 +78,7 @@ class Strategy:
     use_question_decomposition: bool = False
 
     def to_payload(
-        self, file_hash: str, question: str, limit: int = 10,
+        self, file_hash: str, question: str, limit: int = 30,
     ) -> dict:
         """Build the JSON payload for /ask-document."""
         return {
@@ -150,7 +150,7 @@ def ask_document(
     strategy: Strategy,
     file_hash: str,
     question: str,
-    limit: int = 10,
+    limit: int = 30,
     timeout: int = 300,
 ) -> Dict[str, Any]:
     """Call /ask-document with the given strategy."""
@@ -179,7 +179,7 @@ def run_structural_test(
     dataset_path: str = "",
     file_hash_map_path: str = "",
     output_dir: str = "",
-    limit: int = 10,
+    limit: int = 30,
 ):
     """Run all structural-graph strategies against the SmallerDataset."""
 
@@ -631,7 +631,7 @@ if __name__ == "__main__":
         help="Directory for strategy results",
     )
     ap.add_argument(
-        "--limit", type=int, default=10,
+        "--limit", type=int, default=30,
         help="Number of retrieves per query",
     )
     ap.add_argument(

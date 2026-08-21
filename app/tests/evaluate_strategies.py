@@ -24,6 +24,7 @@ import os
 import re
 import sys
 from collections import defaultdict
+from html import escape as html_escape
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -82,8 +83,9 @@ def sort_strategies(
 # Answer extraction
 # ---------------------------------------------------------------------------
 
-# Pattern to strip  ...  thinking blocks
-_THINK_PATTERN = re.compile(r".*?", re.DOTALL)
+# Template placeholders that the model sometimes echoes verbatim instead of
+# filling in (e.g. "Extracted answer: [answer]"). These must never be scored.
+_PLACEHOLDER_RE = re.compile(r"^\[[A-Za-z][A-Za-z0-9\s_.-]*\]$")
 
 # Priority: [FINAL_ANSWER] marker (from updated system prompt), then legacy markers
 _FINAL_ANSWER_PATTERN = re.compile(
@@ -93,30 +95,96 @@ _FINAL_ANSWER_PATTERN = re.compile(
 # Try explicit "Extracted answer:" / "Answer:" lines
 _EXTRACTED_PATTERN = re.compile(
     r"(?:Extracted\s+answer|Answer)\s*:\s*(.+?)(?:\n|$)", re.IGNORECASE
-
 )
-def extract_pred_from_extracted_res(extracted_res: str) -> str:
-    """Mirrors the extraction in smallerdataset_evaluation.py.
 
-    Input example:
-        "Answer format: Str\nExtracted answer: 42"
-    Returns "42", or "Failed to extract" on failure.
 
-    Uses rsplit to find the LAST "Extracted answer:" marker, avoiding
-    accidental extraction of template placeholders like "[answer]" from
-    the system prompt instructions that also contain these markers.
+def _strip_thinking(text: str) -> str:
+    """Remove everything up to and including the last ``</think>`` marker.
+
+    The final answer always appears after the closing think tag; anything
+    before it is chain-of-thought and must not be scored.
     """
-    try:
-        if "Extracted answer:" in extracted_res:
-            # rsplit from the right to skip any template placeholder
-            # occurrences of "Extracted answer:" and "Answer format:"
-            after_extracted = extracted_res.rsplit("Extracted answer:", 1)[-1]
-            pred = after_extracted.split("Answer format:")[0].strip()
-            if pred:
-                return pred
-        return "Failed to extract"
-    except (IndexError, AttributeError):
-        return "Failed to extract"
+    if not text:
+        return ""
+    idx = text.rfind("</think>")
+    if idx != -1:
+        return text[idx + len("</think>"):].strip()
+    return text.strip()
+
+
+# Failure sentinels emitted by the extraction pipeline. Tolerates trailing
+# punctuation (e.g. "Failed to extract.") which the exact-equality check below
+# used to miss.
+_FAILED_SENTINEL_RE = re.compile(r"^failed\s+to\s+extract\b", re.IGNORECASE)
+
+
+def _is_failed_sentinel(value: str) -> bool:
+    """True if ``value`` is a literal extraction-failure sentinel."""
+    return bool(_FAILED_SENTINEL_RE.match((value or "").strip()))
+
+
+def _is_placeholder(value: str) -> bool:
+    """True if ``value`` is an unfilled template placeholder like ``[answer]``.
+
+    Tolerates surrounding quotes and trailing punctuation (e.g. "[answer].",
+    "[answer],", "[answer]%") which the model sometimes emits when echoing the
+    template verbatim. These must never be scored.
+    """
+    v = (value or "").strip()
+    if not v:
+        return True
+    v = v.strip('"').strip("'").strip("`").strip()
+    v = v.rstrip(".,;:!?%").strip()
+    if not v:
+        return True
+    return bool(_PLACEHOLDER_RE.match(v))
+
+
+def _clean_extracted_value(raw: str) -> str:
+    """Normalize a value found after an 'Extracted answer:' marker.
+
+    Strips surrounding quotes/backticks and rejects placeholders and failure
+    sentinels, returning "" when the value is unusable.
+    """
+    value = (raw or "").strip()
+    value = value.strip('"').strip("'").strip("`").strip()
+    if _is_placeholder(value) or _is_failed_sentinel(value):
+        return ""
+    return value
+
+
+def extract_pred_from_extracted_res(extracted_res: str) -> str:
+    """Extract the final answer from ``extracted_res``.
+
+    Mirrors smallerdataset_evaluation.py but returns "" (instead of
+    "Failed to extract") when no usable value is found, so the caller can
+    fall back to ``llm_answer``. Scans markers right-to-left and takes the
+    first real value, rejecting unfilled template placeholders like
+    "[answer]" that appear in the reasoning text.
+    """
+    if not extracted_res:
+        return ""
+    if not isinstance(extracted_res, str):
+        extracted_res = str(extracted_res)
+
+    text = extracted_res.strip()
+    if not text:
+        return ""
+
+    # Upstream pipeline sometimes stores a literal failure sentinel.
+    if _is_failed_sentinel(text):
+        return ""
+
+    # Every "Extracted answer:" occurrence; template placeholders may appear
+    # earlier in the reasoning, the real value after </think>.
+    parts = text.split("Extracted answer:")
+    for after in reversed(parts[1:]):
+        value = after.split("Answer format:")[0].strip()
+        cleaned = _clean_extracted_value(value)
+        if cleaned:
+            return cleaned
+
+    return ""
 
 
 def extract_pred_from_llm_answer(llm_answer: str) -> str:
@@ -128,27 +196,25 @@ def extract_pred_from_llm_answer(llm_answer: str) -> str:
       3. Python list string (e.g. ['item1', 'item2'])
       4. Last non-empty line as fallback
 
-    Strips  ...  blocks first.
+    Strips <think>...</think> blocks first.
     """
     if not llm_answer:
         return ""
 
-    # Remove thinking block
-    text = _THINK_PATTERN.sub("", llm_answer).strip()
+    text = _strip_thinking(llm_answer)
 
     # Priority 1: [FINAL_ANSWER] marker from updated prompt
     m = _FINAL_ANSWER_PATTERN.search(text)
     if m:
-        candidate = m.group(1).strip()
+        candidate = _clean_extracted_value(m.group(1))
         if candidate:
-            # Also accept short reasoning after [FINAL_ANSWER]:
             return candidate
 
     # Priority 2: Legacy markers (Extracted answer: / Answer:)
     m = _EXTRACTED_PATTERN.search(text)
     if m:
-        candidate = m.group(1).strip()
-        if len(candidate) < 200 or candidate.startswith("["):
+        candidate = _clean_extracted_value(m.group(1))
+        if candidate:
             return candidate
 
     # Priority 3: Detect Python list strings: ['val1', 'val2']
@@ -160,11 +226,25 @@ def extract_pred_from_llm_answer(llm_answer: str) -> str:
         if inner.count("'") >= 4 or inner.count('"') >= 4:
             return list_match.group(0)  # return the full [...] string
 
-    # Fallback: last non-empty line
-    lines = [l for l in text.split("\n") if l.strip()]
-    if lines:
-        return lines[-1].strip()
-    return text.strip()
+    # Fallback: last non-empty, non-placeholder line
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    for line in reversed(lines):
+        candidate = _clean_extracted_value(line)
+        if candidate:
+            return candidate
+    return ""
+
+
+def _is_numeric(s: str) -> bool:
+    """Return True if s parses as a number (optionally with $/% prefix/suffix)."""
+    if not s:
+        return False
+    s = s.strip().lstrip("$").rstrip("%").replace(",", "").strip()
+    try:
+        float(s)
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 def _normalize_pred(pred: str, expected_answer: str, answer_format: str) -> str:
@@ -180,6 +260,11 @@ def _normalize_pred(pred: str, expected_answer: str, answer_format: str) -> str:
     exp = str(expected_answer).strip()
 
     if fmt == "float":
+        # Never touch non-numeric predictions (e.g. "Not answerable",
+        # "Failed to extract") — appending "%" would corrupt them into
+        # "Not answerable%".
+        if not _is_numeric(pred):
+            return pred
         exp_has_pct = "%" in exp
         pred_has_pct = "%" in pred
         if exp_has_pct and not pred_has_pct:
@@ -228,13 +313,18 @@ def evaluate_strategy(
         #         smallerdataset_evaluation.py logic
         # Path 2: only llm_answer (strategy grid results) — heuristic fallback
         extracted_res = r.get("extracted_res")
+        pred = ""
         if extracted_res is not None and str(extracted_res) not in ("None", ""):
             pred = extract_pred_from_extracted_res(str(extracted_res))
-        else:
+
+        # Fall back to the raw LLM answer when extracted_res is missing or
+        # yielded no usable value (e.g. "Failed to extract" or a placeholder).
+        if not pred:
             llm_answer = r.get("llm_answer", "")
             pred = extract_pred_from_llm_answer(llm_answer)
-            if not pred:
-                continue
+
+        if not pred:
+            continue
 
         # --- Score via eval_score (same as smallerdataset_evaluation.py) ---
         correct_answer = gt_info.get("answer", r.get("answer", ""))
@@ -341,6 +431,13 @@ def evaluate_strategy(
         # Truncate llm_answer for report readability
         llm = s.get("llm_answer", "")
         llm_preview = llm[:200].replace("\n", " ") if llm else ""
+        # Reconstruct the exact text context that was sent to the LLM
+        # (the API joins context_blocks with "\n\n" before calling the model).
+        context_blocks = s.get("context_blocks") or []
+        context_text = (
+            "\n\n".join(str(b) for b in context_blocks)
+            if context_blocks else ""
+        )
         per_question.append({
             "doc_id": s.get("doc_id", ""),
             "question": s.get("question", ""),
@@ -352,6 +449,7 @@ def evaluate_strategy(
             "answer_format": s.get("answer_format", "Str"),
             "evidence_pages": s.get("evidence_pages", []),
             "llm_preview": llm_preview,
+            "context_text": context_text,
         })
 
     return {
@@ -668,12 +766,32 @@ def write_html_report(
                 "<table>"
                 "<tr><th>#</th><th>Doc ID</th><th>Question</th>"
                 "<th>Expected</th><th>Predicted</th><th>Score</th>"
-                "<th>Model Answer (preview)</th></tr>"
+                "<th>Model Answer (preview)</th><th>Context</th></tr>"
             )
             for idx, q in enumerate(pq_sorted, 1):
                 score_color = "#d4edda" if q["score"] >= 1.0 else (
                     "#f8d7da" if q["score"] < 0.5 else "#fff3cd"
                 )
+                context_text = q.get("context_text", "")
+                if context_text:
+                    context_cell = (
+                        "<td style=\"font-size:0.8em\">"
+                        "<details>"
+                        "<summary style=\"cursor:pointer;color:#2c3e50;"
+                        "font-weight:bold\">Показать контекст</summary>"
+                        "<pre style=\"max-width:600px;max-height:400px;"
+                        "overflow:auto;white-space:pre-wrap;"
+                        "font-size:0.75em;background:#f5f5f5;padding:8px;"
+                        "margin-top:4px\">"
+                        f"{html_escape(context_text)}"
+                        "</pre>"
+                        "</details>"
+                        "</td>"
+                    )
+                else:
+                    context_cell = (
+                        "<td style=\"font-size:0.8em;color:#999\">—</td>"
+                    )
                 html += (
                     f"<tr style=\"background:{score_color}\">"
                     f"<td>{idx}</td>"
@@ -684,6 +802,7 @@ def write_html_report(
                     f"<td style=\"font-weight:bold\">{q['score']:.2f}</td>"
                     f"<td style=\"font-size:0.75em; max-width:350px\">"
                     f"{q['llm_preview'][:150]}</td>"
+                    f"{context_cell}"
                     f"</tr>"
                 )
             html += "</table>"

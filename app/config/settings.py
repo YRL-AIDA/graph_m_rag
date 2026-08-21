@@ -103,7 +103,50 @@ class LLMSettings(BaseSettings):
         description="Enable LLM-based decomposition of complex questions into sub-questions",
     )
 
+    # C8: Generate textual descriptions for caption-less images
+    IMAGE_CAPTIONING_ENABLED: bool = Field(
+        default=True,
+        description="Generate a VLM text description for images without captions",
+    )
+    IMAGE_CAPTIONING_TEMPERATURE: float = Field(
+        default=0.2,
+        description="Temperature for image caption generation",
+    )
+    IMAGE_CAPTIONING_MAX_TOKENS: int = Field(
+        default=512,
+        description="Max tokens for each generated image caption",
+    )
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+class ContextBudgetSettings(BaseSettings):
+    """Context assembly budget configuration for the RAG prompt.
+
+    Controls how much retrieved/enriched content is packed into the prompt sent
+    to the LLM. The primary Qdrant retrieval is bounded by the request ``limit``
+    (block count); graph-enrichment sources are bounded by character fractions
+    defined in ``api.py`` relative to ``MAX_CONTEXT_CHARS``.
+    """
+
+    MAX_CONTEXT_CHARS: int = Field(
+        default=60000,
+        description=(
+            "Total text context budget in characters (hard backstop for every "
+            "source). ~15-20k tokens for mixed text, leaving headroom for "
+            "Qwen3-VL-32B-Thinking chain-of-thought and output."
+        ),
+    )
+    MAX_IMAGES: int = Field(
+        default=8,
+        description=(
+            "Maximum number of images/tables attached as multimodal input. "
+            "Vision tokens are expensive and are not covered by the character "
+            "budget, so they need a separate hard limit."
+        ),
+    )
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
 
 class AppSettings(BaseSettings):
     """Main application configuration."""
@@ -137,6 +180,7 @@ class Settings(BaseSettings):
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
     mmr: MMRSettings = Field(default_factory=MMRSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    context_budget: ContextBudgetSettings = Field(default_factory=ContextBudgetSettings)
     app: AppSettings = Field(default_factory=AppSettings)
 
     # Direct access aliases for backward compatibility

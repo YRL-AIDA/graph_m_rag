@@ -230,6 +230,9 @@ mineru/test/
 # Article — entire directory (LaTeX sources, materials, build artifacts)
 artile/
 
+# Presentation — LaTeX sources and build artifacts
+presentation/
+
 # Agent plans and task descriptions
 plans/
 

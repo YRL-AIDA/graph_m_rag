@@ -46,7 +46,7 @@ class Strategy:
     use_question_decomposition: bool = False
 
     def to_payload(self, file_hash: str, question: str,
-                   limit: int = 10) -> dict:
+                   limit: int = 30) -> dict:
         return {
             "file_hash": file_hash,
             "question": question,
@@ -146,7 +146,7 @@ def read_json(filename: str) -> Any:
 
 def ask_document(base_url: str, strategy: Strategy,
                  file_hash: str, question: str,
-                 limit: int = 10, timeout: int = 300) -> Dict[str, Any]:
+                 limit: int = 30, timeout: int = 300) -> Dict[str, Any]:
     """Call /ask-document with the given strategy."""
     payload = strategy.to_payload(file_hash, question, limit)
     query_params = {
@@ -584,7 +584,7 @@ def run_consistency_test(
     strategy_name: str = "structural_parent_only",
     question_index: int = 0,
     num_runs: int = 10,
-    limit: int = 10,
+    limit: int = 30,
     skip_extraction: bool = False,
     timeout: int = 300,
 ):
@@ -928,7 +928,7 @@ if __name__ == "__main__":
         help="Directory for output files",
     )
     ap.add_argument(
-        "--limit", type=int, default=10,
+        "--limit", type=int, default=30,
         help="Qdrant result limit per query",
     )
     ap.add_argument(

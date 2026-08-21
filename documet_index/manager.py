@@ -193,6 +193,7 @@ class Manager:
                 style = reg.get('style', {})
                 order = reg.get('order', 0)
                 element_data = reg.get('element_data', '')
+                page_idx = reg.get('page_idx', 0)
                 # Generate region_id using file_hash and region id
                 region_id = f"{document.name}|{id}"
 
@@ -206,7 +207,7 @@ class Manager:
                 style_json = json.dumps(style) if style else '{}'
 
                 query += (f"CREATE (reg{id}:Region:{label} {{region_id: '{region_id}', text: '{text_escaped}', image: '{image_escaped}', "
-                          f"bbox: '{bbox_json}', style: '{style_json}', order: {order}, element_data: "
+                          f"bbox: '{bbox_json}', style: '{style_json}', order: {order}, page_idx: {page_idx}, element_data: "
                           f"'{element_data_escaped}'}})\n")
 
             # A3: Build hierarchical section structure from title regions.
@@ -554,6 +555,7 @@ class Manager:
                 neighbor.label    AS label,
                 neighbor.text     AS text,
                 neighbor.order    AS order,
+                neighbor.page_idx AS page_idx,
                 r.region_id       AS source_region_id,
                 'order'           AS source
             ORDER BY neighbor.order
@@ -573,6 +575,7 @@ class Manager:
                 "label": r.get("label", ""),
                 "text": r.get("text", ""),
                 "order": r.get("order", 0),
+                "page_idx": r.get("page_idx", 0),
                 "source_region_id": r.get("source_region_id", ""),
                 "source": r.get("source", "order"),
             }
@@ -589,6 +592,7 @@ class Manager:
                     parent.label     AS label,
                     parent.text      AS text,
                     parent.order     AS order,
+                    parent.page_idx  AS page_idx,
                     child.region_id  AS source_region_id,
                     'parent'         AS source
             """
@@ -603,6 +607,7 @@ class Manager:
                         "label": data.get("label", ""),
                         "text": data.get("text", ""),
                         "order": data.get("order", 0),
+                        "page_idx": data.get("page_idx", 0),
                         "source_region_id": data.get("source_region_id", ""),
                         "source": "parent",
                     })
@@ -610,6 +615,51 @@ class Manager:
                 logger.error("Error getting parent neighbors: %s", e)
 
         return items
+
+    def get_sections_for_regions(
+        self,
+        region_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Map region_id -> its Section title from the structural graph.
+
+        Section nodes were created by :meth:`add_document` via the A3
+        hierarchical structure (``Section -[:SECTION]-> Region``). This
+        method returns a dict keyed by region_id so callers can group
+        regions by section for rendering (see ``<document_context>``).
+
+        Args:
+            region_ids: List of region_id strings (format: '{file_hash}|{element_index}')
+
+        Returns:
+            Dict mapping region_id to {"title": str, "section_id": str}.
+            Regions without a Section are omitted from the dict.
+        """
+        if not region_ids:
+            return {}
+
+        query = """
+            MATCH (s:Section)-[:SECTION]->(r:Region)
+            WHERE r.region_id IN $region_ids
+            RETURN r.region_id AS region_id,
+                   s.title AS title,
+                   s.section_id AS section_id
+        """
+        try:
+            results = self.query(query, {"region_ids": region_ids})
+        except Exception as e:
+            logger.error("Error getting sections for regions: %s", e)
+            return {}
+
+        section_map: Dict[str, Dict[str, Any]] = {}
+        for rec in results:
+            data = rec.data()
+            rid = data.get("region_id", "")
+            if rid:
+                section_map[rid] = {
+                    "title": data.get("title", "Untitled Section"),
+                    "section_id": data.get("section_id", ""),
+                }
+        return section_map
 
     def close(self):
         """Close the database connection."""

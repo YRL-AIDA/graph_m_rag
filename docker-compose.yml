@@ -104,7 +104,7 @@ services:
       - LLM_URL=${LLM_URL:-}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - MODEL_NAME=${MODEL_NAME:-Qwen/Qwen3-VL-32B-Thinking}
-      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-http://embedding:8000}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-http://192.168.19.127:10115/embedding}
       - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-2048}
       - N4G_URL=${N4G_URL:-http://neo4j:7474}
     networks:

@@ -128,6 +128,23 @@ def extract_str(text: str) -> Optional[str]:
     return first_line
 
 
+_REFUSAL_VARIANTS = (
+    "not answerable", "fail to answer", "failed to answer", "unable to answer",
+    "cannot answer", "cannot provide", "no answer", "i don't know",
+    "none", "n/a", "unknown",
+)
+
+
+def _is_refusal(text: str) -> bool:
+    """Return True if the text is (or starts with) a refusal / not-answerable signal."""
+    if not text:
+        return False
+    lower = text.strip().lower()
+    return lower in _REFUSAL_VARIANTS or any(
+        lower.startswith(v) for v in _REFUSAL_VARIANTS
+    )
+
+
 def format_answer(text: str, answer_format: str) -> Union[str, int, float, List[str], None]:
     """Post-process LLM response based on expected answer format.
 
@@ -142,6 +159,11 @@ def format_answer(text: str, answer_format: str) -> Union[str, int, float, List[
         return None
 
     fmt = (answer_format or '').strip().lower()
+
+    # Early exit: refusal / "Not answerable" must be returned verbatim, not
+    # parsed into a number or suffixed with "%" / "list".
+    if _is_refusal(text):
+        return "Not answerable"
 
     if fmt == 'int':
         result = extract_int(text)

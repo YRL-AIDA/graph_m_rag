@@ -209,6 +209,16 @@ class DocumentIndexService:
             region_ids, window_size, include_parent=include_parent,
         )
 
+    def get_sections_for_regions(
+        self,
+        region_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Map region_id -> its Section title from the structural graph.
+
+        Delegates to Manager.get_sections_for_regions.
+        """
+        return self.manager.get_sections_for_regions(region_ids)
+
     def get_cross_graph_bridge(
         self,
         region_ids: List[str],

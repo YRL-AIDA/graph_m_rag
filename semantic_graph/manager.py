@@ -13,7 +13,9 @@ from config import (
     COMMUNITY_ID,
     COMMUNITY_LEVEL,
     COMMUNITY_PARENT,
+    CONTENT_HASH,
     DESCRIPTION,
+    DOCUMENT_ID,
     EDGE_DEGREE,
     EDGE_SOURCE,
     EDGE_TARGET,
@@ -714,8 +716,12 @@ class Manager:
                weight=rel.weight, description=rel.description, text_unit_ids=rel.text_unit_ids, combined_degree=rel.combined_degree)
         return {"action": "updated" if record else "created"}
 
-    def insert_communities_to_neo4j(self, communities_rows: List[Dict[str, Any]], batch_size: int = 1000) -> Dict[
-        str, int]:
+    def insert_communities_to_neo4j(
+        self,
+        communities_rows: List[Dict[str, Any]],
+        batch_size: int = 1000,
+        document_id: Optional[str] = None,
+    ) -> Dict[str, int]:
         """
         Двухэтапная массовая загрузка: сначала ВСЕ вершины, потом ВСЕ связи.
         Оптимизировано для минимального потребления памяти (потоковая обработка батчами).
@@ -748,7 +754,8 @@ class Manager:
                     COMMUNITY_LEVEL: int(row[COMMUNITY_LEVEL]),
                     COMMUNITY_PARENT: int(parent_id),  # Сохраняем как свойство для справки
                     SIZE: int(row.get(SIZE, 0)),
-                    PERIOD: str(row.get(PERIOD, ""))
+                    PERIOD: str(row.get(PERIOD, "")),
+                    DOCUMENT_ID: document_id,
                 })
 
             # Выполняем транзакцию только для узлов
@@ -804,6 +811,74 @@ class Manager:
         logger.info(f"Загрузка завершена. Итоговая статистика: {stats}")
         return stats
 
+    def save_inter_community_links(
+        self,
+        inter_edges: List[Dict[str, Any]],
+        document_id: Optional[str] = None,
+        batch_size: int = 1000,
+    ) -> Dict[str, int]:
+        """Create inter-community link relationships in Neo4j.
+
+        Each record connects two communities at the same hierarchy level
+        (source_community -> target_community) and carries the shared
+        entities count, aggregate weight and hierarchy level.
+        """
+        stats = {"links_created": 0}
+
+        if not inter_edges:
+            return stats
+
+        for i in range(0, len(inter_edges), batch_size):
+            batch = inter_edges[i:i + batch_size]
+            payload: List[Dict[str, Any]] = []
+            for edge in batch:
+                payload.append({
+                    "source": int(edge.get("source_community", -1)),
+                    "target": int(edge.get("target_community", -1)),
+                    "shared_entities": int(edge.get("shared_entities", 0)),
+                    "weight": float(edge.get("weight", 0.0)),
+                    "level": int(edge.get("level", 0)),
+                    DOCUMENT_ID: document_id,
+                })
+
+            with self.conn.graph.session(database=self.name_db) as session:
+                created = session.execute_write(
+                    self._insert_inter_community_links_tx, payload
+                )
+                stats["links_created"] += created
+
+        logger.info("Inter-community links created: %s", stats["links_created"])
+        return stats
+
+    def get_community_report_hashes(self) -> Dict[int, str]:
+        """Return a mapping of community id -> content hash for incremental reports.
+
+        Queries the stored ``content_hash`` property on each Community node.
+        Used by the report pipeline to skip communities whose member list
+        has not changed since the previous run.
+        """
+        query = f"""
+        MATCH (c:Community)
+        WHERE c.{CONTENT_HASH} IS NOT NULL
+        RETURN c.{COMMUNITY_ID} AS {COMMUNITY_ID}, c.{CONTENT_HASH} AS {CONTENT_HASH}
+        """
+        try:
+            results = self.query(query)
+        except Exception:
+            logger.exception("Failed to read community report hashes")
+            return {}
+
+        hashes: Dict[int, str] = {}
+        for record in results:
+            try:
+                cid = int(record.get(COMMUNITY_ID))
+            except (TypeError, ValueError):
+                continue
+            value = record.get(CONTENT_HASH)
+            if value is not None:
+                hashes[cid] = str(value)
+        return hashes
+
     def update_community_reports(
         self,
         community_reports: pd.DataFrame,
@@ -826,7 +901,7 @@ class Manager:
 
         report_fields = (
             TITLE, SUMMARY, FULL_CONTENT, RATING,
-            EXPLANATION, FINDINGS, FULL_CONTENT_JSON,
+            EXPLANATION, FINDINGS, FULL_CONTENT_JSON, CONTENT_HASH,
         )
 
         for i in range(0, len(community_reports), batch_size):
@@ -883,6 +958,7 @@ class Manager:
             c.{EXPLANATION} = row.{EXPLANATION},
             c.{FINDINGS} = row.{FINDINGS},
             c.{FULL_CONTENT_JSON} = row.{FULL_CONTENT_JSON},
+            c.{CONTENT_HASH} = row.{CONTENT_HASH},
             c.report_updated_at = datetime()
         RETURN count(c) AS updated
         """
@@ -899,6 +975,7 @@ class Manager:
             c.{TITLE} = row.{TITLE},
             c.{COMMUNITY_ID} = toInteger(row.{COMMUNITY_ID}),
             c.{SHORT_ID} = row.{SHORT_ID},
+            c.{DOCUMENT_ID} = row.{DOCUMENT_ID},
             c.{COMMUNITY_PARENT} = toInteger(row.{COMMUNITY_PARENT}),
             c.{SIZE} = toInteger(row.{SIZE}),
             c.{PERIOD} = row.{PERIOD}
@@ -936,6 +1013,24 @@ class Manager:
         MERGE (c)-[:CONNECTED_TO_DOCUMENT]->(d)
         """
         tx.run(query, payload=payload)
+
+    @staticmethod
+    def _insert_inter_community_links_tx(tx, payload: List[Dict[str, Any]]) -> int:
+        query = f"""
+        UNWIND $payload AS row
+        MATCH (source:Community {{{COMMUNITY_ID}: row.source}})
+        MATCH (target:Community {{{COMMUNITY_ID}: row.target}})
+        MERGE (source)-[r:INTER_COMMUNITY_LINK]->(target)
+        SET r.{DOCUMENT_ID} = row.{DOCUMENT_ID},
+            r.shared_entities = toInteger(row.shared_entities),
+            r.{EDGE_WEIGHT} = toFloat(row.weight),
+            r.{COMMUNITY_LEVEL} = toInteger(row.level)
+        RETURN count(r) AS created
+        """
+        result = tx.run(query, payload=payload)
+        record = result.single()
+        return int(record["created"]) if record else 0
+
     # --- ВСПОМОГАТЕЛЬНЫЕ ЛОГИЧЕСКИЕ ФУНКЦИИ ---
     def add_structural_link(self, semantic_node_id: str, structural_node_id: str, relationship_type: str = "STRUCTURAL_CONNECTION"):
         """Add a link between a semantic graph node and a structural graph node.
@@ -1093,6 +1188,41 @@ class Manager:
         except Exception as e:
             logger.warning("get_cross_graph_bridge failed: %s", e)
             return []
+
+    def get_related_entity_links(
+        self, entity_titles: List[str], limit: int = 20
+    ) -> Dict[str, List[str]]:
+        """For each entity title, return titles of directly RELATED entities.
+
+        Only counts relationships where *both* entities appear in the
+        supplied ``entity_titles`` list (i.e. entities present in the
+        current context), so the caller can show cross-references.
+        """
+        if not entity_titles:
+            return {}
+        query = f"""
+        MATCH (e1:Entity)-[:RELATED]-(e2:Entity)
+        WHERE e1.title IN $titles
+          AND e2.title IN $titles
+          AND e1.title <> e2.title
+        RETURN e1.title AS source, collect(DISTINCT e2.title) AS related
+        LIMIT $limit
+        """
+        try:
+            results = self.query(query, {
+                "titles": entity_titles, "limit": limit,
+            })
+            out: Dict[str, List[str]] = {}
+            for r in results:
+                data = r.data()
+                src = data.get("source", "")
+                rel = data.get("related", [])
+                if src and rel:
+                    out[src] = rel
+            return out
+        except Exception as e:
+            logger.warning("get_related_entity_links failed: %s", e)
+            return {}
 
     def get_entities_linked_to_region(
         self, region_id: str, limit: int = 20

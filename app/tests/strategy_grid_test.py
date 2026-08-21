@@ -128,10 +128,10 @@ STRATEGIES: List[Strategy] = [
     # ----- Retrieval variants -----
     Strategy("reranker", "Reranker",
              use_reranker=True),
-    Strategy("mmr_07", "MMR (λ=0.7)",
-             use_mmr_reranker=True, mmr_lambda=0.7),
-    Strategy("mmr_05", "MMR (λ=0.5)",
-             use_mmr_reranker=True, mmr_lambda=0.5),
+#    Strategy("mmr_07", "MMR (λ=0.7)",
+#             use_mmr_reranker=True, mmr_lambda=0.7),
+#    Strategy("mmr_05", "MMR (λ=0.5)",
+#             use_mmr_reranker=True, mmr_lambda=0.5),
     Strategy("mmr_09", "MMR (λ=0.9)",
              use_mmr_reranker=True, mmr_lambda=0.9),
 
@@ -149,14 +149,6 @@ STRATEGIES: List[Strategy] = [
     Strategy("structural_reranker", "Structural + Reranker",
              use_structured_graph=True, use_reranker=True),
 
-    # ----- Query processing variants -----
-    Strategy("decompose", "Question Decomposition",
-             use_semantic_graph=True, use_structured_graph=True,
-             use_question_decomposition=True),
-    Strategy("iterative", "Iterative Search",
-             use_semantic_graph=True, use_structured_graph=True,
-             use_iterative_search=True),
-
     # ----- Dual-graph (activates BFS Crawler C10) -----
     Strategy("both_graphs", "Semantic + Structural",
              use_semantic_graph=True, use_structured_graph=True),
@@ -167,29 +159,37 @@ STRATEGIES: List[Strategy] = [
              use_semantic_graph=True, use_structured_graph=True,
              use_mmr_reranker=True, mmr_lambda=0.7),
 
+    # ----- Query processing variants -----
+    Strategy("decompose", "Question Decomposition",
+             use_semantic_graph=True, use_structured_graph=True,
+             use_question_decomposition=True),
+#    Strategy("iterative", "Iterative Search",
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_iterative_search=True),
+
     # ----- Full system variants -----
     Strategy("full_system", "Full System (All)",
              use_reranker=True,
              use_semantic_graph=True, use_structured_graph=True,
              use_iterative_search=True),
-    Strategy("full_mmr07", "Full + MMR λ=0.7",
-             use_mmr_reranker=True, mmr_lambda=0.7,
-             use_semantic_graph=True, use_structured_graph=True,
-             use_iterative_search=True),
-    Strategy("full_mmr05", "Full + MMR λ=0.5",
-             use_mmr_reranker=True, mmr_lambda=0.5,
-             use_semantic_graph=True, use_structured_graph=True,
-             use_iterative_search=True),
-    Strategy("full_mmr09", "Full + MMR λ=0.9",
-             use_mmr_reranker=True, mmr_lambda=0.9,
-             use_semantic_graph=True, use_structured_graph=True,
-             use_iterative_search=True),
+#    Strategy("full_mmr07", "Full + MMR λ=0.7",
+#             use_mmr_reranker=True, mmr_lambda=0.7,
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_iterative_search=False),
+#    Strategy("full_mmr05", "Full + MMR λ=0.5",
+#             use_mmr_reranker=True, mmr_lambda=0.5,
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_iterative_search=True),
+#    Strategy("full_mmr09", "Full + MMR λ=0.9",
+#             use_mmr_reranker=True, mmr_lambda=0.9,
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_iterative_search=True),
 
     # ----- Graph-only + Iterative -----
-    Strategy("semantic_iterative", "Semantic + Iterative",
-             use_semantic_graph=True, use_iterative_search=True),
-    Strategy("structural_iterative", "Structural + Iterative",
-             use_structured_graph=True, use_iterative_search=True),
+#    Strategy("semantic_iterative", "Semantic + Iterative",
+#             use_semantic_graph=True, use_iterative_search=True),
+#    Strategy("structural_iterative", "Structural + Iterative",
+#             use_structured_graph=True, use_iterative_search=True),
 ]
 
 
@@ -205,7 +205,7 @@ def read_json(filename: str) -> Any:
 
 def ask_document(base_url: str, strategy: Strategy,
                  file_hash: str, question: str,
-                 limit: int = 10, timeout: int = 300) -> Dict[str, Any]:
+                 limit: int = 30, timeout: int = 300) -> Dict[str, Any]:
     """Call /ask-document with the given strategy."""
     payload = strategy.to_payload(file_hash, question, limit)
 
@@ -275,7 +275,7 @@ def run_grid_test(
     dataset_path: str = "",
     file_hash_map_path: str = "",
     output_dir: str = "",
-    limit: int = 10,
+    limit: int = 30,
     strategy_filter: Optional[List[str]] = None,
     skip_extraction: bool = False,
     sort_reference: str = "",
@@ -424,7 +424,7 @@ def run_grid_test(
                 )
                 model_answer_time = time.time() - start
 
-                llm_answer = result.get("llm_answer", "")
+                llm_answer = result.get("llm_answer", "") or ""
 
                 # --- Optional: Extract short answer via Qwen API ---
                 extract_start = time.time()
@@ -548,7 +548,7 @@ if __name__ == "__main__":
         help="Directory for strategy result files",
     )
     ap.add_argument(
-        "--limit", type=int, default=10,
+        "--limit", type=int, default=30,
         help="Number of retrieves per query",
     )
     ap.add_argument(

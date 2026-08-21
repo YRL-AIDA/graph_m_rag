@@ -87,7 +87,7 @@ class MainAppClient:
         self,
         file_hash: str,
         question: str,
-        limit: int = 20,
+        limit: int = 30,
         collection_name: Optional[str] = None,
         use_llm: bool = False,
         use_reranker: bool = False
@@ -155,7 +155,7 @@ if __name__ == "__main__":
     # Point to your actual main application URL
     client = MainAppClient(base_url="http://0.0.0.0:9191")
 
-    limit = 20
+    limit = 30
 
     for k, caser in enumerate(dataset):
         start_time = time.time()

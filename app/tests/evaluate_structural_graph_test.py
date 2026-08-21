@@ -60,8 +60,14 @@ def write_json(path: str, data: Any) -> None:
 # Answer extraction  (identical to evaluate_strategies.py)
 # ---------------------------------------------------------------------------
 
-# Pattern to strip  ...  thinking blocks
-_THINK_PATTERN = re.compile(r".*?", re.DOTALL)
+# Template placeholders that the model sometimes echoes verbatim instead of
+# filling in (e.g. "Extracted answer: [answer]"). These must never be scored.
+_PLACEHOLDER_RE = re.compile(r"^\[[A-Za-z][A-Za-z0-9\s_.-]*\]$")
+
+# Priority: [FINAL_ANSWER] marker (from updated system prompt), then legacy markers
+_FINAL_ANSWER_PATTERN = re.compile(
+    r"\[FINAL_ANSWER\]\s*:\s*(.+?)(?:\n|$)", re.IGNORECASE
+)
 
 # Try explicit "Extracted answer:" / "Answer:" lines
 _EXTRACTED_PATTERN = re.compile(
@@ -69,54 +75,138 @@ _EXTRACTED_PATTERN = re.compile(
 )
 
 
-def extract_pred_from_extracted_res(extracted_res: str) -> str:
-    """Mirrors the extraction in smallerdataset_evaluation.py.
+def _strip_thinking(text: str) -> str:
+    """Remove everything up to and including the last ``</think>`` marker.
 
-    Input example:
-        "Answer format: Str\nExtracted answer: 42"
-    Returns "42", or "Failed to extract" on failure.
-
-    Uses rsplit to find the LAST "Extracted answer:" marker, avoiding
-    accidental extraction of template placeholders like "[answer]" from
-    the system prompt instructions that also contain these markers.
+    The final answer always appears after the closing think tag; anything
+    before it is chain-of-thought and must not be scored.
     """
-    try:
-        if "Extracted answer:" in extracted_res:
-            # rsplit from the right to skip any template placeholder
-            # occurrences of "Extracted answer:" and "Answer format:"
-            after_extracted = extracted_res.rsplit("Extracted answer:", 1)[-1]
-            pred = after_extracted.split("Answer format:")[0].strip()
-            if pred:
-                return pred
-        return "Failed to extract"
-    except (IndexError, AttributeError):
-        return "Failed to extract"
+    if not text:
+        return ""
+    idx = text.rfind("</think>")
+    if idx != -1:
+        return text[idx + len("</think>"):].strip()
+    return text.strip()
+
+
+# Failure sentinels emitted by the extraction pipeline. Tolerates trailing
+# punctuation (e.g. "Failed to extract.") which the exact-equality check below
+# used to miss.
+_FAILED_SENTINEL_RE = re.compile(r"^failed\s+to\s+extract\b", re.IGNORECASE)
+
+
+def _is_failed_sentinel(value: str) -> bool:
+    """True if ``value`` is a literal extraction-failure sentinel."""
+    return bool(_FAILED_SENTINEL_RE.match((value or "").strip()))
+
+
+def _is_placeholder(value: str) -> bool:
+    """True if ``value`` is an unfilled template placeholder like ``[answer]``.
+
+    Tolerates surrounding quotes and trailing punctuation (e.g. "[answer].",
+    "[answer],", "[answer]%") which the model sometimes emits when echoing the
+    template verbatim. These must never be scored.
+    """
+    v = (value or "").strip()
+    if not v:
+        return True
+    v = v.strip('"').strip("'").strip("`").strip()
+    v = v.rstrip(".,;:!?%").strip()
+    if not v:
+        return True
+    return bool(_PLACEHOLDER_RE.match(v))
+
+
+def _clean_extracted_value(raw: str) -> str:
+    """Normalize a value found after an 'Extracted answer:' marker.
+
+    Strips surrounding quotes/backticks and rejects placeholders and failure
+    sentinels, returning "" when the value is unusable.
+    """
+    value = (raw or "").strip()
+    value = value.strip('"').strip("'").strip("`").strip()
+    if _is_placeholder(value) or _is_failed_sentinel(value):
+        return ""
+    return value
+
+
+def extract_pred_from_extracted_res(extracted_res: str) -> str:
+    """Extract the final answer from ``extracted_res``.
+
+    Returns "" (instead of "Failed to extract") when no usable value is found,
+    so the caller can fall back to ``llm_answer``. Scans markers right-to-left
+    and takes the first real value, rejecting unfilled template placeholders
+    like "[answer]" that appear in the reasoning text.
+    """
+    if not extracted_res:
+        return ""
+    if not isinstance(extracted_res, str):
+        extracted_res = str(extracted_res)
+
+    text = extracted_res.strip()
+    if not text:
+        return ""
+
+    # Upstream pipeline sometimes stores a literal failure sentinel.
+    if _is_failed_sentinel(text):
+        return ""
+
+    # Every "Extracted answer:" occurrence; template placeholders may appear
+    # earlier in the reasoning, the real value after </think>.
+    parts = text.split("Extracted answer:")
+    for after in reversed(parts[1:]):
+        value = after.split("Answer format:")[0].strip()
+        cleaned = _clean_extracted_value(value)
+        if cleaned:
+            return cleaned
+
+    return ""
 
 
 def extract_pred_from_llm_answer(llm_answer: str) -> str:
     """Heuristic fallback: extract a short answer from raw LLM output.
 
-    Strips  ...  blocks, then looks for explicit answer markers,
-    then falls back to the last non-empty line.
+    Priority order:
+      1. [FINAL_ANSWER]: marker  (from updated system prompt)
+      2. "Extracted answer:" / "Answer:" markers
+      3. Python list string (e.g. ['item1', 'item2'])
+      4. Last non-empty line as fallback
+
+    Strips <think>...</think> blocks first.
     """
     if not llm_answer:
         return ""
 
-    # Remove thinking block
-    text = _THINK_PATTERN.sub("", llm_answer).strip()
+    text = _strip_thinking(llm_answer)
 
-    # Try explicit markers
-    m = _EXTRACTED_PATTERN.search(text)
+    # Priority 1: [FINAL_ANSWER] marker from updated prompt
+    m = _FINAL_ANSWER_PATTERN.search(text)
     if m:
-        candidate = m.group(1).strip()
-        if len(candidate) < 200 or candidate.startswith("["):
+        candidate = _clean_extracted_value(m.group(1))
+        if candidate:
             return candidate
 
-    # Fallback: last non-empty line
-    lines = [l for l in text.split("\n") if l.strip()]
-    if lines:
-        return lines[-1].strip()
-    return text.strip()
+    # Priority 2: Legacy markers (Extracted answer: / Answer:)
+    m = _EXTRACTED_PATTERN.search(text)
+    if m:
+        candidate = _clean_extracted_value(m.group(1))
+        if candidate:
+            return candidate
+
+    # Priority 3: Detect Python list strings: ['val1', 'val2']
+    list_match = re.search(r"\[([^\]]+)\]", text)
+    if list_match:
+        inner = list_match.group(1)
+        if inner.count("'") >= 4 or inner.count('"') >= 4:
+            return list_match.group(0)
+
+    # Fallback: last non-empty, non-placeholder line
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    for line in reversed(lines):
+        candidate = _clean_extracted_value(line)
+        if candidate:
+            return candidate
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -152,14 +242,22 @@ def evaluate_strategy(
         gt_info = ground_truth_map.get((doc_id, question), {})
 
         # --- Extract predicted answer ---
+        # Path 1: extracted_res available (via-API pipeline) — use exact
+        #         smallerdataset_evaluation.py logic
+        # Path 2: only llm_answer (strategy grid results) — heuristic fallback
         extracted_res = r.get("extracted_res")
+        pred = ""
         if extracted_res is not None and str(extracted_res) not in ("None", ""):
             pred = extract_pred_from_extracted_res(str(extracted_res))
-        else:
+
+        # Fall back to the raw LLM answer when extracted_res is missing or
+        # yielded no usable value (e.g. "Failed to extract" or a placeholder).
+        if not pred:
             llm_answer = r.get("llm_answer", "")
             pred = extract_pred_from_llm_answer(llm_answer)
-            if not pred:
-                continue
+
+        if not pred:
+            continue
 
         # --- Score via eval_score ---
         correct_answer = gt_info.get("answer", r.get("answer", ""))

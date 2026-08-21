@@ -29,7 +29,7 @@ class QuestionRequest(BaseModel):
     """Request model for asking a question about a document"""
     file_hash: str
     question: str
-    limit: int = 10
+    limit: int = 30
     collection_name: Optional[str] = None  # Optional collection name
     use_llm: bool = False  # Option to generate answer using LLM
     use_reranker: bool = False  # Option to use API reranker for re-ranking results

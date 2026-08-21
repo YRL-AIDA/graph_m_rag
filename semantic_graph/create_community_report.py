@@ -409,8 +409,12 @@ async def build_local_context(
         communities_at_level_df = await _prepare_reports_at_level(
             nodes, edges, llm, model, level, max_context_tokens
         )
+        if communities_at_level_df.empty:
+            continue
         communities_at_level_df.loc[:, config.COMMUNITY_LEVEL] = level
         dfs.append(communities_at_level_df)
+    if not dfs:
+        return pd.DataFrame()
     return pd.concat(dfs)
 
 

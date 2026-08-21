@@ -12,6 +12,7 @@ import logging
 import time
 from datetime import datetime
 from operator import itemgetter
+from collections import defaultdict
 from typing import Dict, List, Optional, Any
 
 import uvicorn
@@ -37,6 +38,7 @@ from app.src.utils.mmr_reranker import mmr_rerank_with_threshold
 from app.src.question_decomposer import decompose_question, merge_search_results
 from app.src.iterative_search import iterative_retrieval
 from app.src.utils.answer_formatter import format_answer
+from app.src.image_captioner import generate_captions_for_captionless_images
 from semantic_graph.traversal import TraversalConfig, UnifiedGraphCrawler
 
 # Setup logging
@@ -1078,6 +1080,26 @@ async def upload_pdf(file: UploadFile = File(...)):
         if not elements:
             logger.warning(f"No content elements found in MinerU result for file {file_hash}")
 
+        # Generate text descriptions for caption-less images before indexing.
+        # `elements` is the same list referenced by `mineru_result`, so the
+        # generated captions are also picked up by Neo4j graph construction.
+        if settings.llm.IMAGE_CAPTIONING_ENABLED:
+            try:
+                captions_generated = generate_captions_for_captionless_images(
+                    elements,
+                    llm_client=llm_client,
+                    minio_client=minio_client,
+                    enabled=True,
+                    temperature=settings.llm.IMAGE_CAPTIONING_TEMPERATURE,
+                    max_tokens=settings.llm.IMAGE_CAPTIONING_MAX_TOKENS,
+                )
+                logger.info(
+                    f"Generated captions for {captions_generated} caption-less images "
+                    f"for file {file_hash}"
+                )
+            except Exception as caption_error:
+                logger.error(f"Image captioning failed for file {file_hash}: {caption_error}")
+
         # Compute embeddings synchronously
         embeddings_count = compute_embeddings_for_elements(elements, file_hash)
         logger.info(f"Completed embedding computation: {embeddings_count} elements processed for file {file_hash}")
@@ -1223,17 +1245,22 @@ def connect_structural_and_semantic_graphs(file_hash: str):
         with neo4j_service.driver.session() as session:
             # First, ensure the document node exists in the structural graph
             # Create or merge the document node if it doesn't exist
+            # NOTE: The Document node is created with the `name` property (holding the
+            # file_hash value) by the structural/semantic graph managers. Using
+            # `file_hash` as the MERGE key here would create a SECOND, bare Document
+            # node without any relationships. Match on `name` (the canonical key) and
+            # backfill `file_hash` for compatibility with queries that use it.
             doc_query = """
-            MERGE (d:Document {file_hash: $file_hash})
-            ON CREATE SET d.created_at = datetime()
-            ON MATCH SET d.updated_at = datetime()
+            MERGE (d:Document {name: $file_hash})
+            ON CREATE SET d.created_at = datetime(), d.file_hash = $file_hash
+            ON MATCH SET d.updated_at = datetime(), d.file_hash = $file_hash
             RETURN d
             """
             session.run(doc_query, file_hash=file_hash)
 
             # Find all entities related to this document in the structural graph
             struct_query = """
-            MATCH (d:Document {file_hash: $file_hash})<-[:PART_OF]-(e:Entity)
+            MATCH (d:Document {name: $file_hash})<-[:PART_OF]-(e:Entity)
             RETURN e.title AS entity_title, e.label AS entity_label
             """
 
@@ -1245,7 +1272,7 @@ def connect_structural_and_semantic_graphs(file_hash: str):
             for entity_title, entity_label in document_entities:
                 # Find the corresponding entity in the semantic graph and its community
                 connect_query = """
-                MATCH (d:Document {file_hash: $file_hash})
+                MATCH (d:Document {name: $file_hash})
                 MATCH (e:Entity {title: $entity_title, type: $entity_label})
                 MATCH (e)-[:IN_COMMUNITY]->(c:Community)
                 MERGE (d)-[:CONNECTS_TO {relationship_type: 'SEMANTIC_CONNECTION', created_at: datetime()}]->(c)
@@ -1363,6 +1390,24 @@ def index_document_by_hash(file_hash: str, client=None) -> bool:
             logger.error(f"No elements found in MinerU result for file_hash: {file_hash}")
             return False
 
+        # Generate text descriptions for caption-less images before indexing.
+        if settings.llm.IMAGE_CAPTIONING_ENABLED:
+            try:
+                captions_generated = generate_captions_for_captionless_images(
+                    elements,
+                    llm_client=llm_client,
+                    minio_client=minio_client,
+                    enabled=True,
+                    temperature=settings.llm.IMAGE_CAPTIONING_TEMPERATURE,
+                    max_tokens=settings.llm.IMAGE_CAPTIONING_MAX_TOKENS,
+                )
+                logger.info(
+                    f"Generated captions for {captions_generated} caption-less images "
+                    f"for file_hash: {file_hash}"
+                )
+            except Exception as caption_error:
+                logger.error(f"Image captioning failed for file_hash {file_hash}: {caption_error}")
+
         # Compute embeddings for elements
         embeddings_count = compute_embeddings_for_elements(elements, file_hash)
         logger.info(f"Indexed {embeddings_count} elements for file_hash: {file_hash}")
@@ -1390,6 +1435,96 @@ async def ask_document_page():
             status_code=404,
             detail="Web interface not found"
         )
+
+
+def _xml_escape(text: str) -> str:
+    """Escape XML special characters so embedded text never breaks markup."""
+    if not text:
+        return ""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def _format_grounding_box(bbox) -> str:
+    """Format a MinerU bbox as Qwen3-VL grounding tokens.
+
+    MinerU bboxes are already normalized to 0-1000 (page coordinates), which is
+    exactly the range Qwen3-VL expects for ``<|box_start|>`` tokens.
+
+    Returns the token string ``<|box_start|>(x1,y1),(x2,y2)<|box_end|>`` or an
+    empty string when the bbox is missing/invalid.
+    """
+    if not bbox or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return ""
+    try:
+        x1, y1, x2, y2 = (int(round(float(v))) for v in bbox)
+    except (TypeError, ValueError):
+        return ""
+    return f"<|box_start|>({x1},{y1}),({x2},{y2})<|box_end|>"
+
+
+def _format_context_block(ans: dict, idx: int, file_hash: str) -> str:
+    """Format a single Qdrant answer block as XML for structured context.
+
+    Args:
+        ans: Answer dict with keys element_type, text, score, page_idx, element_index,
+             and optionally neo4j_context (parent element, sibling captions,
+             footnotes)
+        idx: Block index (0-based)
+        file_hash: Document file hash
+
+    Returns:
+        XML string like:
+        <block id="1" type="text" page="14" relevance="0.9521">
+          <content>...text...</content>
+          <related_element type="caption" relation="sibling">...</related_element>
+        </block>
+    """
+    element_type = ans.get("element_type", "text")
+    text = ans.get("text", "")
+    score = ans.get("score", 0)
+    page = ans.get("page_idx", "")
+    lines = [
+        f'    <block id="{idx+1}" type="{_xml_escape(element_type)}" '
+        f'page="{_xml_escape(str(page))}" relevance="{score:.4f}">'
+    ]
+    if element_type in ("image", "table"):
+        # Visual content is attached as multimodal input separately; the
+        # text block anchors it with any available description/caption.
+        marker = "[IMAGE]" if element_type == "image" else "[TABLE]"
+        content = marker if not text else f"{marker} {text}"
+        lines.append(f"      <content>{_xml_escape(content)}</content>")
+    elif text:
+        lines.append(f"      <content>{_xml_escape(text)}</content>")
+
+    # Neo4j enrichment: parent element, sibling captions, footnotes
+    neo4j_context = ans.get("neo4j_context")
+    if neo4j_context:
+        parent_element = neo4j_context.get("parent_element")
+        if parent_element and parent_element.get("text"):
+            lines.append(
+                f'      <related_element type="{_xml_escape(parent_element.get("type", "element"))}" '
+                f'relation="parent">{_xml_escape(parent_element["text"])}</related_element>'
+            )
+        for cap in neo4j_context.get("sibling_captions", []):
+            if cap.get("text"):
+                lines.append(
+                    f'      <related_element type="caption" relation="sibling">'
+                    f'{_xml_escape(cap["text"])}</related_element>'
+                )
+        for fn in neo4j_context.get("sibling_footnotes", []):
+            if fn.get("text"):
+                lines.append(
+                    f'      <related_element type="footnote" relation="sibling">'
+                    f'{_xml_escape(fn["text"])}</related_element>'
+                )
+    lines.append("    </block>")
+    return "\n".join(lines)
 
 
 @app.post("/ask-document", response_model=QuestionResponse)
@@ -1436,6 +1571,7 @@ async def ask_document(request: QuestionRequest,
         getattr(request, 'use_question_decomposition', False)
     )
     answer_format = getattr(request, 'answer_format', None)
+    use_structured_context = getattr(request, 'use_structured_context', True)
 
     # Use specified collection or default
     client = get_qdrant_client(collection_name=collection_name) if collection_name else qdrant_client
@@ -1508,10 +1644,7 @@ async def ask_document(request: QuestionRequest,
         # to reduce false N/A caused by missing relevant chunks at the retrieval stage.
         # Reranker / MMR will later filter to the final top-k.
         rerank_top_n = settings.reranker.RERANKER_TOP_N if hasattr(settings.reranker, 'RERANKER_TOP_N') else limit
-        if use_reranker:
-            search_limit = max(limit * 5, rerank_top_n)
-        else:
-            search_limit = max(limit * 5, 50)
+        search_limit = max(limit * 5, rerank_top_n)
 
         # --- Run search (multi-query if decomposed, single otherwise) ---
         if sub_questions and len(sub_questions) > 1:
@@ -1579,6 +1712,7 @@ async def ask_document(request: QuestionRequest,
         answers = []
         documents_to_rerank = []
         search_results_map = {}
+        related_answers_map = {}
 
         # Initialize Neo4j service for context enrichment (if available)
         neo4j_service = None
@@ -1629,6 +1763,7 @@ async def ask_document(request: QuestionRequest,
             if neo4j_service and element_type in ("image", "table", "image_caption", "image_footnote", "table_caption",
                                                   "table_footnote"):
             #if neo4j_service and element_type in ("image_caption", "image_footnote"):
+                related_blocks = []
                 try:
                     related_context = neo4j_service.get_related_context(file_hash, element_type, text)
                     if related_context and (related_context.get("parent_element") or related_context.get("sibling_captions") or related_context.get("sibling_footnotes")):
@@ -1665,6 +1800,7 @@ async def ask_document(request: QuestionRequest,
                                     logger.warning(f"Failed to download parent image {parent_element.get('image')}: {e}")
 
                             answers.append(parent_answer)
+                            related_blocks.append(parent_answer)
                             logger.debug(f"Added parent element answer: {parent_element.get('type')}")
 
                         # Add sibling captions as separate answers
@@ -1716,6 +1852,7 @@ async def ask_document(request: QuestionRequest,
                                     "related_to_element_type": element_type
                                 }
                                 answers.append(caption_answer)
+                                related_blocks.append(caption_answer)
                                 logger.debug(f"Added sibling caption answer: {caption_text[:50]}...")
 
                         # Add sibling footnotes as separate answers
@@ -1767,9 +1904,13 @@ async def ask_document(request: QuestionRequest,
                                     "related_to_element_type": element_type
                                 }
                                 answers.append(footnote_answer)
+                                related_blocks.append(footnote_answer)
                                 logger.debug(f"Added sibling footnote answer: {footnote_text[:50]}...")
                 except Exception as e:
                     logger.warning(f"Failed to get Neo4j context for {element_type}: {e}")
+
+                if related_blocks:
+                    related_answers_map[idx] = related_blocks
 
             # Download image data for image and table elements, or for caption/footnote with image reference
             if element_type in ("image") and answer["img_path"]:
@@ -1818,6 +1959,17 @@ async def ask_document(request: QuestionRequest,
         # Apply reranking if enabled and we have documents
         use_reranker = getattr(request, 'use_reranker', False)
         if use_reranker and documents_to_rerank:
+            # `documents_to_rerank` holds only primary blocks, indexed by the
+            # search-result position. `search_results_map` maps that same index
+            # to the primary answer, so it must stay aligned with
+            # `documents_to_rerank`. (Bug #1: previously `answers[...]` was used
+            # here, which could point at a related context block.)
+            if len(documents_to_rerank) != len(search_results_map):
+                logger.warning(
+                    "documents_to_rerank (%d) and search_results_map (%d) size mismatch",
+                    len(documents_to_rerank), len(search_results_map),
+                )
+
             try:
                 rerank_result = reranker_client.rerank(
                     query_text=question,
@@ -1830,13 +1982,22 @@ async def ask_document(request: QuestionRequest,
                 )
                 reranked_answers = []
                 for res in rerank_messages[:limit]:
-                    answer_copy = answers[res.message_id].copy()
+                    answer_copy = search_results_map[res.message_id].copy()
                     answer_copy["reranker_score"] = res.score
                     answer_copy["original_score"] = answer_copy["score"]
                     answer_copy["score"] = res.score  # Use reranker score as primary
                     reranked_answers.append(answer_copy)
 
-                answers = reranked_answers
+                # Restore the related context blocks (parent/caption/footnote)
+                # that belong to each selected primary answer. These carry their
+                # own images (e.g. the caption's image), so dropping them — as the
+                # plain `answers = reranked_answers` replacement did — loses
+                # multimodal context that baseline preserves.
+                answers = []
+                for res, answer_copy in zip(rerank_messages[:limit], reranked_answers):
+                    answers.extend(related_answers_map.get(res.message_id, []))
+                    answers.append(answer_copy)
+
                 logger.info(f"Reranking applied: {len(answers)} results reordered")
             except Exception as e:
                 logger.warning(f"Reranking failed: {e}. Using original search results.")
@@ -1911,6 +2072,32 @@ async def ask_document(request: QuestionRequest,
             except Exception as e:
                 logger.warning("MMR reranking failed: %s. Using original results.", e)
 
+        # --- Uniform region cap (all strategies) ---
+        # The API reranker and MMR paths already truncate `answers` to `limit`
+        # primary Qdrant regions. The plain-search path, however, keeps every
+        # retrieved candidate (search_limit = max(limit*5, RERANKER_TOP_N),
+        # i.e. up to 100 regions). Cap the plain path here so that EVERY
+        # strategy feeds the SAME number of primary regions (`limit`) into
+        # context assembly. This cap is idempotent: it is a no-op for the
+        # reranker/MMR paths (which already contain <= limit primary answers).
+        # Related-context answers (parent/caption/footnote, flagged with
+        # is_related_context=True) are preserved together with their parent
+        # primary answer.
+        _capped_answers = []
+        _primary_count = 0
+        for _ans in answers:
+            if not _ans.get("is_related_context", False):
+                if _primary_count >= limit:
+                    break
+                _primary_count += 1
+            _capped_answers.append(_ans)
+        if len(_capped_answers) < len(answers):
+            logger.info(
+                "Uniform region cap: %d -> %d answers (%d primary regions, limit=%d)",
+                len(answers), len(_capped_answers), _primary_count, limit,
+            )
+        answers = _capped_answers
+
         # Server-side timing checkpoint — end of search/rerank phase
         search_end = time.time()
 
@@ -1932,18 +2119,34 @@ async def ask_document(request: QuestionRequest,
                 # Build context with text, images, and Neo4j-enriched context
                 context_parts = []
 
-                # First, add all images at the beginning for better model attention
+                # Attach images/tables as multimodal input for the vision-capable LLM.
+                # The corresponding textual anchor blocks are rendered inside
+                # <document_context> via _format_context_block (see below), keeping
+                # visual content and its metadata (page, relevance) in one structure.
+                max_images = settings.context_budget.MAX_IMAGES
+                attached_images = 0
                 for idx, ans in enumerate(answers):
                     element_type = ans.get("element_type", "")
 
-                    # Add image if available (for image, table, and caption/footnote elements)
-                    if element_type in ("image", "table", "image_caption", "image_footnote") and ans.get("image_base64"):
+                    # Add image if available (for image, table, and caption/footnote elements).
+                    # Capped to MAX_IMAGES so vision tokens (which are not counted
+                    # by the character budget) cannot blow up the prompt.
+                    if (element_type in ("image", "table", "image_caption", "image_footnote")
+                            and ans.get("image_base64")):
+                        if attached_images >= max_images:
+                            break
+                        # Attach the image together with its location on the page
+                        # as Qwen3-VL grounding tokens. The bbox is normalized to
+                        # 0-1000 (MinerU convention), matching Qwen's expectation.
+                        grounding = _format_grounding_box(ans.get("bbox"))
+                        location_text = f"[IMAGE #{idx + 1}]"
+                        if ans.get("page_idx") is not None:
+                            location_text += f" (page {ans.get('page_idx')})"
+                        if grounding:
+                            location_text += f" located at {grounding}"
+                        user_message.add_text_content(location_text)
                         user_message.add_img_content_base64(ans["image_base64"])
-                        # Add marker for image reference
-                        img_ref = f"[ИЗОБРАЖЕНИЕ | CHART | FIGURE | IMAGE {idx+1}: тип={element_type}]"
-                        if ans.get("text"):
-                            img_ref += f" | {ans['text']}"
-                        context_parts.append(img_ref)
+                        attached_images += 1
 
                 # Build list of region_ids from Qdrant search results
                 region_ids = []
@@ -1952,42 +2155,80 @@ async def ask_document(request: QuestionRequest,
                     if element_index is not None:
                         region_ids.append(f"{file_hash}|{element_index}")
 
-                # Add separator before text context
-                context_parts.append("--- DOCUMENT CONTEXT ---")
+                # ===== QDRANT BLOCK RENDERING (XML or flat) =====
+                if use_structured_context and NEO4J_AVAILABLE and neo4j_service:
+                    # XML-structured: query Section nodes and group blocks by section
+                    section_map = {}
+                    try:
+                        section_map = neo4j_service.get_sections_for_regions(region_ids)
+                    except Exception:
+                        logger.debug("Failed to get section map", exc_info=True)
 
-                # Now add all text content with structured formatting
-                for idx, ans in enumerate(answers):
-                    element_type = ans.get("element_type", "")
+                    # Group answers by section
+                    sections: dict[str, dict] = {}
+                    unassigned = []
+                    for idx, ans in enumerate(answers):
+                        elem_idx = ans.get("element_index")
+                        region_id = f"{file_hash}|{elem_idx}" if elem_idx is not None else ""
+                        sec_info = section_map.get(region_id)
+                        if sec_info:
+                            sec_title = sec_info.get("title", "Untitled Section")
+                            if sec_title not in sections:
+                                sections[sec_title] = {"info": sec_info, "blocks": []}
+                            sections[sec_title]["blocks"].append((idx, ans))
+                        else:
+                            unassigned.append((idx, ans))
 
-                    # Add text content from the main answer
-                    if ans.get("text"):
-                        text_marker = f"[BLOCK {idx+1}]"
-                        if element_type:
-                            text_marker += f" (тип: {element_type})"
-                        context_parts.append(f"{text_marker}\n{ans['text']}")
+                    # Render XML with sections
+                    context_parts.append("<document_context>")
+                    for sec_title, sec_data in sections.items():
+                        context_parts.append(f'  <section title="{_xml_escape(sec_title)}">')
+                        for idx, ans in sec_data["blocks"]:
+                            block_xml = _format_context_block(
+                                ans, idx, file_hash
+                            )
+                            context_parts.append(block_xml)
+                        context_parts.append("  </section>")
+                    if unassigned:
+                        context_parts.append('  <section title="Other">')
+                        for idx, ans in unassigned:
+                            block_xml = _format_context_block(
+                                ans, idx, file_hash
+                            )
+                            context_parts.append(block_xml)
+                        context_parts.append("  </section>")
+                    context_parts.append("</document_context>")
+                else:
+                    # Legacy flat format
+                    context_parts.append("--- DOCUMENT CONTEXT ---")
+                    for idx, ans in enumerate(answers):
+                        element_type = ans.get("element_type", "")
+                        if ans.get("text"):
+                            text_marker = f"[BLOCK {idx+1}]"
+                            if element_type:
+                                text_marker += f" (тип: {element_type})"
+                            context_parts.append(f"{text_marker}\n{ans['text']}")
 
-                    # Add Neo4j context if available (for caption/footnote enrichment)
-                    neo4j_context = ans.get("neo4j_context")
-                    if neo4j_context:
-                        # For caption/footnote elements, add parent image/table context
-                        parent_element = neo4j_context.get("parent_element")
-                        if parent_element:
-                            parent_text = parent_element.get("text", "")
-                            if parent_text:
-                                context_parts.append(f"→ СВЯЗАННЫЙ ЭЛЕМЕНТ ({parent_element.get('type', 'element')}): {parent_text}")
+                        # Add Neo4j context if available (for caption/footnote enrichment)
+                        neo4j_context = ans.get("neo4j_context")
+                        if neo4j_context:
+                            parent_element = neo4j_context.get("parent_element")
+                            if parent_element:
+                                parent_text = parent_element.get("text", "")
+                                if parent_text:
+                                    context_parts.append(f"→ СВЯЗАННЫЙ ЭЛЕМЕНТ ({parent_element.get('type', 'element')}): {parent_text}")
 
-                        # For image/table elements, add caption/footnote context
-                        sibling_captions = neo4j_context.get("sibling_captions", [])
-                        for cap in sibling_captions:
-                            cap_text = cap.get("text", "")
-                            if cap_text:
-                                context_parts.append(f"→ ПОДПИСЬ: {cap_text}")
+                            sibling_captions = neo4j_context.get("sibling_captions", [])
+                            for cap in sibling_captions:
+                                cap_text = cap.get("text", "")
+                                if cap_text:
+                                    context_parts.append(f"→ ПОДПИСЬ: {cap_text}")
 
-                        sibling_footnotes = neo4j_context.get("sibling_footnotes", [])
-                        for fn in sibling_footnotes:
-                            fn_text = fn.get("text", "")
-                            if fn_text:
-                                context_parts.append(f"→ СНОСКА: {fn_text}")
+                            sibling_footnotes = neo4j_context.get("sibling_footnotes", [])
+                            for fn in sibling_footnotes:
+                                fn_text = fn.get("text", "")
+                                if fn_text:
+                                    context_parts.append(f"→ СНОСКА: {fn_text}")
 
                 # --- Semantic Graph: Entities and Communities ---
                 if use_semantic_graph and semantic_manager and region_ids:
@@ -1996,21 +2237,76 @@ async def ask_document(request: QuestionRequest,
                         entities = semantic_manager.get_entities_by_region_ids(
                             region_ids, limit=20
                         )
+                        # Build map of related-entity cross-references
+                        related_links: Dict[str, List[str]] = {}
+                        if entities:
+                            entity_titles = [
+                                ent.get("title", "") for ent in entities if ent.get("title")
+                            ]
+                            try:
+                                if entity_titles:
+                                    related_links = semantic_manager.get_related_entity_links(
+                                        entity_titles
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    "Failed to query related entity links: %s", e
+                                )
+
                         if entities:
                             context_parts.append(
-                                "--- SEMANTIC GRAPH: ENTITIES ---"
+                                '<semantic_context source="entities">'
+                                if use_structured_context
+                                else "--- SEMANTIC GRAPH: ENTITIES ---"
                             )
                             for ent in entities:
                                 title = ent.get("title", "")
                                 ent_type = ent.get("type", "")
                                 description = ent.get("description", "")
                                 degree = ent.get("degree", 0)
-                                line = f"• [{ent_type}] {title}"
-                                if description:
-                                    line += f" — {description[:300]}"
-                                if degree:
-                                    line += f" (связей: {degree})"
+                                region_id = ent.get("region_id", "")
+                                related = related_links.get(title, [])
+
+                                if use_structured_context:
+                                    # XML-structured entity line
+                                    region_ref = (
+                                        f' region_id="{region_id}"' if region_id else ""
+                                    )
+                                    related_ref = (
+                                        f' related="{", ".join(related)}"'
+                                        if related
+                                        else ""
+                                    )
+                                    desc_attr = (
+                                        f' description="{description[:300]}"'
+                                        if description
+                                        else ""
+                                    )
+                                    line = (
+                                        f'  <entity type="{ent_type}"'
+                                        f' name="{title}"'
+                                        f"{region_ref}"
+                                        f"{related_ref}"
+                                        f"{desc_attr}"
+                                    )
+                                    if degree:
+                                        line += f' degree="{degree}"'
+                                    line += " />"
+                                else:
+                                    line = f"• [{ent_type}] {title}"
+                                    if region_id:
+                                        line += f" (регион: {region_id})"
+                                    if description:
+                                        line += f" — {description[:300]}"
+                                    if degree:
+                                        line += f" (связей: {degree})"
+                                    if related:
+                                        line += f"\n  ⇄ связанные сущности: {', '.join(related)}"
+
                                 context_parts.append(line)
+
+                            if use_structured_context:
+                                context_parts.append("</semantic_context>")
                         else:
                             logger.info("No entities found via semantic graph for region_ids")
                     except Exception as e:
@@ -2025,7 +2321,9 @@ async def ask_document(request: QuestionRequest,
                         )
                         if communities:
                             context_parts.append(
-                                "--- SEMANTIC GRAPH: COMMUNITIES ---"
+                                '<semantic_context source="communities">'
+                                if use_structured_context
+                                else "--- SEMANTIC GRAPH: COMMUNITIES ---"
                             )
                             for comm in communities:
                                 title = comm.get("title", "")
@@ -2036,7 +2334,7 @@ async def ask_document(request: QuestionRequest,
                                 findings = comm.get("findings", [])
                                 full_content = comm.get("full_content", "")
 
-                                line = f"• {title}"
+                                line = f'<community name="{title}"' if use_structured_context else f"• {title}"
                                 if rating is not None:
                                     line += f" [рейтинг: {rating}/10]"
                                 if summary:
@@ -2073,6 +2371,9 @@ async def ask_document(request: QuestionRequest,
                                     context_parts.append(
                                         f"  ∟ полное содержание: {full_content[:800]}"
                                     )
+
+                            if use_structured_context:
+                                context_parts.append("</semantic_context>")
                         else:
                             logger.info("No communities found via semantic graph for region_ids")
                     except Exception as e:
@@ -2090,18 +2391,33 @@ async def ask_document(request: QuestionRequest,
                         )
                         if bridge_regions:
                             context_parts.append(
-                                "--- SEMANTIC GRAPH: REGIONS VIA ENTITIES (CROSS-GRAPH) ---"
+                                '<structural_context source="cross_graph">'
+                                if use_structured_context
+                                else "--- SEMANTIC GRAPH: REGIONS VIA ENTITIES (CROSS-GRAPH) ---"
                             )
                             for br_data in bridge_regions:
                                 br_text = br_data.get("text", "")
                                 br_label = br_data.get("label", "Region")
                                 br_entity = br_data.get("source_entity", "")
                                 if br_text:
-                                    src = f" [через: {br_entity}]" if br_entity else ""
-                                    context_parts.append(
-                                        f"• [{br_label.upper()}]{src} "
-                                        f"{br_text[:500]}"
-                                    )
+                                    if use_structured_context:
+                                        entity_attr = (
+                                            f' source_entity="{_xml_escape(br_entity)}"'
+                                            if br_entity else ""
+                                        )
+                                        context_parts.append(
+                                            f'  <region label="{_xml_escape(br_label.upper())}"'
+                                            f"{entity_attr}"
+                                            f' text="{_xml_escape(br_text[:500])}" />'
+                                        )
+                                    else:
+                                        src = f" [через: {br_entity}]" if br_entity else ""
+                                        context_parts.append(
+                                            f"• [{br_label.upper()}]{src} "
+                                            f"{br_text[:500]}"
+                                        )
+                            if use_structured_context:
+                                context_parts.append("</structural_context>")
                     except Exception as e:
                         logger.warning(
                             "Failed to enrich context via cross-graph bridge: %s", e
@@ -2115,20 +2431,47 @@ async def ask_document(request: QuestionRequest,
                         )
                         if order_neighbors:
                             context_parts.append(
-                                "--- STRUCTURAL GRAPH: NEIGHBOUR REGIONS BY READING ORDER ---"
+                                '<structural_context source="order_neighbors">'
+                                if use_structured_context
+                                else "--- STRUCTURAL GRAPH: NEIGHBOUR REGIONS BY READING ORDER ---"
                             )
                             for nb_data in order_neighbors:
                                 nb_text = nb_data.get("text", "")
                                 nb_label = nb_data.get("label", "")
                                 nb_source = nb_data.get("source", "order")
+                                nb_page = nb_data.get("page_idx", "")
+                                nb_region = nb_data.get("source_region_id", "")
                                 if nb_text:
-                                    prefix = {
-                                        "order": f"[{nb_label.upper() if nb_label else 'REGION'}]",
-                                        "parent": f"[PARENT: {nb_label.upper() if nb_label else 'REGION'}]",
-                                    }.get(nb_source, f"[{nb_label.upper() if nb_label else 'REGION'}]")
-                                    context_parts.append(
-                                        f"• {prefix} {nb_text[:500]}"
-                                    )
+                                    if use_structured_context:
+                                        source_attr = (
+                                            f' source_region="{nb_region}"'
+                                            if nb_region else ""
+                                        )
+                                        page_attr = (
+                                            f' page="{nb_page}"' if nb_page else ""
+                                        )
+                                        context_parts.append(
+                                            f'  <region label="{nb_label.upper() if nb_label else "REGION"}"'
+                                            f' source="{nb_source}"'
+                                            f"{source_attr}"
+                                            f"{page_attr}"
+                                            f' text="{nb_text[:500]}"'
+                                            f" />"
+                                        )
+                                    else:
+                                        prefix = {
+                                            "order": f"[{nb_label.upper() if nb_label else 'REGION'}]",
+                                            "parent": f"[PARENT: {nb_label.upper() if nb_label else 'REGION'}]",
+                                        }.get(nb_source, f"[{nb_label.upper() if nb_label else 'REGION'}]")
+                                        line = f"• {prefix} {nb_text[:500]}"
+                                        if nb_region:
+                                            line += f" (регион: {nb_region})"
+                                        if nb_page:
+                                            line += f" (стр: {nb_page})"
+                                        context_parts.append(line)
+
+                            if use_structured_context:
+                                context_parts.append("</structural_context>")
                     except Exception as e:
                         logger.warning(
                             "Failed to enrich context with structural walk: %s", e
@@ -2209,7 +2552,9 @@ async def ask_document(request: QuestionRequest,
                         )
                         if bfs_results:
                             context_parts.append(
-                                "--- BFS GRAPH TRAVERSAL: EXPANDED CONTEXT ---"
+                                '<structural_context source="bfs_crawler">'
+                                if use_structured_context
+                                else "--- BFS GRAPH TRAVERSAL: EXPANDED CONTEXT ---"
                             )
                             for bfr in bfs_results:
                                 src = bfr.get("source", "unknown")
@@ -2223,9 +2568,18 @@ async def ask_document(request: QuestionRequest,
                                         "community_sibling": "СУЩНОСТЬ СООБЩЕСТВА",
                                         "qdrant_match": "QDRANT РЕЗУЛЬТАТ",
                                     }.get(src, src.upper())
-                                    context_parts.append(
-                                        f"• [{label}] {bfr_text[:500]}"
-                                    )
+                                    if use_structured_context:
+                                        context_parts.append(
+                                            f'  <region label="{_xml_escape(label)}"'
+                                            f' source="{_xml_escape(src)}"'
+                                            f' text="{_xml_escape(bfr_text[:500])}" />'
+                                        )
+                                    else:
+                                        context_parts.append(
+                                            f"• [{label}] {bfr_text[:500]}"
+                                        )
+                            if use_structured_context:
+                                context_parts.append("</structural_context>")
                         logger.info(
                             "BFS crawler: %d regions enriched from %d seeds",
                             len(bfs_results), len(seed_regions),
@@ -2268,7 +2622,9 @@ async def ask_document(request: QuestionRequest,
                                         ent_results = (await resp.json()).get("result", [])
                                         if ent_results:
                                             context_parts.append(
-                                                "--- SEMANTIC SEARCH: ENTITIES (EMBEDDINGS) ---"
+                                                '<semantic_context source="embedding_search">'
+                                                if use_structured_context
+                                                else "--- SEMANTIC SEARCH: ENTITIES (EMBEDDINGS) ---"
                                             )
                                             for pt in ent_results:
                                                 payload = pt.get("payload", {})
@@ -2276,10 +2632,20 @@ async def ask_document(request: QuestionRequest,
                                                 etype = payload.get("entity_type", "")
                                                 desc = payload.get("description", "")
                                                 score = pt.get("score", 0)
-                                                line = f"• [{etype}] {title} (score: {score:.3f})"
-                                                if desc:
-                                                    line += f" — {desc[:250]}"
-                                                context_parts.append(line)
+                                                if use_structured_context:
+                                                    context_parts.append(
+                                                        f'  <entity type="{_xml_escape(etype)}"'
+                                                        f' name="{_xml_escape(title)}"'
+                                                        f' score="{score:.3f}"'
+                                                        f' description="{_xml_escape(desc[:250])}" />'
+                                                    )
+                                                else:
+                                                    line = f"• [{etype}] {title} (score: {score:.3f})"
+                                                    if desc:
+                                                        line += f" — {desc[:250]}"
+                                                    context_parts.append(line)
+                                            if use_structured_context:
+                                                context_parts.append("</semantic_context>")
                             except Exception:
                                 logger.debug("Entity embedding search skipped", exc_info=True)
 
@@ -2299,27 +2665,47 @@ async def ask_document(request: QuestionRequest,
                                         comm_results = (await resp.json()).get("result", [])
                                         if comm_results:
                                             context_parts.append(
-                                                "--- SEMANTIC SEARCH: COMMUNITIES (EMBEDDINGS) ---"
+                                                '<semantic_context source="embedding_search">'
+                                                if use_structured_context
+                                                else "--- SEMANTIC SEARCH: COMMUNITIES (EMBEDDINGS) ---"
                                             )
                                             for pt in comm_results:
                                                 payload = pt.get("payload", {})
                                                 ctitle = payload.get("community_title", payload.get("title", ""))
                                                 csummary = payload.get("summary", "")
                                                 score = pt.get("score", 0)
-                                                line = f"• {ctitle} (score: {score:.3f})"
-                                                if csummary:
-                                                    line += f" — {csummary[:400]}"
-                                                context_parts.append(line)
+                                                if use_structured_context:
+                                                    context_parts.append(
+                                                        f'  <community name="{_xml_escape(ctitle)}"'
+                                                        f' score="{score:.3f}"'
+                                                        f' summary="{_xml_escape(csummary[:400])}" />'
+                                                    )
+                                                else:
+                                                    line = f"• {ctitle} (score: {score:.3f})"
+                                                    if csummary:
+                                                        line += f" — {csummary[:400]}"
+                                                    context_parts.append(line)
+                                            if use_structured_context:
+                                                context_parts.append("</semantic_context>")
                             except Exception:
                                 logger.debug("Community embedding search skipped", exc_info=True)
                     except Exception as e:
                         logger.warning("Semantic embedding search failed: %s", e)
 
                 # Add end marker
-                context_parts.append("--- КОНЕЦ КОНТЕКСТА ---")
+                context_parts.append("--- END OF CONTEXT ---")
 
                 # --- MMR Reranking: diversity-aware context selection ---
-                if getattr(getattr(settings, 'mmr', None), 'USE_MMR_RERANKING', False) and question_embedding and len(context_parts) > 2:
+                # Gate on the per-strategy flag (use_mmr_reranker) so that the
+                # baseline strategy ("pure Qdrant + LLM") does NOT apply MMR,
+                # matching its documented description. The global toggle
+                # USE_MMR_RERANKING acts as an additional master switch.
+                if (
+                    use_mmr_reranker
+                    and getattr(getattr(settings, 'mmr', None), 'USE_MMR_RERANKING', False)
+                    and question_embedding
+                    and len(context_parts) > 2
+                ):
                     try:
                         # Embed each context part for MMR
                         part_embeddings = []
@@ -2340,34 +2726,94 @@ async def ask_document(request: QuestionRequest,
                             )
                             context_parts = reranked_parts
                             # Ensure end marker is present
-                            if "--- КОНЕЦ КОНТЕКСТА ---" not in context_parts:
-                                context_parts.append("--- КОНЕЦ КОНТЕКСТА ---")
+                            if "--- END OF CONTEXT ---" not in context_parts:
+                                context_parts.append("--- END OF CONTEXT ---")
                     except Exception as e:
                         logger.warning("MMR reranking failed, using original: %s", e)
 
-                # --- Deduplicate context blocks & enforce per-source token budgets ---
-                MAX_CONTEXT_CHARS = 12000
+                # --- Deduplicate context blocks & enforce per-source budgets ---
+                # Total text budget in characters (hard backstop). Graph-enrichment
+                # sources are capped by the fractional budgets below; the primary
+                # Qdrant retrieval is bounded by the request `limit` (block count)
+                # instead, so it only obeys the global MAX_CONTEXT_CHARS backstop.
+                MAX_CONTEXT_CHARS = settings.context_budget.MAX_CONTEXT_CHARS
 
-                # Map section header → source budget fraction (sum ≤ 1.0)
+                # Map section header → budget source key. Keys cover BOTH flat
+                # headers and XML opening tags so budgeting is format-agnostic.
                 _SECTION_SOURCE: dict[str, str] = {
                     "--- DOCUMENT CONTEXT ---": "qdrant",
+                    "<document_context>": "qdrant",
                     "--- SEMANTIC GRAPH: ENTITIES ---": "entities",
+                    '<semantic_context source="entities">': "entities",
                     "--- SEMANTIC GRAPH: COMMUNITIES ---": "communities",
+                    '<semantic_context source="communities">': "communities",
                     "--- SEMANTIC GRAPH: REGIONS VIA ENTITIES (CROSS-GRAPH) ---": "cross_graph",
+                    '<structural_context source="cross_graph">': "cross_graph",
                     "--- STRUCTURAL GRAPH: NEIGHBOUR REGIONS BY READING ORDER ---": "order_neighbors",
+                    '<structural_context source="order_neighbors">': "order_neighbors",
                     "--- BFS GRAPH TRAVERSAL: EXPANDED CONTEXT ---": "bfs_crawler",
+                    '<structural_context source="bfs_crawler">': "bfs_crawler",
                     "--- SEMANTIC SEARCH: ENTITIES (EMBEDDINGS) ---": "embedding_search",
                     "--- SEMANTIC SEARCH: COMMUNITIES (EMBEDDINGS) ---": "embedding_search",
+                    '<semantic_context source="embedding_search">': "embedding_search",
                 }
+
+                # Fraction of MAX_CONTEXT_CHARS reserved for each graph source.
+                # `qdrant` is intentionally absent: the primary retrieval is
+                # already count-limited by the request `limit`, so it is not
+                # subject to a per-source character budget.
                 _SOURCE_BUDGET_FRAC: dict[str, float] = {
-                    "qdrant": 0.30,
-                    "entities": 0.10,
-                    "communities": 0.15,
-                    "cross_graph": 0.07,
-                    "order_neighbors": 0.05,
-                    "bfs_crawler": 0.15,
-                    "embedding_search": 0.08,
+                    "entities": 0.08,
+                    "communities": 0.10,
+                    "cross_graph": 0.05,
+                    "order_neighbors": 0.04,
+                    "bfs_crawler": 0.10,
+                    "embedding_search": 0.05,
                 }
+
+                def _detect_source(part: str) -> str | None:
+                    """Return the budget source key for a context part, or None.
+
+                    Handles exact flat headers and XML opening tags (with
+                    whitespace tolerance) so budgeting is format-agnostic.
+                    """
+                    if part in _SECTION_SOURCE:
+                        return _SECTION_SOURCE[part]
+                    stripped = part.strip()
+                    if stripped.startswith("<semantic_context"):
+                        for src_key in ("entities", "communities", "embedding_search"):
+                            if f'source="{src_key}"' in stripped:
+                                return src_key
+                        return "entities"
+                    if stripped.startswith("<structural_context"):
+                        for src_key in ("order_neighbors", "cross_graph", "bfs_crawler"):
+                            if f'source="{src_key}"' in stripped:
+                                return src_key
+                        return "order_neighbors"
+                    return None
+
+                def _is_structural_part(part: str) -> bool:
+                    """True for markup/structural parts that must always be kept.
+
+                    Section wrappers and closing tags carry no content; they must
+                    not be deduplicated or counted against a source budget,
+                    otherwise repeated closing tags (e.g. ``</section>``) would be
+                    dropped and the XML/flat structure would break.
+                    """
+                    stripped = part.strip()
+                    if not stripped:
+                        return False
+                    if stripped == "--- END OF CONTEXT ---":
+                        return True
+                    if stripped.startswith("<section ") or stripped == "</section>":
+                        return True
+                    if stripped in ("<document_context>", "</document_context>"):
+                        return True
+                    if stripped.startswith("<semantic_context") or stripped == "</semantic_context>":
+                        return True
+                    if stripped.startswith("<structural_context") or stripped == "</structural_context>":
+                        return True
+                    return False
 
                 seen_texts: set = set()
                 deduped_parts = []
@@ -2376,30 +2822,29 @@ async def ask_document(request: QuestionRequest,
                 current_source: str | None = None
 
                 for part in context_parts:
-                    # Detect section header to switch source
-                    if part in _SECTION_SOURCE:
-                        current_source = _SECTION_SOURCE[part]
-                        if current_source not in source_chars:
-                            source_chars[current_source] = 0
-                        # Always include headers (they serve as section separators
-                        # and are small); they don't count toward source budget.
+                    # Section header / XML opening tag switches the active source.
+                    detected = _detect_source(part)
+                    if detected is not None:
+                        current_source = detected
+                        if current_source != "qdrant":
+                            source_chars.setdefault(current_source, 0)
                         deduped_parts.append(part)
                         total_chars += len(part)
                         continue
 
-                    # Skip "end marker"
-                    if part == "--- КОНЕЦ КОНТЕКСТА ---":
+                    # Structural wrappers and the end marker are always kept.
+                    if _is_structural_part(part):
                         deduped_parts.append(part)
                         total_chars += len(part)
                         continue
 
-                    # Dedup
+                    # Dedup actual content blocks.
                     key = part[:120].replace(" ", "").replace("\n", "").lower()
                     if key in seen_texts:
                         continue
                     seen_texts.add(key)
 
-                    # Global cap
+                    # Global char cap (hard backstop for every source).
                     if total_chars + len(part) > MAX_CONTEXT_CHARS:
                         remaining = MAX_CONTEXT_CHARS - total_chars
                         if remaining >= 60:
@@ -2409,16 +2854,19 @@ async def ask_document(request: QuestionRequest,
                             total_chars = MAX_CONTEXT_CHARS
                         break
 
-                    # Per-source cap (skip if source has exhausted its budget)
+                    # Per-source cap for graph sources only. The primary Qdrant
+                    # retrieval (`qdrant`) is bounded by `limit` (block count) and
+                    # therefore skips this character budget.
                     src = current_source or "qdrant"
-                    budget = int(MAX_CONTEXT_CHARS * _SOURCE_BUDGET_FRAC.get(src, 0.08))
-                    if source_chars.get(src, 0) + len(part) > budget:
-                        # Source budget exhausted — skip this part
-                        continue
+                    if src != "qdrant":
+                        budget = int(MAX_CONTEXT_CHARS * _SOURCE_BUDGET_FRAC.get(src, 0.08))
+                        if source_chars.get(src, 0) + len(part) > budget:
+                            continue
 
                     deduped_parts.append(part)
                     total_chars += len(part)
-                    source_chars[src] = source_chars.get(src, 0) + len(part)
+                    if src != "qdrant":
+                        source_chars[src] = source_chars.get(src, 0) + len(part)
 
                 if len(deduped_parts) < len(context_parts):
                     logger.info(
@@ -2528,9 +2976,20 @@ ANSWER:"""
                 _SECTION_DESCRIPTIONS: dict[str, str] = {
                     "--- DOCUMENT CONTEXT ---":
                         "document text blocks with element-type markup",
+                    "<document_context>":
+                        "document text blocks in XML format with sections, page numbers, "
+                        "element types, and relevance scores",
                     "--- SEMANTIC GRAPH: ENTITIES ---":
                         "entities from the semantic knowledge graph (people, organizations, "
                         "places, events) extracted from the document",
+                    '<semantic_context source="entities">':
+                        "entities from the semantic knowledge graph in XML format ",
+                    '<semantic_context source="communities">':
+                        "communities from the semantic graph with findings and "
+                        "confidence ratings (XML format)",
+                    '<structural_context source="order_neighbors">':
+                        "structurally adjacent regions (previous/next document element) "
+                        "in XML format",
                     "--- SEMANTIC GRAPH: COMMUNITIES ---":
                         "communities from the semantic graph with findings and confidence ratings",
                     "--- SEMANTIC GRAPH: REGIONS VIA ENTITIES (CROSS-GRAPH) ---":
@@ -2544,10 +3003,22 @@ ANSWER:"""
                         "entities found through embedding-based semantic similarity search",
                     "--- SEMANTIC SEARCH: COMMUNITIES (EMBEDDINGS) ---":
                         "communities found through embedding-based semantic similarity search",
+                    '<structural_context source="cross_graph">':
+                        "document regions linked through entities (cross-graph bridge) "
+                        "(XML format)",
+                    '<structural_context source="bfs_crawler">':
+                        "expanded context via BFS graph traversal "
+                        "(related entities, 1-hop/2-hop links, communities) (XML format)",
+                    '<semantic_context source="embedding_search">':
+                        "entities and communities found through embedding-based "
+                        "semantic similarity search (XML format)",
                 }
                 context_sources: list[str] = []
                 for part in context_parts:
                     desc = _SECTION_DESCRIPTIONS.get(part)
+                    if not desc and part.startswith("<community "):
+                        desc = ("communities from the semantic graph with findings "
+                                "and confidence ratings (XML format)")
                     if desc and desc not in context_sources:
                         context_sources.append(desc)
 
@@ -3578,4 +4049,3 @@ def run_api(
 
 if __name__ == "__main__":
     run_api()
-

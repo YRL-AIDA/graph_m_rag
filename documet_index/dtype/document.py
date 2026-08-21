@@ -203,7 +203,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="title",
-                    element_data=text
+                    element_data=text,
+                    page_idx=page_idx,
                 ))
                 element_index += 1
             else:
@@ -217,7 +218,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                         style=Style(-1),
                         order=element_index,
                         label="text",
-                        element_data=text
+                        element_data=text,
+                        page_idx=page_idx,
                     ))
                     element_index += 1
 
@@ -235,7 +237,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                 style=Style(-1),
                 order=element_index,
                 label="image",
-                element_data=img_path
+                element_data=img_path,
+                page_idx=page_idx,
             ))
             element_index += 1
 
@@ -249,7 +252,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="image_caption",
-                    element_data=caption_text
+                    element_data=caption_text,
+                    page_idx=page_idx,
                 ))
                 element_index += 1
 
@@ -263,7 +267,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="image_footnote",
-                    element_data=footnote_text
+                    element_data=footnote_text,
+                    page_idx=page_idx,
                 ))
                 element_index += 1
 
@@ -289,7 +294,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                 style=Style(-1),
                 order=element_index,
                 label="table",
-                element_data=table_text
+                element_data=table_text,
+                page_idx=page_idx,
             ))
             element_index += 1
 
@@ -303,7 +309,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="table_caption",
-                    element_data=caption_text
+                    element_data=caption_text,
+                    page_idx=page_idx,
                 ))
                 element_index += 1
 
@@ -317,7 +324,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="table_footnote",
-                    element_data=footnote_text
+                    element_data=footnote_text,
+                    page_idx=page_idx,
                 ))
                 element_index += 1
 
@@ -332,7 +340,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label="equation",
-                    element_data=element_type
+                    element_data=element_type,
+                    page_idx=page_idx,
                 ))
                 element_index += 1
 
@@ -347,7 +356,8 @@ def create_graph_from_mineru_result(mineru_result: Dict[str, Any], document_name
                     style=Style(-1),
                     order=element_index,
                     label=element_type,
-                    element_data=text
+                    element_data=text,
+                    page_idx=page_idx,
                 ))
                 element_index += 1
 

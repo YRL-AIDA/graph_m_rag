@@ -23,8 +23,18 @@ class HybridClient(BaseModelClient):
         self.ner_client = ner_client
         self.re_client = re_client
 
+    @property
+    def entity_types(self) -> list[str]:
+        """Типы сущностей NER-модели (source-датасет)."""
+        return self.ner_client.entity_types
+
+    @property
+    def source_dataset(self) -> str:
+        """Имя source-датасета NER-модели."""
+        return self.ner_client.source_dataset
+
     async def extract_entities(
-        self, text: str, entity_types: list[str]
+        self, text: str, entity_types: list[str] | None = None
     ) -> list[PredictedEntity]:
         """Делегирует извлечение сущностей NER-клиенту."""
         return await self.ner_client.extract_entities(text, entity_types)

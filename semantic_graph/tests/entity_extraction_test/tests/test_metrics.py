@@ -217,39 +217,39 @@ def test_normalize_name_multiline_spaces() -> None:
 
 
 def test_normalize_type_exact_match_case_insensitive() -> None:
-    """'org' matches 'Org' in allowed_types (case-insensitive)."""
-    result = normalize_type("org", ["Peop", "Loc", "Org", "Other"])
-    assert result == "Org"
+    """'org' matches 'ORG' in allowed_types (case-insensitive)."""
+    result = normalize_type("org", ["PERSON", "LOC", "ORG", "GPE"])
+    assert result == "ORG"
 
 
 def test_normalize_type_synonym_mapping() -> None:
-    """'organization' maps to 'Org' via TYPE_SYNONYMS."""
-    result = normalize_type("organization", ["Peop", "Loc", "Org", "Other"])
-    assert result == "Org"
+    """'organization' maps to 'ORG' via TYPE_SYNONYMS."""
+    result = normalize_type("organization", ["PERSON", "LOC", "ORG", "GPE"])
+    assert result == "ORG"
 
 
 def test_normalize_type_synonym_person() -> None:
-    """'Person' maps to 'Peop' via TYPE_SYNONYMS."""
-    result = normalize_type("Person", ["Peop", "Loc", "Org", "Other"])
-    assert result == "Peop"
+    """'human' maps to 'PERSON' via TYPE_SYNONYMS."""
+    result = normalize_type("human", ["PERSON", "LOC", "ORG", "GPE"])
+    assert result == "PERSON"
 
 
 def test_normalize_type_synonym_not_in_allowed() -> None:
-    """'organization' maps to 'Org' but if 'Org' not in allowed_types → None."""
-    result = normalize_type("organization", ["Peop", "Loc", "Other"])
+    """'organization' maps to 'ORG' but if 'ORG' not in allowed_types → None."""
+    result = normalize_type("organization", ["PERSON", "LOC", "GPE"])
     assert result is None
 
 
 def test_normalize_type_unknown() -> None:
     """Completely unknown type → None."""
-    result = normalize_type("unknown_type", ["Peop", "Loc", "Org", "Other"])
+    result = normalize_type("unknown_type", ["PERSON", "LOC", "ORG", "GPE"])
     assert result is None
 
 
 def test_normalize_type_with_whitespace() -> None:
-    """'  Org  ' with whitespace → 'Org'."""
-    result = normalize_type("  Org  ", ["Peop", "Loc", "Org", "Other"])
-    assert result == "Org"
+    """'  ORG  ' with whitespace → 'ORG'."""
+    result = normalize_type("  ORG  ", ["PERSON", "LOC", "ORG", "GPE"])
+    assert result == "ORG"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -258,8 +258,9 @@ def test_normalize_type_with_whitespace() -> None:
 
 
 def test_type_synonyms_contains_expected_entries() -> None:
-    """TYPE_SYNONYMS contains key mappings."""
-    assert TYPE_SYNONYMS["person"] == "Peop"
-    assert TYPE_SYNONYMS["location"] == "Loc"
-    assert TYPE_SYNONYMS["organization"] == "Org"
-    assert TYPE_SYNONYMS["company"] == "Org"
+    """TYPE_SYNONYMS contains universal key mappings."""
+    assert TYPE_SYNONYMS["person"] == "PERSON"
+    assert TYPE_SYNONYMS["location"] == "LOC"
+    assert TYPE_SYNONYMS["organization"] == "ORG"
+    assert TYPE_SYNONYMS["company"] == "ORG"
+    assert TYPE_SYNONYMS["misc"] is None

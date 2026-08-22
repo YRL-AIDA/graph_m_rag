@@ -21,6 +21,7 @@ if _ENTITY_DIR not in sys.path:
     sys.path.insert(0, _ENTITY_DIR)
 
 from metrics.metrics import normalize_type  # noqa: E402
+from metrics.entity_mappings import get_dataset_entity_types  # noqa: E402
 from testdata.base_loader import BaseModelClient, PredictedEntity, PredictedRelation
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class OllamaClient(BaseModelClient):
         re_prompt_path: str = "",
         combined_prompt_path: str = "",
         keep_alive: str | None = None,
+        entity_types_source: str = "ontonotes5",
     ) -> None:
         """Инициализация OllamaClient.
 
@@ -121,6 +123,9 @@ class OllamaClient(BaseModelClient):
             self._combined_prompt = Path(combined_prompt_path).read_text()
         else:
             self._combined_prompt = ""
+
+        self.source_dataset = entity_types_source
+        self.entity_types = get_dataset_entity_types(entity_types_source)
 
     # -----------------------------------------------------------------------
     # _chat — базовый метод отправки запроса к Ollama /api/chat
@@ -207,7 +212,7 @@ class OllamaClient(BaseModelClient):
     # -----------------------------------------------------------------------
 
     async def extract_entities(
-        self, text: str, entity_types: list[str]
+        self, text: str, entity_types: list[str] | None = None
     ) -> list[PredictedEntity]:
         """Извлечь и классифицировать сущности из текста.
 
@@ -218,6 +223,8 @@ class OllamaClient(BaseModelClient):
         Returns:
             Список предсказанных сущностей (PredictedEntity).
         """
+        types = entity_types if entity_types else self.entity_types
+
         if not self._ner_prompt:
             logger.warning("NER prompt is empty, cannot extract entities")
             return []
@@ -225,7 +232,7 @@ class OllamaClient(BaseModelClient):
         # 1. Форматирование NER-промпта
         prompt = self._ner_prompt.format(
             input_text=text,
-            entity_types=",".join(entity_types),
+            entity_types=",".join(types),
         )
 
         # 2. Вызов LLM через Ollama /api/chat
@@ -241,7 +248,7 @@ class OllamaClient(BaseModelClient):
             return []
 
         # 4. Парсинг ответа
-        return self._parse_ner_response(response, entity_types)
+        return self._parse_ner_response(response, types)
 
     def _parse_ner_response(
         self, response: str, entity_types: list[str]
@@ -434,7 +441,7 @@ class OllamaClient(BaseModelClient):
     # -----------------------------------------------------------------------
 
     async def extract_entities_and_relations(
-        self, text: str, entity_types: list[str], relation_types: list[str],
+        self, text: str, entity_types: list[str] | None = None, relation_types: list[str] | None = None,
         relation_type_descriptions: str | None = None,
         allowed_relation_types: str | None = None,
     ) -> tuple[list[PredictedEntity], list[PredictedRelation]]:
@@ -443,6 +450,9 @@ class OllamaClient(BaseModelClient):
         Returns:
             Кортеж (entities, relations).
         """
+        types = entity_types if entity_types else self.entity_types
+        relation_types = relation_types or []
+
         if not self._combined_prompt:
             logger.warning(
                 "Combined prompt is empty, cannot extract entities and relations"
@@ -452,7 +462,7 @@ class OllamaClient(BaseModelClient):
         # 1. Форматирование combined-промпта
         prompt = self._combined_prompt.format(
             input_text=text,
-            entity_types=",".join(entity_types),
+            entity_types=",".join(types),
             relation_types=relation_type_descriptions or ",".join(relation_types),
             allowed_relation_types=allowed_relation_types or str(relation_types + ["None"]),
         )
@@ -471,7 +481,7 @@ class OllamaClient(BaseModelClient):
             return [], []
 
         # 4. Парсинг combined-ответа
-        return self._parse_combined_response(response, entity_types, relation_types)
+        return self._parse_combined_response(response, types, relation_types)
 
     def _parse_combined_response(
         self,

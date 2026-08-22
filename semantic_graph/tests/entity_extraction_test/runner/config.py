@@ -36,6 +36,11 @@ class ExperimentSettings(BaseSettings):
     ollama_num_ctx: int = 8000
     ollama_keep_alive: str = "5m"
 
+    uniner_entity_types_source: str = "ontonotes5"
+    gliner_entity_types_source: str = "ontonotes5"
+    qwen_entity_types_source: str = "ontonotes5"
+    ollama_entity_types_source: str = "ontonotes5"
+
     scierc_data_path: str = "/home/ivan/work/ooo/graph_m_rag/datasets_/scierc"
 
     prompts_dir: str = str(Path(__file__).parent.parent / "prompts")

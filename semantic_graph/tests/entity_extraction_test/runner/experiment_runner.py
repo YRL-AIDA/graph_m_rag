@@ -28,6 +28,10 @@ from clients.hybrid_client import HybridClient  # noqa: E402
 from clients.qwen_client import QwenClient  # noqa: E402
 from clients.ollama_client import OllamaClient  # noqa: E402
 from clients.uniner_client import UniNerClient  # noqa: E402
+from metrics.entity_mappings import (  # noqa: E402
+    translate_model_to_universal,
+    translate_universal_to_dataset,
+)
 from metrics.metrics import (  # noqa: E402
     compute_avg_response_time,
     compute_ner_f1,
@@ -38,6 +42,7 @@ from testdata.base_loader import (  # noqa: E402
     DatasetLoader,
     DatasetRecord,
     ExperimentResult,
+    PredictedEntity,
 )
 from testdata.conll04_loader import Conll04Loader  # noqa: E402
 from testdata.ontonotes5_loader import Ontonotes5Loader  # noqa: E402
@@ -162,6 +167,7 @@ class ExperimentRunner:
                     "re_mode": re_mode,
                     "entity_types": loader.entity_types,
                     "relation_types": loader.relation_types,
+                    "entity_types_source": getattr(ner_client, "source_dataset", dataset_name),
                 },
                 metrics={
                     "precision_ner": 0.0,
@@ -282,7 +288,9 @@ class ExperimentRunner:
                     continue
 
                 pred_entities, pred_relations, n_time, r_time = result
-                print(record.entities,record.relations,pred_entities,pred_relations)
+                pred_entities, pred_relations = self._translate_pred_to_eval(
+                    pred_entities, pred_relations, ner_client, dataset_name
+                )
                 ner_timings.append(n_time)
                 if r_time is not None:
                     re_timings.append(r_time)
@@ -340,6 +348,7 @@ class ExperimentRunner:
                 "re_mode": re_mode,
                 "entity_types": entity_types,
                 "relation_types": relation_types,
+                "entity_types_source": getattr(ner_client, "source_dataset", dataset_name),
             },
             metrics={
                 "precision_ner": _safe_mean(ner_precisions),
@@ -394,12 +403,18 @@ class ExperimentRunner:
         Raises:
             ConnectionError: При ошибках сетевого соединения или таймауте.
         """
+        # Типы сущностей для NER-промпта — из source-датасета модели,
+        # с фоллбеком на типы оценочного датасета.
+        ner_entity_types = getattr(ner_client, "entity_types", None)
+        if not isinstance(ner_entity_types, list) or not ner_entity_types:
+            ner_entity_types = entity_types
+
         # --- Шаг 0: combined_single_call — один вызов API для NER+RE ---
         if re_mode == "combined_single_call":
             t0 = time.monotonic()
             try:
                 pred_entities, pred_relations = await ner_client.extract_entities_and_relations(
-                    record.text, entity_types, relation_types,
+                    record.text, ner_entity_types, relation_types,
                     relation_type_descriptions=relation_type_descriptions,
                     allowed_relation_types=allowed_relation_types,
                 )
@@ -430,7 +445,7 @@ class ExperimentRunner:
         t0 = time.monotonic()
         try:
             pred_entities = await ner_client.extract_entities(
-                record.text, entity_types
+                record.text, ner_entity_types
             )
         except NotImplementedError:
             logger.warning(
@@ -486,6 +501,40 @@ class ExperimentRunner:
         return pred_entities, pred_relations, ner_time, re_time
 
     # -------------------------------------------------------------------------
+    # Перевод типов предсказанных сущностей в нотацию оценочного датасета
+    # -------------------------------------------------------------------------
+
+    def _translate_pred_to_eval(
+        self,
+        pred_entities: list,
+        pred_relations: list,
+        ner_client: BaseModelClient,
+        eval_dataset: str,
+    ) -> tuple[list, list]:
+        """Перевести типы предсказанных сущностей source->universal->eval.
+
+        Сущности с неотображаемым типом (None) отбрасываются; отношения,
+        ссылающиеся на отброшенные сущности (по head/tail name), тоже отбрасываются.
+        """
+        source = getattr(ner_client, "source_dataset", None)
+        if not isinstance(source, str) or not source:
+            source = eval_dataset
+        universal_types = translate_model_to_universal(
+            [e.type for e in pred_entities], source
+        )
+        eval_types = translate_universal_to_dataset(universal_types, eval_dataset)
+        translated: list = []
+        for entity, etype in zip(pred_entities, eval_types):
+            if etype is not None:
+                translated.append(PredictedEntity(name=entity.name, type=etype))
+        surviving_names = {e.name for e in translated}
+        relations = [
+            r for r in pred_relations
+            if r.head in surviving_names and r.tail in surviving_names
+        ]
+        return translated, relations
+
+    # -------------------------------------------------------------------------
     # run_all — полная матрица экспериментов
     # -------------------------------------------------------------------------
 
@@ -517,6 +566,7 @@ class ExperimentRunner:
             ner_prompt_path=str(prompts / "ner_prompt.md"),
             re_prompt_path=str(prompts / "re_prompt.md"),
             combined_prompt_path=str(prompts / "combined_prompt.md"),
+            entity_types_source=self.settings.ollama_entity_types_source,
         )
 
         qwen_client = QwenClient(
@@ -526,12 +576,17 @@ class ExperimentRunner:
             ner_prompt_path=str(prompts / "ner_prompt.md"),
             re_prompt_path=str(prompts / "re_prompt.md"),
             combined_prompt_path=str(prompts / "combined_prompt.md"),
+            entity_types_source=self.settings.qwen_entity_types_source,
         )
-        uniner_client = UniNerClient(base_url=self.settings.uniner_base_url)
+        uniner_client = UniNerClient(
+            base_url=self.settings.uniner_base_url,
+            entity_types_source=self.settings.uniner_entity_types_source,
+        )
         gliner_client = GleanerClient(
             base_url=self.settings.gliner_base_url,
             api_key=self.settings.gliner_api_key,
             model=self.settings.gliner_model,
+            entity_types_source=self.settings.gliner_entity_types_source,
         )
 
         # Hybrid-клиенты для E5, E6

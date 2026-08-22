@@ -71,9 +71,12 @@ class BaseModelClient(ABC):
     реализуют этот интерфейс.
     """
 
+    entity_types: list[str] = []
+    source_dataset: str = "ontonotes5"
+
     @abstractmethod
     async def extract_entities(
-        self, text: str, entity_types: list[str]
+        self, text: str, entity_types: list[str] | None = None
     ) -> list[PredictedEntity]:
         """Извлечь и классифицировать сущности из текста."""
         ...

@@ -17,7 +17,7 @@ def test_default_values() -> None:
 
     assert settings.qwen_base_url == "http://192.168.19.127:8888/v1"
     assert settings.qwen_api_key == "EMPTY"
-    assert settings.qwen_model == "qwen3-vl:32b"
+    assert settings.qwen_model == "Qwen/Qwen3-VL-32B-Thinking"
     assert settings.uniner_base_url == "http://192.168.19.127:9898/v1"
     assert settings.gliner_base_url == "http://192.168.19.127:9596/v1"
     assert settings.gliner_api_key == "EMPTY"
@@ -25,15 +25,19 @@ def test_default_values() -> None:
     assert settings.scierc_data_path == "/home/ivan/work/ooo/graph_m_rag/datasets_/scierc"
     assert settings.prompts_dir.endswith("prompts")
     assert settings.results_dir.endswith("results")
-    assert settings.datasets == ["conll04", "scierc"]
+    assert settings.datasets == ["conll04", "scierc", "ontonotes5"]
     assert settings.splits == ["test"]
     assert settings.max_samples is None
     assert settings.ollama_base_url == "http://192.168.55.242:7869"
-    assert settings.ollama_model == "qwen3-coder:30b"
-    assert settings.ollama_think == False
-    assert settings.ollama_num_predict == 256
-    assert settings.ollama_num_ctx == 4096
+    assert settings.ollama_model == "qwen3-vl:32b"
+    assert settings.ollama_think == 'low'
+    assert settings.ollama_num_predict == 5000
+    assert settings.ollama_num_ctx == 8000
     assert settings.ollama_keep_alive == "5m"
+    assert settings.uniner_entity_types_source == "ontonotes5"
+    assert settings.gliner_entity_types_source == "ontonotes5"
+    assert settings.qwen_entity_types_source == "ontonotes5"
+    assert settings.ollama_entity_types_source == "ontonotes5"
 
 
 

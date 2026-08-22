@@ -22,6 +22,7 @@ _ENTITY_DIR = str(Path(__file__).resolve().parent.parent)
 if _ENTITY_DIR not in sys.path:
     sys.path.insert(0, _ENTITY_DIR)
 from metrics.metrics import normalize_type
+from metrics.entity_mappings import get_dataset_entity_types
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class GleanerClient(BaseModelClient):
         base_url: str | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        entity_types_source: str = "ontonotes5",
     ) -> None:
         self.base_url = base_url or os.getenv(
             "GLINER_BASE_URL", "http://<remote_host>:<port>/v1"
@@ -50,6 +52,8 @@ class GleanerClient(BaseModelClient):
         self.model = model or os.getenv(
             "GLINER_MODEL", "urchade/gliner_large-v2.1"
         )
+        self.source_dataset = entity_types_source
+        self.entity_types = get_dataset_entity_types(entity_types_source)
 
         _validate_url(self.base_url)
 
@@ -62,7 +66,7 @@ class GleanerClient(BaseModelClient):
     # ------------------------------------------------------------------
 
     async def extract_entities(
-        self, text: str, entity_types: list[str]
+        self, text: str, entity_types: list[str] | None = None
     ) -> list[PredictedEntity]:
         """Извлечь и классифицировать сущности из текста.
 
@@ -73,7 +77,9 @@ class GleanerClient(BaseModelClient):
             Список ``PredictedEntity``. Пустой список при ошибках парсинга
             или пустом ответе API.
         """
-        system_prompt = f"Entity types: {', '.join(entity_types)}"
+        types = entity_types if entity_types else self.entity_types
+
+        system_prompt = f"Entity types: {', '.join(types)}"
 
         try:
             response = await self.client.chat.completions.create(
@@ -112,13 +118,13 @@ class GleanerClient(BaseModelClient):
             if isinstance(item, dict) and "name" in item and "type" in item:
                 name = item["name"]
                 raw_type = item["type"]
-                canonical_type = normalize_type(raw_type, entity_types)
+                canonical_type = normalize_type(raw_type, types)
                 if canonical_type is not None:
                     result.append(PredictedEntity(name=name, type=canonical_type))
                 else:
                     logger.warning(
                         "Gleaner: skipping entity %r with unknown type %r (allowed: %s)",
-                        name, raw_type, entity_types,
+                        name, raw_type, types,
                     )
 
         return result

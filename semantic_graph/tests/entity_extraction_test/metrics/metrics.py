@@ -17,23 +17,19 @@ def normalize_name(name: str) -> str:
     return " ".join(name.lower().strip().split())
 
 
-# Mapping от вариантов написания (lowercase) к каноническим типам CoNLL04
-TYPE_SYNONYMS: dict[str, str] = {
-    # CoNLL-04 entity types
-    "person": "Peop",
-    "people": "Peop",
-    "human": "Peop",
-    "location": "Loc",
-    "place": "Loc",
-    "loc": "Loc",
-    "organization": "Org",
-    "organisation": "Org",
-    "company": "Org",
-    "corporation": "Org",
-    "corp": "Org",
-    "other": "Other",
-    "miscellaneous": "Other",
-    "misc": "Other",
+# Mapping от вариантов написания (lowercase) к универсальным типам OntoNotes5
+TYPE_SYNONYMS: dict[str, str | None] = {
+    "person": "PERSON", "people": "PERSON", "human": "PERSON", "per": "PERSON",
+    "org": "ORG", "organization": "ORG", "organisation": "ORG", "company": "ORG",
+    "corporation": "ORG", "corp": "ORG",
+    "loc": "LOC", "location": "LOC", "place": "LOC",
+    "gpe": "GPE", "geo": "GPE", "geopolitical": "GPE",
+    "misc": None, "miscellaneous": None, "other": None,
+    "date": "DATE", "time": "TIME", "event": "EVENT", "fac": "FAC",
+    "language": "LANGUAGE", "law": "LAW", "money": "MONEY", "norp": "NORP",
+    "ordinal": "ORDINAL", "percent": "PERCENT", "product": "PRODUCT",
+    "quantity": "QUANTITY", "cardinal": "CARDINAL",
+    "work_of_art": "WORK_OF_ART", "work of art": "WORK_OF_ART",
 }
 
 
@@ -62,9 +58,12 @@ def normalize_type(typ: str, allowed_types: list[str]) -> str | None:
     # 2. Поиск в TYPE_SYNONYMS
     if typ_lower in TYPE_SYNONYMS:
         canonical = TYPE_SYNONYMS[typ_lower]
-        # Проверяем что канонический тип есть в allowed_types
-        if canonical in allowed_types:
-            return canonical
+        if canonical is None:
+            return None
+        # Проверяем, что канонический тип присутствует в allowed_types (case-insensitive)
+        for allowed in allowed_types:
+            if allowed.lower() == canonical.lower():
+                return allowed
 
     # 3. Не распознан
     return None

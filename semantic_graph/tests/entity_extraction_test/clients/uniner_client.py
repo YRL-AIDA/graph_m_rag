@@ -18,6 +18,7 @@ _ENTITY_DIR = str(Path(__file__).resolve().parent.parent)
 if _ENTITY_DIR not in sys.path:
     sys.path.insert(0, _ENTITY_DIR)
 from metrics.metrics import normalize_type
+from metrics.entity_mappings import get_dataset_entity_types
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,13 @@ class UniNerClient(BaseModelClient):
     Промпт генерируется на серверной стороне — клиент не формирует промпт.
     """
 
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, timeout: float = 30.0, entity_types_source: str = "ontonotes5") -> None:
         self.client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
+        self.source_dataset = entity_types_source
+        self.entity_types = get_dataset_entity_types(entity_types_source)
 
     async def extract_entities(
-        self, text: str, entity_types: list[str]
+        self, text: str, entity_types: list[str] | None = None
     ) -> list[PredictedEntity]:
         """Извлечь и классифицировать сущности из текста через UniNer-сервер.
 
@@ -47,9 +50,11 @@ class UniNerClient(BaseModelClient):
         Raises:
             ConnectionError: При ошибках соединения, таймауте или HTTP-ошибках (4xx, 5xx).
         """
+        types = entity_types if entity_types else self.entity_types
+
         try:
             response = await self.client.post(
-                "/extract", json={"text": text, "entity_types": entity_types}
+                "/extract", json={"text": text, "entity_types": types}
             )
             response.raise_for_status()
             data = response.json()
@@ -71,13 +76,13 @@ class UniNerClient(BaseModelClient):
         for item in entities_raw:
             name = item["name"]
             raw_type = item["type"]
-            canonical_type = normalize_type(raw_type, entity_types)
+            canonical_type = normalize_type(raw_type, types)
             if canonical_type is not None:
                 result.append(PredictedEntity(name=name, type=canonical_type))
             else:
                 logger.warning(
                     "UniNer: skipping entity %r with unknown type %r (allowed: %s)",
-                    name, raw_type, entity_types,
+                    name, raw_type, types,
                 )
         return result
 

@@ -54,10 +54,8 @@ def _lookup(mapping: dict[str, Optional[str]], typ: str) -> Optional[str]:
     if typ is None:
         return None
     key = typ.strip()
-    for k, v in mapping.items():
-        if k.lower() == key.lower():
-            return v
-    return mapping.get(key)
+    
+    return mapping.get(key,None)
 
 
 def translate_model_to_universal(types: list[str], source_dataset: str) -> list[Optional[str]]:

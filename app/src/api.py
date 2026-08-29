@@ -606,6 +606,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 logger.info(f"Saved {len(embeddings_list)} embeddings to Qdrant collection")
             else:
                 logger.error("Failed to save embeddings to Qdrant")
+        else:
+            logger.error(
+                "No embeddings were computed for document %s; nothing was saved to Qdrant. "
+                "The embedding service may be unreachable or all elements failed to process.",
+                file_hash,
+            )
     except Exception as e:
         logger.error(f"Error saving embeddings to Qdrant: {e}")
 
@@ -1023,6 +1029,35 @@ async def upload_pdf(file: UploadFile = File(...)):
             logger.info(f"Processing PDF {file_hash} with MinerU service")
             mineru_result = process_with_mineru(temp_file_path)
 
+            # MinerU returns HTTP 200 even on processing failure (e.g. CUDA OOM),
+            # with a body like {"status": "failed", ...}. Detect and abort before
+            # storing a failed result or building empty structural/semantic graphs.
+            mineru_status = mineru_result.get("status")
+            mineru_success = mineru_result.get("results", {}).get("result", {}).get("success")
+            if mineru_status != "completed" or mineru_success is False:
+                mineru_error = (
+                    mineru_result.get("results", {}).get("result", {}).get("error")
+                    or mineru_result.get("message")
+                    or "unknown MinerU error"
+                )
+                logger.error(f"MinerU failed to process document '{file_hash}': {mineru_error}")
+                # Remove the already-uploaded PDF so a later retry is not blocked
+                # by the "already_processed" dedup check.
+                try:
+                    minio_client.remove_object(
+                        bucket_name=minio_client.bucket_name,
+                        object_name=pdf_s3_key
+                    )
+                    logger.info(f"Removed PDF after MinerU failure: {pdf_s3_key}")
+                except Exception as cleanup_error:
+                    logger.warning(
+                        f"Could not remove PDF {pdf_s3_key} after MinerU failure: {cleanup_error}"
+                    )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"MinerU processing failed for document: {mineru_error}"
+                )
+
         finally:
             # Clean up temporary file immediately after processing
             if temp_file_path and os.path.exists(temp_file_path):
@@ -1122,7 +1157,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             logger.info("Neo4j document index not available, skipping graph creation")
 
         # Make semantic graph
-        if NEO4J_AVAILABLE:
+        if NEO4J_AVAILABLE and embeddings_count > 0:
             try:
                 url = "http://localhost:9595/process-document"
                 data = {
@@ -1152,6 +1187,11 @@ async def upload_pdf(file: UploadFile = File(...)):
                     logger.error(f"Semantic graph construction failed with status {response.status_code}: {response.json()}")
             except Exception as e:
                 logger.error(f"Error initiating semantic graph construction for document {file_hash}: {e}")
+        elif NEO4J_AVAILABLE:
+            logger.warning(
+                f"No embeddings were indexed for document {file_hash}; "
+                "skipping semantic graph construction (process-document would return 404)."
+            )
         else:
             logger.info("Neo4j document index not available, skipping semantic graph creation")
 
@@ -1566,12 +1606,16 @@ async def ask_document(request: QuestionRequest,
     use_mmr_reranker = getattr(request, 'use_mmr_reranker', False)
     mmr_lambda = getattr(request, 'mmr_lambda', 0.7)
     mmr_min_relevance = getattr(request, 'mmr_min_relevance', 0.0)
+    semantic_min_relevance = getattr(request, 'semantic_min_relevance', None)
+    if semantic_min_relevance is None:
+        semantic_min_relevance = settings.semantic.SEMANTIC_MIN_RELEVANCE
     use_question_decomposition = (
         use_question_decomposition or
         getattr(request, 'use_question_decomposition', False)
     )
     answer_format = getattr(request, 'answer_format', None)
     use_structured_context = getattr(request, 'use_structured_context', True)
+    use_neo4j_enrichment = getattr(request, 'use_neo4j_enrichment', True)
 
     # Use specified collection or default
     client = get_qdrant_client(collection_name=collection_name) if collection_name else qdrant_client
@@ -1643,8 +1687,11 @@ async def ask_document(request: QuestionRequest,
         # Phase 2: aggressive retrieval — 5x multiplier + floor of 50-60
         # to reduce false N/A caused by missing relevant chunks at the retrieval stage.
         # Reranker / MMR will later filter to the final top-k.
+        # Flat strategies (no structured context) skip aggressive retrieval:
+        # they have no reranker/MMR filter downstream, so a wider pool
+        # would only add noise.  Hard cap = limit.
         rerank_top_n = settings.reranker.RERANKER_TOP_N if hasattr(settings.reranker, 'RERANKER_TOP_N') else limit
-        search_limit = max(limit * 5, rerank_top_n)
+        search_limit = limit if not use_structured_context else max(limit * 5, rerank_top_n)
 
         # --- Run search (multi-query if decomposed, single otherwise) ---
         if sub_questions and len(sub_questions) > 1:
@@ -1760,7 +1807,7 @@ async def ask_document(request: QuestionRequest,
             }
 
             # Enrich with Neo4j context for image/table related elements
-            if neo4j_service and element_type in ("image", "table", "image_caption", "image_footnote", "table_caption",
+            if use_neo4j_enrichment and neo4j_service and element_type in ("image", "table", "image_caption", "image_footnote", "table_caption",
                                                   "table_footnote"):
             #if neo4j_service and element_type in ("image_caption", "image_footnote"):
                 related_blocks = []
@@ -1958,6 +2005,9 @@ async def ask_document(request: QuestionRequest,
 
         # Apply reranking if enabled and we have documents
         use_reranker = getattr(request, 'use_reranker', False)
+        reranker_min_relevance = getattr(request, 'reranker_min_relevance', None)
+        if reranker_min_relevance is None:
+            reranker_min_relevance = settings.reranker.RERANKER_MIN_RELEVANCE
         if use_reranker and documents_to_rerank:
             # `documents_to_rerank` holds only primary blocks, indexed by the
             # search-result position. `search_results_map` maps that same index
@@ -1980,25 +2030,40 @@ async def ask_document(request: QuestionRequest,
                 rerank_messages = sorted(
                     rerank_result.messages, reverse=True, key=lambda x: x.score
                 )
-                reranked_answers = []
-                for res in rerank_messages[:limit]:
-                    answer_copy = search_results_map[res.message_id].copy()
-                    answer_copy["reranker_score"] = res.score
-                    answer_copy["original_score"] = answer_copy["score"]
-                    answer_copy["score"] = res.score  # Use reranker score as primary
-                    reranked_answers.append(answer_copy)
 
-                # Restore the related context blocks (parent/caption/footnote)
-                # that belong to each selected primary answer. These carry their
-                # own images (e.g. the caption's image), so dropping them — as the
-                # plain `answers = reranked_answers` replacement did — loses
-                # multimodal context that baseline preserves.
-                answers = []
-                for res, answer_copy in zip(rerank_messages[:limit], reranked_answers):
-                    answers.extend(related_answers_map.get(res.message_id, []))
-                    answers.append(answer_copy)
+                # Confidence gate: if even the top chunk is below the minimum
+                # relevance threshold, the reranker is uncertain (typically an
+                # unanswerable query). Keep the original non-reranked order and
+                # scores so the LLM sees weak/uncertain evidence and can answer
+                # "Not answerable" instead of hallucinating from confident-looking
+                # but irrelevant chunks.
+                top_score = rerank_messages[0].score if rerank_messages else 0.0
+                if reranker_min_relevance and top_score < reranker_min_relevance:
+                    logger.info(
+                        "Reranker confidence %.4f below threshold %.4f; "
+                        "keeping original retrieval order",
+                        top_score, reranker_min_relevance,
+                    )
+                else:
+                    reranked_answers = []
+                    for res in rerank_messages[:limit]:
+                        answer_copy = search_results_map[res.message_id].copy()
+                        answer_copy["reranker_score"] = res.score
+                        answer_copy["original_score"] = answer_copy["score"]
+                        answer_copy["score"] = res.score  # Use reranker score as primary
+                        reranked_answers.append(answer_copy)
 
-                logger.info(f"Reranking applied: {len(answers)} results reordered")
+                    # Restore the related context blocks (parent/caption/footnote)
+                    # that belong to each selected primary answer. These carry their
+                    # own images (e.g. the caption's image), so dropping them — as the
+                    # plain `answers = reranked_answers` replacement did — loses
+                    # multimodal context that baseline preserves.
+                    answers = []
+                    for res, answer_copy in zip(rerank_messages[:limit], reranked_answers):
+                        answers.extend(related_answers_map.get(res.message_id, []))
+                        answers.append(answer_copy)
+
+                    logger.info(f"Reranking applied: {len(answers)} results reordered")
             except Exception as e:
                 logger.warning(f"Reranking failed: {e}. Using original search results.")
 
@@ -2156,13 +2221,14 @@ async def ask_document(request: QuestionRequest,
                         region_ids.append(f"{file_hash}|{element_index}")
 
                 # ===== QDRANT BLOCK RENDERING (XML or flat) =====
-                if use_structured_context and NEO4J_AVAILABLE and neo4j_service:
-                    # XML-structured: query Section nodes and group blocks by section
-                    section_map = {}
-                    try:
-                        section_map = neo4j_service.get_sections_for_regions(region_ids)
-                    except Exception:
-                        logger.debug("Failed to get section map", exc_info=True)
+                if use_structured_context:
+                    # XML-structured: optionally group blocks by section if Neo4j available
+                    section_map: dict[str, dict] = {}
+                    if NEO4J_AVAILABLE and neo4j_service:
+                        try:
+                            section_map = neo4j_service.get_sections_for_regions(region_ids)
+                        except Exception:
+                            logger.debug("Failed to get section map", exc_info=True)
 
                     # Group answers by section
                     sections: dict[str, dict] = {}
@@ -2620,6 +2686,11 @@ async def ask_document(request: QuestionRequest,
                                 ) as resp:
                                     if resp.status == 200:
                                         ent_results = (await resp.json()).get("result", [])
+                                        if semantic_min_relevance:
+                                            ent_results = [
+                                                pt for pt in ent_results
+                                                if pt.get("score", 0) >= semantic_min_relevance
+                                            ]
                                         if ent_results:
                                             context_parts.append(
                                                 '<semantic_context source="embedding_search">'
@@ -2663,6 +2734,11 @@ async def ask_document(request: QuestionRequest,
                                 ) as resp:
                                     if resp.status == 200:
                                         comm_results = (await resp.json()).get("result", [])
+                                        if semantic_min_relevance:
+                                            comm_results = [
+                                                pt for pt in comm_results
+                                                if pt.get("score", 0) >= semantic_min_relevance
+                                            ]
                                         if comm_results:
                                             context_parts.append(
                                                 '<semantic_context source="embedding_search">'
@@ -2839,10 +2915,15 @@ async def ask_document(request: QuestionRequest,
                         continue
 
                     # Dedup actual content blocks.
-                    key = part[:120].replace(" ", "").replace("\n", "").lower()
-                    if key in seen_texts:
-                        continue
-                    seen_texts.add(key)
+                    # Skip dedup for flat strategies — they lack XML markers
+                    # that would distinguish near-identical blocks, so the
+                    # fuzzy 120-char key eats different blocks that happen to
+                    # share a common prefix (e.g. consecutive table rows).
+                    if use_structured_context:
+                        key = part[:120].replace(" ", "").replace("\n", "").lower()
+                        if key in seen_texts:
+                            continue
+                        seen_texts.add(key)
 
                     # Global char cap (hard backstop for every source).
                     if total_chars + len(part) > MAX_CONTEXT_CHARS:

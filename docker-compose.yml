@@ -30,6 +30,15 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
       - MINIO_BUCKET=${MINIO_BUCKET}
+      # Reduce the MinerU inference batch ratio (MFR batch = ratio * 16). The
+      # library derives batch_ratio from TOTAL VRAM (16 GB => ratio 16), but the
+      # pipeline models already occupy most of the GPU, so a 256-formula MFR batch
+      # overflows the card and fails with "CUDA out of memory". Pretending the
+      # card is 8 GB lowers the ratio to 4 (MFR batch 64) and enables clean_vram.
+      - MINERU_VIRTUAL_VRAM_SIZE=8
+      # Avoid PyTorch allocator fragmentation (per the MinerU OOM message itself).
+      # PyTorch 2.9 renames the variable to PYTORCH_ALLOC_CONF.
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
     volumes:
       - mineru_models:/app/models
       - ./data:/app/data

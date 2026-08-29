@@ -70,6 +70,32 @@ class RerankerSettings(BaseSettings):
     RERANKER_BASE_URL: str = Field(default="http://192.168.19.127:10115/reranker", description="Reranker service URL")
     RERANKER_TIMEOUT: int = Field(default=30, description="Request timeout in seconds")
     RERANKER_TOP_N: int = Field(default=100, description="Default number of top results to return")
+    RERANKER_MIN_RELEVANCE: float = Field(
+        default=0.60,
+        description=(
+            "Minimum top-1 reranker score to trust the reranked order. "
+            "Qwen VL Reranker 2B emits sigmoid scores in [0, 1]; below this "
+            "threshold the reranker is considered uncertain and the original "
+            "(non-reranked) retrieval order is kept instead. Calibrated on the "
+            "strategy-grid eval: 0.60 maximizes answerable+unanswerable accuracy. "
+            "Set to 0.0 to disable the threshold."
+        ),
+    )
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+
+class SemanticSettings(BaseSettings):
+    """Semantic graph enrichment configuration."""
+    SEMANTIC_MIN_RELEVANCE: float = Field(
+        default=0.0,
+        description=(
+            "Minimum similarity score for semantic embedding-search entities "
+            "and communities to be included in the context. 0.0 = include all. "
+            "Filtering below this threshold reduces noisy low-relevance semantic "
+            "context for unanswerable questions."
+        ),
+    )
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -178,6 +204,7 @@ class Settings(BaseSettings):
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
+    semantic: SemanticSettings = Field(default_factory=SemanticSettings)
     mmr: MMRSettings = Field(default_factory=MMRSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     context_budget: ContextBudgetSettings = Field(default_factory=ContextBudgetSettings)

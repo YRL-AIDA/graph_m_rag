@@ -1,23 +1,34 @@
 #!/usr/bin/env python3
 """
-Strategy Grid Test — runs all retrieval / context / generation
-combinations on the SmallerDataset and saves raw results.
+Full-dataset (MMLongBench-Doc) Strategy Grid Test.
 
-This is a TEST RUNNER only — it does NOT evaluate results.
-Evaluation is handled by the separate evaluate_strategies.py script.
+Runs the same strategy grid as ``strategy_grid_test.py`` (retrieval / context /
+processing combinations) but against the FULL MMLongBench-Doc dataset (1082
+questions) instead of the 105-question SmallerDataset.
+
+The strategies are defined locally (copied from ``strategy_grid_test.py``) so
+this script is self-contained and can be tweaked independently of the
+SmallerDataset runner.
+
+This is a TEST RUNNER only — it does NOT evaluate results. It saves one JSON
+file per strategy, ready for the evaluation step.
+
+Paths (from ``mmlongdoceval_via_api.py``):
+
+* dataset    : /home/sunveil/Documents/projects/laba/graph-m-rag/data/MMLongBench-Doc/data/samples.json
+* hash map   : app/tests/file_hash_comparison.json
+* output dir : app/tests/mmlong_strategy_grid_results
 
 Usage:
-    python app/tests/strategy_grid_test.py
-    python app/tests/strategy_grid_test.py --list-strategies
-    python app/tests/strategy_grid_test.py --base-url http://host:9191
-    python app/tests/strategy_grid_test.py --strategies baseline,reranker
+    python app/tests/mmlong_strategy_grid_test.py
+    python app/tests/mmlong_strategy_grid_test.py --list-strategies
+    python app/tests/mmlong_strategy_grid_test.py --strategies baseline,reranker
+    python app/tests/mmlong_strategy_grid_test.py --base-url http://host:9191
 
-Strategies grid (3 dimensions):
-  - Retrieval:   none | reranker | mmr_lambda0.5 | mmr_lambda0.7 | mmr_lambda0.9
-  - Context:     none | semantic | structural | semantic+structural
-  - Processing:  none | decompose | iterative
+Note on evaluation: score these results with ``mmlong_evaluate_strategies.py``
+(the full-dataset counterpart of ``evaluate_strategies.py``), e.g.:
 
-Total: 5 x 4 x 3 = 60 combinations  (subset to 20 most meaningful by default)
+    python app/tests/mmlong_evaluate_strategies.py --results-dir mmlong_strategy_grid_results
 """
 
 from __future__ import annotations
@@ -32,7 +43,22 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from evaluate_strategies import SORT_KEYS, SORT_BY_CHOICES  # type: ignore[import]
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+# ---------------------------------------------------------------------------
+# Strategy sorting keys (inlined from evaluate_strategies.py)
+# ---------------------------------------------------------------------------
+
+SORT_KEYS = {
+    "accuracy": lambda m: m.get("accuracy", 0),
+    "f1": lambda m: m.get("f1", 0),
+    "avg_score": lambda m: m.get("avg_score", 0),
+    "avg_elapsed": lambda m: -m.get("avg_elapsed", 0),
+    "priority": lambda m: m.get("accuracy", 0) / (max(m.get("avg_elapsed", 1), 1) + 1),
+}
+
+SORT_BY_CHOICES = list(SORT_KEYS.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -134,109 +160,103 @@ class Strategy:
         return flags if flags else ["baseline"]
 
 
-# --- Strategy definitions: 20 combinations from strategy_reference.md ---
+# --- Strategy definitions: 29 combinations (copied from strategy_grid_test.py) ---
 
 STRATEGIES: List[Strategy] = [
 
+#    Strategy("flat_semantic", "Flat + Semantic Graph",
+
+#             use_structured_context=False, use_semantic_graph=True),
+#    Strategy("flat_reranker", "Flat + Reranker",
+#             use_structured_context=False, use_reranker=True,
+#             reranker_min_relevance=0.0),
+
+    # ----- Retrieval variants -----
+
+#    Strategy("mmr_07", "MMR (λ=0.7)",
+#             use_mmr_reranker=True, mmr_lambda=0.7),
+#    Strategy("mmr_05", "MMR (λ=0.5)",
+#             use_mmr_reranker=True, mmr_lambda=0.5),
+#    Strategy("mmr_09", "MMR (λ=0.9)",
+#             use_mmr_reranker=True, mmr_lambda=0.9),
+
+    # ----- Single-graph context enrichment -----
+    Strategy("semantic", "Semantic Graph",
+             use_semantic_graph=True),
+#    Strategy("semantic_minrel", "Semantic Graph (minrel=0.60)",
+#             use_semantic_graph=True, semantic_min_relevance=0.60),
+    Strategy("structural", "Structural Graph (ORDER + Parent)",
+             use_structured_graph=True),
+
+    # ----- Single-graph + Reranker -----
+#    Strategy("semantic_reranker", "Semantic + Reranker",
+#             use_semantic_graph=True, use_reranker=True,
+#             reranker_min_relevance=0.0),
+    Strategy("structural_reranker", "Structural + Reranker",
+             use_structured_graph=True, use_reranker=True,
+             reranker_min_relevance=0.0),
     # ----- Baseline -----
     Strategy("baseline", "Baseline (Qdrant + LLM)"),
     Strategy("flat", "Flat Context (Plain-text, no XML)",
              use_structured_context=False),
     Strategy("baseline_qdrant_flat", "Baseline (Qdrant only, flat text)",
              use_neo4j_enrichment=False, use_structured_context=False),
-
-    Strategy("baseline_qdrant", "Baseline (Qdrant only, no Neo4j enrichment)",
-             use_neo4j_enrichment=False),
-    Strategy("flat_semantic", "Flat + Semantic Graph",
-             use_structured_context=False, use_semantic_graph=True),
-    Strategy("flat_reranker", "Flat + Reranker",
-             use_structured_context=False, use_reranker=True,
-             reranker_min_relevance=0.0),
-
-    # ----- Retrieval variants -----
     Strategy("reranker", "Reranker",
              use_reranker=True, reranker_min_relevance=0.0),
-    Strategy("mmr_07", "MMR (λ=0.7)",
-             use_mmr_reranker=True, mmr_lambda=0.7),
-    Strategy("mmr_05", "MMR (λ=0.5)",
-             use_mmr_reranker=True, mmr_lambda=0.5),
-    Strategy("mmr_09", "MMR (λ=0.9)",
-             use_mmr_reranker=True, mmr_lambda=0.9),
-
-    # ----- Single-graph context enrichment -----
-    Strategy("semantic", "Semantic Graph",
-             use_semantic_graph=True),
-    Strategy("semantic_minrel", "Semantic Graph (minrel=0.60)",
-             use_semantic_graph=True, semantic_min_relevance=0.60),
-    Strategy("structural", "Structural Graph (ORDER + Parent)",
-             use_structured_graph=True),
-#    Strategy("structural_parent_only", "Structural Graph (Parent Only)",
-#             use_structured_graph=True, use_structural_parent_only=True),
-
-    # ----- Dual-graph (activates BFS Crawler C10) -----
-#    Strategy("both_graphs", "Semantic + Structural",
-#             use_semantic_graph=True, use_structured_graph=True),
-
-    # ----- Single-graph + Reranker -----
-    Strategy("semantic_reranker", "Semantic + Reranker",
-             use_semantic_graph=True, use_reranker=True,
-             reranker_min_relevance=0.0),
-    Strategy("structural_reranker", "Structural + Reranker",
-             use_structured_graph=True, use_reranker=True,
-             reranker_min_relevance=0.0),
-
+    Strategy("baseline_qdrant", "Baseline (Qdrant only, no Neo4j enrichment)",
+             use_neo4j_enrichment=False),
     # ----- Single-graph + Reranker + min-relevance threshold -----
-    Strategy("semantic_reranker_thr", "Semantic + Reranker (minrel=0.60)",
-             use_semantic_graph=True, use_reranker=True,
-             reranker_min_relevance=0.60),
-    Strategy("structural_reranker_thr", "Structural + Reranker (minrel=0.60)",
-             use_structured_graph=True, use_reranker=True,
-             reranker_min_relevance=0.60),
+#    Strategy("semantic_reranker_thr", "Semantic + Reranker (minrel=0.60)",
+#             use_semantic_graph=True, use_reranker=True,
+#             reranker_min_relevance=0.60),
+#    Strategy("structural_reranker_thr", "Structural + Reranker (minrel=0.60)",
+#             use_structured_graph=True, use_reranker=True,
+#             reranker_min_relevance=0.60),
 
     # ----- Dual-graph (activates BFS Crawler C10) -----
     Strategy("both_graphs", "Semantic + Structural",
              use_semantic_graph=True, use_structured_graph=True),
-    Strategy("both_reranker", "Both Graphs + Reranker",
-             use_semantic_graph=True, use_structured_graph=True,
-             use_reranker=True, reranker_min_relevance=0.0),
-    Strategy("both_reranker_thr", "Both Graphs + Reranker (minrel=0.60)",
-             use_semantic_graph=True, use_structured_graph=True,
-             use_reranker=True, reranker_min_relevance=0.60),
-    Strategy("both_mmr07", "Both Graphs + MMR λ=0.7",
-             use_semantic_graph=True, use_structured_graph=True,
-             use_mmr_reranker=True, mmr_lambda=0.7),
+#    Strategy("both_reranker", "Both Graphs + Reranker",
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_reranker=True, reranker_min_relevance=0.0),
+#    Strategy("both_reranker_thr", "Both Graphs + Reranker (minrel=0.60)",
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_reranker=True, reranker_min_relevance=0.60),
+#    Strategy("both_mmr07", "Both Graphs + MMR λ=0.7",
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_mmr_reranker=True, mmr_lambda=0.7),
 
     # ----- Query processing variants -----
-    Strategy("decompose", "Question Decomposition",
-             use_semantic_graph=True, use_structured_graph=True,
-             use_question_decomposition=True),
-    Strategy("iterative", "Iterative Search",
-             use_semantic_graph=True, use_structured_graph=True,
-             use_iterative_search=True),
+#    Strategy("decompose", "Question Decomposition",
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_question_decomposition=True),
+#    Strategy("iterative", "Iterative Search",
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_iterative_search=True),
 
     # ----- Full system variants -----
-    Strategy("full_system", "Full System (All)",
-             use_reranker=True, reranker_min_relevance=0.0,
-             use_semantic_graph=True, use_structured_graph=True,
-             use_iterative_search=True),
-    Strategy("full_mmr07", "Full + MMR λ=0.7",
-             use_mmr_reranker=True, mmr_lambda=0.7,
-             use_semantic_graph=True, use_structured_graph=True,
-             use_iterative_search=False),
-    Strategy("full_mmr05", "Full + MMR λ=0.5",
-             use_mmr_reranker=True, mmr_lambda=0.5,
-             use_semantic_graph=True, use_structured_graph=True,
-             use_iterative_search=True),
-    Strategy("full_mmr09", "Full + MMR λ=0.9",
-             use_mmr_reranker=True, mmr_lambda=0.9,
-             use_semantic_graph=True, use_structured_graph=True,
-             use_iterative_search=True),
+#    Strategy("full_system", "Full System (All)",
+#             use_reranker=True, reranker_min_relevance=0.0,
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_iterative_search=True),
+#    Strategy("full_mmr07", "Full + MMR λ=0.7",
+#             use_mmr_reranker=True, mmr_lambda=0.7,
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_iterative_search=False),
+#    Strategy("full_mmr05", "Full + MMR λ=0.5",
+#             use_mmr_reranker=True, mmr_lambda=0.5,
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_iterative_search=True),
+#    Strategy("full_mmr09", "Full + MMR λ=0.9",
+#             use_mmr_reranker=True, mmr_lambda=0.9,
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_iterative_search=True),
 
     # ----- Graph-only + Iterative -----
-    Strategy("semantic_iterative", "Semantic + Iterative",
-             use_semantic_graph=True, use_iterative_search=True),
-    Strategy("structural_iterative", "Structural + Iterative",
-             use_structured_graph=True, use_iterative_search=True),
+#    Strategy("semantic_iterative", "Semantic + Iterative",
+#             use_semantic_graph=True, use_iterative_search=True),
+#    Strategy("structural_iterative", "Structural + Iterative",
+#             use_structured_graph=True, use_iterative_search=True),
 ]
 
 
@@ -314,6 +334,18 @@ def _build_result_entry(
 
 
 # ---------------------------------------------------------------------------
+# Full-dataset paths (from mmlongdoceval_via_api.py)
+# ---------------------------------------------------------------------------
+
+DEFAULT_DATASET = (
+    "/home/sunveil/Documents/projects/laba/graph-m-rag/"
+    "data/MMLongBench-Doc/data/samples.json"
+)
+DEFAULT_HASH_MAP = str(SCRIPT_DIR / "file_hash_comparison.json")
+DEFAULT_OUTPUT_DIR = str(SCRIPT_DIR / "mmlong_strategy_grid_results")
+
+
+# ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
 
@@ -328,14 +360,14 @@ def run_grid_test(
     sort_reference: str = "",
     sort_by: str = "accuracy",
 ):
-    """Run all (or filtered) strategies against the SmallerDataset.
+    """Run all (or filtered) strategies against the full MMLongBench-Doc dataset.
 
     Parameters
     ----------
     base_url : str
         Base URL of the API server.
     dataset_path : str
-        Path to SmallerDataset samples.json.
+        Path to the full dataset samples.json.
     file_hash_map_path : str
         Path to file_hash_comparison.json (maps doc_id → file_hash).
     output_dir : str
@@ -355,13 +387,12 @@ def run_grid_test(
         One of: accuracy, f1, avg_score, avg_elapsed, priority.
     """
     # --- Resolve paths ---
-    script_dir = Path(__file__).resolve().parent
     if not dataset_path:
-        dataset_path = str(script_dir / "SmallerDataset" / "samples.json")
+        dataset_path = DEFAULT_DATASET
     if not file_hash_map_path:
-        file_hash_map_path = str(script_dir / "file_hash_comparison.json")
+        file_hash_map_path = DEFAULT_HASH_MAP
     if not output_dir:
-        output_dir = str(script_dir / "strategy_grid_results")
+        output_dir = DEFAULT_OUTPUT_DIR
     os.makedirs(output_dir, exist_ok=True)
 
     # --- Load dataset ---
@@ -370,7 +401,7 @@ def run_grid_test(
 
     # --- Load extraction prompt (optional) ---
     extract_prompt_path = (
-        script_dir / "MMLongDocEval" / "prompt_for_answer_extraction.md"
+        SCRIPT_DIR / "MMLongDocEval" / "prompt_for_answer_extraction.md"
     )
     extract_prompt = ""
     if not skip_extraction and extract_prompt_path.exists():
@@ -404,7 +435,6 @@ def run_grid_test(
             f"Reordered {len(selected)} strategies by '{sort_by}' "
             f"from {sort_reference}"
         )
-        # Print order for visibility
         for i, s in enumerate(selected):
             metrics = name_to_metric.get(s.name, {})
             acc = metrics.get("accuracy", "?")
@@ -546,7 +576,7 @@ def run_grid_test(
     print(f"{'=' * 70}")
     print(f"\nResults saved to: {output_dir}/")
     print(f"\nTo evaluate results, run:")
-    print(f"  python app/tests/evaluate_strategies.py "
+    print(f"  python app/tests/mmlong_evaluate_strategies.py "
           f"--results-dir {output_dir}")
 
 
@@ -571,12 +601,13 @@ def print_strategy_table(strategies: List[Strategy]) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main() -> int:
     import argparse
 
     ap = argparse.ArgumentParser(
-        description="Strategy Grid Test — run retrieval/context/generation "
-                    "combinations against the SmallerDataset."
+        description="Full-dataset (MMLongBench-Doc) strategy grid test — "
+                    "runs retrieval/context/generation combinations against "
+                    "the full 1082-question dataset."
     )
     ap.add_argument(
         "--base-url", default="http://0.0.0.0:9191",
@@ -584,15 +615,18 @@ if __name__ == "__main__":
     )
     ap.add_argument(
         "--dataset", default="",
-        help="Path to SmallerDataset samples.json",
+        help=f"Path to the full dataset samples.json "
+             f"(default: {DEFAULT_DATASET})",
     )
     ap.add_argument(
         "--hash-map", default="",
-        help="Path to file_hash_comparison.json",
+        help=f"Path to file_hash_comparison.json "
+             f"(default: {DEFAULT_HASH_MAP})",
     )
     ap.add_argument(
         "--output-dir", default="",
-        help="Directory for strategy result files",
+        help=f"Directory for per-strategy result files "
+             f"(default: {DEFAULT_OUTPUT_DIR})",
     )
     ap.add_argument(
         "--limit", type=int, default=30,
@@ -601,7 +635,7 @@ if __name__ == "__main__":
     ap.add_argument(
         "--strategies", default="",
         help="Comma-separated list of strategy names to run "
-             "(default: all 20). E.g.: --strategies baseline,reranker",
+             "(default: all). E.g.: --strategies baseline,reranker",
     )
     ap.add_argument(
         "--skip-extraction", action="store_true",
@@ -609,7 +643,7 @@ if __name__ == "__main__":
     )
     ap.add_argument(
         "--sort-reference", default="",
-        help="Path to strategy_summary.json from a previous evaluation. "
+        help="Path to a strategy_summary.json from a previous evaluation. "
              "If provided, strategies are reordered by --sort-by metric "
              "(highest first) so the best candidates run first.",
     )
@@ -619,8 +653,7 @@ if __name__ == "__main__":
         default="accuracy",
         help=(
             "Metric to sort strategies by when --sort-reference is used. "
-            f"Choices: {', '.join(SORT_BY_CHOICES)}. "
-            "(default: accuracy)"
+            f"Choices: {', '.join(SORT_BY_CHOICES)}. (default: accuracy)"
         ),
     )
     ap.add_argument(
@@ -631,7 +664,7 @@ if __name__ == "__main__":
 
     if args.list_strategies:
         print_strategy_table(STRATEGIES)
-        sys.exit(0)
+        return 0
 
     strategy_filter = None
     if args.strategies:
@@ -650,3 +683,8 @@ if __name__ == "__main__":
         sort_reference=args.sort_reference,
         sort_by=args.sort_by,
     )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

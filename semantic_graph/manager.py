@@ -1172,6 +1172,7 @@ class Manager:
         WHERE r1.region_id IN $region_ids
           AND NOT r2.region_id IN $region_ids
           AND e1 <> e2
+          AND r2.region_id STARTS WITH split(r1.region_id, '|')[0] + '|'
         WITH r2, sl2.weight AS bridge_weight
         ORDER BY bridge_weight DESC
         LIMIT $max_regions

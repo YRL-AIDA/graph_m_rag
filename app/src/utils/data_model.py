@@ -33,14 +33,18 @@ class QuestionRequest(BaseModel):
     collection_name: Optional[str] = None  # Optional collection name
     use_llm: bool = False  # Option to generate answer using LLM
     use_reranker: bool = False  # Option to use API reranker for re-ranking results
+    reranker_min_relevance: Optional[float] = None  # Min top-1 reranker score to trust reranking; None = server default, 0.0 = disabled
     use_mmr_reranker: bool = False  # Option to use MMR (Maximal Marginal Relevance) diversity-based reranking
     mmr_lambda: float = 0.7  # MMR relevance-diversity tradeoff (1.0 = pure relevance)
     mmr_min_relevance: float = 0.0  # MMR minimum relevance threshold
     use_semantic_graph: bool = False  # Option to enrich context with Entity and Community nodes from semantic graph
+    semantic_min_relevance: Optional[float] = None  # Min similarity score for semantic embedding-search entities/communities; None = server default, 0.0 = disabled
     use_structured_graph: bool = False  # Option to enrich context with structural graph neighbours (ORDER walk + cross-graph bridge)
     use_structural_parent_only: bool = False  # When use_structured_graph=True: only walk PARENT edges (skip ORDER neighbours)
     use_iterative_search: bool = False  # Option to use iterative (feedback-driven) retrieval for multi-hop questions
     use_question_decomposition: bool = False  # Option to decompose complex questions into sub-questions
+    use_structured_context: bool = True  # Option to use XML-structured context (False = flat text)
+    use_neo4j_enrichment: bool = True  # Option to enrich original Qdrant regions with Neo4j parent/caption/footnote
     answer_format: Optional[str] = None  # Expected answer format: 'Int', 'Float', 'List', 'Str', 'None'
 
 

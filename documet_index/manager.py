@@ -218,7 +218,7 @@ class Manager:
                 )
                 for sec in sections:
                     sec_id_norm = sec['section_id'].replace("'", "\\'").replace("|", "_")
-                    title_escaped = sec['title'].replace("'", "\\'")
+                    title_escaped = sec['title'].replace("\\", "\\\\").replace("'", "\\'")
                     query += (
                         f"CREATE (sec_{sec_id_norm}:Section {{section_id: "
                         f"'{sec_id_norm}', title: '{title_escaped}', "
@@ -545,14 +545,17 @@ class Manager:
             return []
 
         query = """
-            MATCH (r:Region)-[:PART_OF]->(d:Document)
+            MATCH (r:Region)
             WHERE r.region_id IN $region_ids
-            MATCH (neighbor:Region)-[:PART_OF]->(d)
-            WHERE abs(neighbor.order - r.order) <= $window_size
+            MATCH (d:Document)-[:ORDER*]->(r)
+            WITH r, d
+            MATCH (neighbor:Region)
+            WHERE (d)-[:ORDER*]->(neighbor)
+              AND abs(neighbor.order - r.order) <= $window_size
               AND neighbor.region_id <> r.region_id
             RETURN DISTINCT
                 neighbor.region_id AS region_id,
-                neighbor.label    AS label,
+                [l IN labels(neighbor) WHERE l <> 'Region'][0] AS label,
                 neighbor.text     AS text,
                 neighbor.order    AS order,
                 neighbor.page_idx AS page_idx,
@@ -589,7 +592,7 @@ class Manager:
                 WHERE child.region_id IN $region_ids
                 RETURN DISTINCT
                     parent.region_id AS region_id,
-                    parent.label     AS label,
+                    [l IN labels(parent) WHERE l <> 'Region'][0] AS label,
                     parent.text      AS text,
                     parent.order     AS order,
                     parent.page_idx  AS page_idx,

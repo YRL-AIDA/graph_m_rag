@@ -140,7 +140,16 @@ async def process_document(request: DocumentRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Qdrant connection error")
 
     if df.empty:
-        raise HTTPException(status_code=404, detail="Document not found or empty")
+        logger.warning(
+            "No text chunks found in Qdrant for document '%s'. "
+            "The document is either not indexed in Qdrant or contains no text elements. "
+            "Ensure embeddings were saved before building the semantic graph.",
+            doc_id,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Document '{doc_id}' not found or empty in Qdrant",
+        )
 
     input_df = df[['chunk_id', 'text']].rename(columns={'chunk_id': 'id'})
     total_chunks = input_df.shape[0]

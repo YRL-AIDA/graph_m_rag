@@ -529,11 +529,11 @@ class Manager:
         text/label/order/region_id for every qualifying neighbour.
 
         When *include_parent* is ``True``, also walks up the ``PARENT``
-        hierarchy (e.g. from ``image_caption`` to its parent ``image``
+        hierarchy (e.g. from a ``text`` region to its containing ``title``
         Region), including the parent node in the results.
 
         Args:
-            region_ids:     List of region_id strings (format: '{file_hash}|{element_index}')
+            region_ids:     List of region_id strings (format: '{file_hash}|{region_id}')
             window_size:    Number of ORDER hops to walk in each direction (default 3)
             include_parent: If True, include parent Region nodes via PARENT edges
 
@@ -544,15 +544,26 @@ class Manager:
         if not region_ids:
             return []
 
-        query = """
+        # Walk ±K steps along the per-document ORDER chain
+        # (Document → reg0 → reg1 → … → regN).  Forward neighbours are
+        # `(r)-[:ORDER*1..K]->(n)`, backward neighbours are
+        # `(r)<-[:ORDER*1..K]-(n)`.  This is linear in the window size,
+        # whereas matching `(d:Document)-[:ORDER*]->(r)` / `(d)-[:ORDER*]->(n)`
+        # over every region in the graph is O(N²) and times out on large
+        # documents.
+        w = max(1, int(window_size))
+        query = f"""
             MATCH (r:Region)
             WHERE r.region_id IN $region_ids
-            MATCH (d:Document)-[:ORDER*]->(r)
-            WITH r, d
-            MATCH (neighbor:Region)
-            WHERE (d)-[:ORDER*]->(neighbor)
-              AND abs(neighbor.order - r.order) <= $window_size
-              AND neighbor.region_id <> r.region_id
+            WITH r
+            OPTIONAL MATCH (r)-[:ORDER*1..{w}]->(f:Region)
+            WITH r, collect(DISTINCT f) AS fwd
+            OPTIONAL MATCH (r)<-[:ORDER*1..{w}]-(b:Region)
+            WITH r, fwd, collect(DISTINCT b) AS bwd
+            WITH r, fwd + bwd AS nbs
+            UNWIND nbs AS neighbor
+            WITH r, neighbor
+            WHERE neighbor IS NOT NULL AND neighbor.region_id <> r.region_id
             RETURN DISTINCT
                 neighbor.region_id AS region_id,
                 [l IN labels(neighbor) WHERE l <> 'Region'][0] AS label,
@@ -566,7 +577,6 @@ class Manager:
         try:
             results = self.query(query, {
                 "region_ids": region_ids,
-                "window_size": window_size,
             })
         except Exception as e:
             logger.error("Error getting order neighbors: %s", e)
@@ -586,9 +596,13 @@ class Manager:
         ]
 
         # --- Optionally walk PARENT edges ---
+        # PARENT edges point from the container (title / image_caption /
+        # table_caption) to its content: `(container)-[:PARENT]->(content)`.
+        # Walking "up" the hierarchy for a matched region means finding the
+        # node that points AT it: `(matched)<-[:PARENT]-(parent)`.
         if include_parent:
             parent_query = """
-                MATCH (child:Region)-[:PARENT]->(parent:Region)
+                MATCH (child:Region)<-[:PARENT]-(parent:Region)
                 WHERE child.region_id IN $region_ids
                 RETURN DISTINCT
                     parent.region_id AS region_id,

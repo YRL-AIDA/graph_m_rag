@@ -187,7 +187,9 @@ STRATEGIES: List[Strategy] = [
 #             use_semantic_graph=True, semantic_min_relevance=0.60),
     Strategy("structural", "Structural Graph (ORDER + Parent)",
              use_structured_graph=True),
-
+    # ----- Dual-graph (activates BFS Crawler C10) -----
+    Strategy("both_graphs", "Semantic + Structural",
+             use_semantic_graph=True, use_structured_graph=True),
     # ----- Single-graph + Reranker -----
 #    Strategy("semantic_reranker", "Semantic + Reranker",
 #             use_semantic_graph=True, use_reranker=True,
@@ -214,8 +216,8 @@ STRATEGIES: List[Strategy] = [
 #             reranker_min_relevance=0.60),
 
     # ----- Dual-graph (activates BFS Crawler C10) -----
-    Strategy("both_graphs", "Semantic + Structural",
-             use_semantic_graph=True, use_structured_graph=True),
+#    Strategy("both_graphs", "Semantic + Structural",
+#             use_semantic_graph=True, use_structured_graph=True),
 #    Strategy("both_reranker", "Both Graphs + Reranker",
 #             use_semantic_graph=True, use_structured_graph=True,
 #             use_reranker=True, reranker_min_relevance=0.0),

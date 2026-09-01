@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Graph-M-RAG — Демо</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">GMR</div>
+    <div>
+      <h1>Graph-M-RAG</h1>
+      <p class="tagline">Графовая вопросно-ответная система по документам</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span id="status-pill" class="pill pill-off">подключение…</span>
+  </div>
+</header>
+
+<!-- ================= PIPELINE STRIP ================= -->
+<div id="pipeline" class="pipeline">
+  <div class="pstep" data-step="0">
+    <span class="pdot" style="--c:#4f8cff">1</span>
+    <span class="plabel">PDF</span>
+    <span class="psub">исходный документ</span>
+  </div>
+  <div class="pstep" data-step="1">
+    <span class="pdot" style="--c:#f39c12">2</span>
+    <span class="plabel">Регионы</span>
+    <span class="psub">разбиение на регионы</span>
+  </div>
+  <div class="pstep" data-step="2">
+    <span class="pdot" style="--c:#3498db">3</span>
+    <span class="plabel">Векторизация</span>
+    <span class="psub">эмбеддинги · Qdrant</span>
+  </div>
+  <div class="pstep" data-step="3">
+    <span class="pdot" style="--c:#3fb950">4</span>
+    <span class="plabel">Структурный граф</span>
+    <span class="psub">ORDER · PARENT · SECTION</span>
+  </div>
+  <div class="pstep" data-step="4">
+    <span class="pdot" style="--c:#7c5cff">5</span>
+    <span class="plabel">Семантический граф</span>
+    <span class="psub">сущности · сообщества</span>
+  </div>
+  <div class="pstep" data-step="5">
+    <span class="pdot" style="--c:#f85149">6</span>
+    <span class="plabel">Ответ</span>
+    <span class="psub">Qwen3-VL · мультимодальный</span>
+  </div>
+</div>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="demo">Демо</button>
+  <button class="tab" data-tab="ask">Вопрос</button>
+  <button class="tab" data-tab="graphs">Графы</button>
+  <button class="tab" data-tab="doc">Документ и регионы</button>
+  <button class="tab" data-tab="pipeline">Как это устроено</button>
+  <button class="tab" data-tab="compare">Сравнение</button>
+  <button class="tab" data-tab="docs">Файлы</button>
+</nav>
+
+<main>
+
+  <!-- ================= DEMO ================= -->
+  <section id="tab-demo" class="tabview active">
+    <div class="hero">
+      <h2>Попробуйте Graph-M-RAG за 30 секунд</h2>
+      <p>Задайте вопрос по документу — и посмотрите, как система находит
+         ответ и <b>объясняет его</b>: какие фрагменты документа, соседи по
+         чтению и связанные сущности использованы.</p>
+    </div>
+
+    <div class="card">
+      <div class="form-row">
+        <label>Документ
+          <select id="demo-doc" class="input"></select>
+        </label>
+        <label>Что спросить
+          <select id="demo-question" class="input"></select>
+        </label>
+      </div>
+      <div id="demo-categories" class="demo-cats"></div>
+      <div class="form-row">
+        <button id="demo-btn" class="btn btn-primary btn-lg">Запустить демо</button>
+        <span class="hint">вопрос будет задан полной версии: векторный поиск + графы</span>
+      </div>
+    </div>
+
+    <div class="hero hero-2">
+      <h2>Что вы увидите</h2>
+      <div class="ctx-flow">
+        <div class="ctx-node" style="--c:#3498db">Ответ<br><small>с доказательствами</small></div>
+        <div class="ctx-arrow">→</div>
+        <div class="ctx-node" style="--c:#3fb950">Фрагменты документа<br><small>текст, таблицы, изображения</small></div>
+        <div class="ctx-arrow">→</div>
+        <div class="ctx-node" style="--c:#7c5cff">Графы<br><small>соседи по чтению, сущности, сообщества</small></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= PIPELINE ================= -->
+  <section id="tab-pipeline" class="tabview active">
+    <div class="hero">
+      <h2>Как Graph-M-RAG отвечает на вопросы по документам</h2>
+      <p>Документ не «просто индексируется» — он превращается в <b>три</b>
+         взаимосвязанных представления: регионы, структурный граф и семантический
+         граф. Ответ LLM строится по объединённому контексту всех трёх.</p>
+    </div>
+
+    <div class="pipe-cards">
+      <div class="pipe-card" style="--c:#f39c12">
+        <div class="pipe-num">1</div>
+        <h3>Разбиение на регионы</h3>
+        <p>PDF анализируется layout-моделью: каждая страница делится на
+           <b>регионы</b> — текст, заголовки, таблицы, изображения, подписи.
+           Каждый регион получает координаты (bbox), номер страницы и тип.</p>
+        <div class="pipe-tags">
+          <span class="ptag" style="--c:#3498db">text</span>
+          <span class="ptag" style="--c:#9b59b6">title</span>
+          <span class="ptag" style="--c:#e67e22">table</span>
+          <span class="ptag" style="--c:#27ae60">image</span>
+          <span class="ptag" style="--c:#e74c3c">equation</span>
+        </div>
+        <p class="pipe-link" data-target="doc">См. вкладку «Документ и регионы» →</p>
+      </div>
+
+      <div class="pipe-card" style="--c:#3fb950">
+        <div class="pipe-num">2</div>
+        <h3>Структурный граф</h3>
+        <p>Регионы связываются в граф документа:</p>
+        <ul class="pipe-list">
+          <li><b>ORDER</b> — порядок чтения (регион → следующий регион);</li>
+          <li><b>PARENT</b> — иерархия (таблица → её подпись, изображение → caption);</li>
+          <li><b>SECTION</b> — разбиение на секции по заголовкам.</li>
+        </ul>
+        <p>Это позволяет восстанавливать контекст «вокруг» найденного региона:
+           соседей по чтению, родителя, раздел.</p>
+      </div>
+
+      <div class="pipe-card" style="--c:#7c5cff">
+        <div class="pipe-num">3</div>
+        <h3>Семантический граф</h3>
+        <p>Из текста документа извлекаются <b>сущности</b> (персоны, организации,
+           даты, события) и <b>сообщества</b> — кластеры связанных сущностей с
+           отчётом-резюме. Граф хранится в Neo4j, эмбеддинги — в Qdrant.</p>
+        <p>Поиск идёт не только по фрагментам текста, но и по графу:
+           вопрос → сущности → связанные регионы и сообщества.</p>
+        <p class="pipe-link" data-target="graphs">См. вкладку «Графы» →</p>
+      </div>
+    </div>
+
+    <div class="hero hero-2">
+      <h2>Как собирается контекст для ответа</h2>
+      <div class="ctx-flow">
+        <div class="ctx-node" style="--c:#3498db">Qdrant<br><small>векторный поиск<br>top-30 регионов</small></div>
+        <div class="ctx-arrow">+</div>
+        <div class="ctx-node" style="--c:#3fb950">Структурный граф<br><small>соседи по чтению,<br>родители, секции</small></div>
+        <div class="ctx-arrow">+</div>
+        <div class="ctx-node" style="--c:#7c5cff">Семантический граф<br><small>сущности,<br>сообщества</small></div>
+        <div class="ctx-arrow">→</div>
+        <div class="ctx-node ctx-llm" style="--c:#f85149">Qwen3-VL<br><small>анализ текста,<br>таблиц и изображений</small></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= DOC / REGIONS ================= -->
+  <section id="tab-doc" class="tabview">
+    <div class="card doc-toolbar">
+      <label>Документ
+        <select id="doc-select" class="input"></select>
+      </label>
+      <label class="chk"><input type="checkbox" id="doc-show-regions" checked> показать регионы</label>
+      <label class="chk"><input type="checkbox" id="doc-show-evidence"> подсветить доказательства</label>
+      <label class="chk"><input type="checkbox" id="doc-context-only"> только регионы из контекста <span class="tip" title="Показывать лишь те фрагменты, которые использовались при ответе">?</span></label>
+      <div class="pager">
+        <button id="doc-prev" class="btn btn-sm">←</button>
+        <span id="doc-page-ind" class="hint">стр. 0 / 0</span>
+        <button id="doc-next" class="btn btn-sm">→</button>
+      </div>
+    </div>
+
+    <div class="doc-layout">
+      <div id="doc-viewer" class="doc-viewer">
+        <img id="doc-img" alt="PDF страница" />
+        <div id="doc-overlay" class="doc-overlay"></div>
+        <p id="doc-empty" class="hint">Выберите документ, чтобы увидеть разбиение на регионы.</p>
+      </div>
+      <div id="doc-side" class="doc-side">
+        <div class="card">
+          <h3>Легенда регионов</h3>
+          <div id="doc-legend" class="legend"></div>
+        </div>
+        <div class="card">
+          <h3>Регион</h3>
+          <p id="doc-region-info" class="hint">Нажмите на регион на странице.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ASK ================= -->
+  <section id="tab-ask" class="tabview">
+    <div class="card">
+      <div class="form-row">
+        <label>Документ <select id="ask-doc" class="input"></select></label>
+        <label>Вопрос
+          <textarea id="ask-question" class="input" rows="2"
+            placeholder="Например: Какой был общий доход компании в 2023 году?"></textarea>
+        </label>
+      </div>
+      <div class="form-row">
+        <button id="ask-btn" class="btn btn-primary btn-lg">Задать вопрос</button>
+        <span id="ask-status" class="hint"></span>
+      </div>
+      <div id="ask-progress" class="ask-progress hidden">
+        <div class="progress-track"><div id="ask-progress-bar" class="progress-bar"></div></div>
+        <span id="ask-progress-label" class="hint">поиск фрагментов…</span>
+      </div>
+      <details class="adv">
+        <summary>Расширенные настройки</summary>
+        <div class="form-row">
+          <label>Стратегия <select id="ask-strategy" class="input"></select></label>
+        </div>
+        <div class="ask-opts">
+          <label class="chk"><input type="checkbox" id="ask-reranker"> API-реранкер <span class="tip" title="Переупорядочивает найденные фрагменты специальной моделью">?</span></label>
+          <label class="chk"><input type="checkbox" id="ask-mmr"> MMR-реранкер <span class="tip" title="Делает набор фрагментов более разнообразным">?</span></label>
+        </div>
+      </details>
+    </div>
+
+    <div id="ask-result" class="result hidden">
+      <div class="card answer-card">
+        <div class="answer-head">
+          <div>
+            <h3 id="answer-strategy"></h3>
+            <div id="answer-timing" class="timing"></div>
+          </div>
+          <div class="answer-actions">
+            <span id="answer-evidence-badge" class="badge hidden"></span>
+            <button id="ask-show-evidence" class="btn btn-sm">Показать на странице</button>
+            <button id="ask-compare" class="btn btn-sm">Что дают графы?</button>
+          </div>
+        </div>
+        <p id="answer-text" class="answer-text"></p>
+        <div id="ask-compare-block" class="compare-block hidden"></div>
+      </div>
+
+      <div class="card">
+        <h3>Из чего собран контекст <span class="tip" title="Какие источники информации использовала система для ответа">?</span></h3>
+        <div id="ctx-composition" class="ctx-comp"></div>
+      </div>
+
+      <div class="card">
+        <h3>Сущности и сообщества</h3>
+        <div id="answer-entities" class="chips"></div>
+      </div>
+
+      <div class="card">
+        <h3>Доказательства из документа</h3>
+        <div id="answer-evidence" class="evidence"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= GRAPHS ================= -->
+  <section id="tab-graphs" class="tabview">
+    <div class="card graph-toolbar">
+      <div class="pager">
+        <button id="graph-prev" class="btn btn-sm">←</button>
+        <span id="graph-page-ind" class="hint">стр. 0 / 0</span>
+        <button id="graph-next" class="btn btn-sm">→</button>
+      </div>
+      <div class="graph-layers">
+        <label class="chk"><input type="checkbox" id="gl-blocks" checked> блоки Qdrant</label>
+        <label class="chk"><input type="checkbox" id="gl-order" checked> ORDER-цепь</label>
+        <label class="chk"><input type="checkbox" id="gl-entities" checked> сущности</label>
+        <label class="chk"><input type="checkbox" id="gl-communities" checked> сообщества</label>
+      </div>
+      <span class="hint">граф наложен прямо на документ: кликните элемент, чтобы увидеть детали</span>
+    </div>
+
+    <div class="graphs-main">
+      <div class="graph-doc">
+        <div id="graph-viewer" class="doc-viewer">
+          <img id="graph-img" alt="PDF страница" />
+          <div id="graph-overlay" class="doc-overlay"></div>
+          <div id="graph-edges" class="graph-edges"></div>
+          <p id="graph-empty" class="hint">Задайте вопрос во вкладке «Вопрос», чтобы увидеть граф на документе.</p>
+        </div>
+      </div>
+      <div class="graph-side">
+        <div class="card graph-tabs">
+          <div class="gtab active" data-gtab="sem">Семантический граф</div>
+          <div class="gtab" data-gtab="struct">Структурный граф</div>
+        </div>
+        <div class="card graph-tab-panel gpanel-sem active">
+          <div id="sem-graph" class="graph-box g-force">
+            <p class="hint">Нет данных. Задайте вопрос.</p>
+          </div>
+        </div>
+        <div class="card graph-tab-panel gpanel-struct">
+          <div class="graph-legend">
+            <span><i style="background:#3498db"></i>Qdrant-блоки</span>
+            <span><i style="background:#3fb950"></i>ORDER-цепь</span>
+            <span><i style="background:#8b6bff"></i>PARENT</span>
+            <span><i style="background:#9b59b6"></i>cross-graph</span>
+            <span><i style="background:#1abc9c"></i>BFS</span>
+          </div>
+          <div id="struct-graph" class="graph-box g-force">
+            <p class="hint">Нет данных. Задайте вопрос.</p>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Детали</h3>
+          <div id="graph-detail" class="graph-detail">Кликните элемент на странице или в графе.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= COMPARE ================= -->
+  <section id="tab-compare" class="tabview">
+    <div class="card">
+      <div class="form-row">
+        <label>Документ <select id="cmp-doc" class="input"></select></label>
+      </div>
+      <label>Вопрос
+        <textarea id="cmp-question" class="input" rows="2"
+          placeholder="Один и тот же вопрос будет задан всем стратегиям"></textarea>
+      </label>
+      <div class="form-row">
+        <button id="cmp-btn" class="btn btn-primary">Сравнить все стратегии</button>
+        <span id="cmp-status" class="hint"></span>
+      </div>
+    </div>
+    <div id="cmp-grid" class="cmp-grid"></div>
+  </section>
+
+  <!-- ================= FILES ================= -->
+  <section id="tab-docs" class="tabview">
+    <div class="card">
+      <h3>Загрузка документа</h3>
+      <p class="hint">PDF обрабатывается пайплайном: MinerU (разбиение на регионы)
+        → эмбеддинги → структурный и семантический графы.</p>
+      <input type="file" id="upload-input" accept=".pdf" class="input-file">
+      <button id="upload-btn" class="btn btn-primary">Загрузить</button>
+      <span id="upload-status" class="hint"></span>
+    </div>
+    <div class="card">
+      <h3>Загруженные документы</h3>
+      <table class="files-table">
+        <thead><tr><th>Файл</th><th>Статус</th><th>Размер</th><th>Дата</th></tr></thead>
+        <tbody id="files-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<div class="cta">
+  <div>
+    <h3>Хотите внедрить Graph-M-RAG?</h3>
+    <p>Проведём демонстрацию на ваших документах, покажем архитектуру
+       и поможем с пилотным проектом.</p>
+  </div>
+  <a class="btn btn-primary" href="mailto:demo@graph-m-rag.ru?subject=Graph-M-RAG%20демо">Запросить демо</a>
+</div>
+
+<footer class="footer">
+  <p>Graph-M-RAG · разбиение на регионы · структурный граф · семантический граф · Qdrant + Neo4j + Qwen3-VL</p>
+  <p class="hint">Демонстрационная версия — все ответы формируются на реальных документах.</p>
+</footer>
+
+<script src="/static/vendor/d3.v7.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

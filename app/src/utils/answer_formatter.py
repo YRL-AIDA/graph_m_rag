@@ -85,12 +85,14 @@ def extract_list(text: str) -> Optional[List[str]]:
         items = [item.strip().strip('"').strip("'") for item in first_line.split(',')]
         items = [re.sub(r'^(and|or)\s+', '', item).strip() for item in items]
         items = [item for item in items if item]
+        items = _dedupe_items(items)
         if len(items) >= 2:
             return items
 
     if first_line.count(';') >= 1:
         items = [item.strip().strip('"').strip("'") for item in first_line.split(';')]
         items = [item for item in items if item]
+        items = _dedupe_items(items)
         if len(items) >= 2:
             return items
 
@@ -106,16 +108,29 @@ def extract_list(text: str) -> Optional[List[str]]:
             list_items.append(re.match(r'^[-*•]\s+(.+)', stripped).group(1).strip())
 
     if len(list_items) >= 2:
-        return list_items
+        return _dedupe_items(list_items)
 
     if text.count(',') >= 2:
         items = [item.strip().strip('"').strip("'") for item in text.split(',')]
         items = [re.sub(r'^(and|or)\s+', '', item).strip() for item in items]
         items = [item for item in items if item and len(item) < 200]
+        items = _dedupe_items(items)
         if len(items) >= 2:
             return items
 
     return None
+
+
+def _dedupe_items(items: List[str]) -> List[str]:
+    """Remove exact duplicate list items while preserving order."""
+    seen: set = set()
+    out: List[str] = []
+    for item in items:
+        norm = item.casefold()
+        if norm not in seen:
+            seen.add(norm)
+            out.append(item)
+    return out
 
 
 def extract_str(text: str) -> Optional[str]:
@@ -125,6 +140,11 @@ def extract_str(text: str) -> Optional[str]:
     first_line = _strip_first_nonempty_line(text)
     if first_line.lower() in ("not answerable", "none", "n/a", "unknown", ""):
         return None
+    # Drop a leading ordinal/number prefix that is not part of the answer
+    # (e.g. "18 Golden Gate Park & the Avenues" -> "Golden Gate Park & the
+    # Avenues"). Date-like values ("2014-10-06") have no space after the
+    # digits and are preserved.
+    first_line = re.sub(r'^\d+\s+', '', first_line.strip())
     return first_line
 
 

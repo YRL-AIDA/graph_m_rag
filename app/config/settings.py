@@ -114,7 +114,16 @@ class LLMSettings(BaseSettings):
     LLM_BASE_URL: str = Field(default="http://192.168.19.127:8888/v1", description="LLM service URL")
     LLM_API_KEY: str = Field(default="EMPTY", description="LLM API key")
     LLM_MODEL_NAME: str = Field(default="Qwen/Qwen3-VL-32B-Thinking", description="LLM model name")
-    LLM_MAX_TOKENS: int = Field(default=2048, description="Max tokens for response")
+    LLM_MAX_TOKENS: int = Field(
+        default=8192,
+        description=(
+            "Max output tokens for LLM answer generation. The model is a "
+            "Thinking variant: its chain-of-thought alone can exceed 4k tokens "
+            "on large-context questions, so the budget must leave room for the "
+            "reasoning AND the [FINAL_ANSWER] tag (otherwise the answer gets "
+            "truncated before it is emitted)."
+        ),
+    )
     LLM_TEMPERATURE: float = Field(default=0.7, description="Temperature for generation")
 
     # C5: Feedback-driven iterative retrieval
@@ -155,11 +164,12 @@ class ContextBudgetSettings(BaseSettings):
     """
 
     MAX_CONTEXT_CHARS: int = Field(
-        default=60000,
+        default=40000,
         description=(
             "Total text context budget in characters (hard backstop for every "
-            "source). ~15-20k tokens for mixed text, leaving headroom for "
-            "Qwen3-VL-32B-Thinking chain-of-thought and output."
+            "source). The model window is 256K tokens, so the cap is not about "
+            "overflow — it keeps the prompt focused and fast. ~40k chars ≈ "
+            "10k tokens of text; per-source graph budgets scale from this value."
         ),
     )
     MAX_IMAGES: int = Field(

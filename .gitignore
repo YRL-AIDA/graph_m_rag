@@ -283,6 +283,8 @@ prez.zip
 
 # Generated JSON results/dumps (none of the JSON in this repo is source code)
 *.json
+# ...except the demo's sample questions, which are source data for the demo app.
+!demo/sample_questions.json
 
 # Datasets — large evaluation corpora, PDFs, samples
 data/
@@ -380,3 +382,20 @@ http-client.private.env.json
 
 # Github Copilot persisted session migrations, see: https://github.com/microsoft/copilot-intellij-feedback/issues/712#issuecomment-3322062215
 .idea/**/copilot.data.migration.*.xml
+
+# ---- Local runtime / service files ----
+*.log
+*.bak
+*.tmp
+nohup.out
+*.sqlite3
+.gitmodules.local
+
+# Analysis / research scratch
+analysis/
+analysys/
+
+# Evaluation artifacts
+app/tests/.sentry-native/
+app/tests/SmallerDataset_answers_evaluated*.txt
+app/tests/mmlong_strategy_grid_results_first/

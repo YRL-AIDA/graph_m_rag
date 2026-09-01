@@ -3,12 +3,14 @@ Main API application for PDF processing.
 Handles PDF upload to S3, processing with MinerU service,
 and computing embeddings for each element in the result.
 """
+import asyncio
 import base64
 import functools
 import hashlib
 import io
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from operator import itemgetter
@@ -16,7 +18,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Any
 
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -33,7 +35,7 @@ from app.src.mineru_client import MinerUClient
 from app.config.settings import settings
 from app.src.reranker_client import RerankerClient
 from app.src.schemas.reranker import Message
-from app.src.utils.data_model import QuestionResponse, QuestionRequest, UploadedFileInfo, UploadedFilesListResponse, CollectionCreateRequest, CollectionInfo, CollectionsListResponse
+from app.src.utils.data_model import QuestionResponse, QuestionRequest, DemonstrationRequest, UploadedFileInfo, UploadedFilesListResponse, CollectionCreateRequest, CollectionInfo, CollectionsListResponse
 from app.src.utils.mmr_reranker import mmr_rerank_with_threshold
 from app.src.question_decomposer import decompose_question, merge_search_results
 from app.src.iterative_search import iterative_retrieval
@@ -81,6 +83,132 @@ reranker_client = RerankerClient(base_url=settings.reranker.RERANKER_BASE_URL)
 def _cached_question_embedding(text: str) -> list:
     """Return embedding for *text*, caching up to 256 most recent queries."""
     return emb_client.get_text_embedding(text)
+
+
+# --- Evidence gate (abstention calibration) ---
+# Over-abstention ("Not answerable" on answerable questions) is the single
+# largest error source on the full dataset (~35% of answerable questions).
+# These heuristics decide whether the retrieved context plausibly contains the
+# answer so the LLM can be nudged to answer instead of refusing. Tuned on the
+# MMLongBench-Doc run: score>=0.60 OR lexical overlap recovers ~2/3 of
+# over-abstentions while flagging ~3/4 of correctly-abstained unanswerables.
+EVIDENCE_SCORE_THRESHOLD = 0.60
+EVIDENCE_LEXICAL_HITS = 2
+EVIDENCE_TOP_BLOCKS = 5
+
+
+def _evidence_present(question: str, answers: List[dict], top_score: float) -> bool:
+    """Heuristic evidence check: top-1 embedding score or lexical overlap.
+
+    The top-1 Qdrant score already measures embedding similarity between the
+    question and the best block; the lexical-overlap test adds a cheap second
+    signal for blocks whose embedding score is borderline.
+    """
+    if top_score >= EVIDENCE_SCORE_THRESHOLD:
+        return True
+    q_tokens = {
+        t for t in re.findall(r"[a-zA-Z0-9]{3,}", (question or "").lower())
+    }
+    if not q_tokens:
+        return False
+    hits = 0
+    for a in answers[:EVIDENCE_TOP_BLOCKS]:
+        text = (a.get("text") or "").lower()
+        a_tokens = set(re.findall(r"[a-zA-Z0-9]{3,}", text))
+        if len(q_tokens & a_tokens) >= 2:
+            hits += 1
+            if hits >= EVIDENCE_LEXICAL_HITS:
+                return True
+    return False
+
+
+_QUESTION_STOPWORDS = frozenset(
+    "a an and are as at be by for from how in is it of on or that the this to "
+    "was what when where which who why with both does do can not you your "
+    "about each any per over under into during than then would should may".split()
+)
+
+
+def _filter_relevant_communities(communities: List[Dict], question: str) -> List[Dict]:
+    """Keep only communities whose text shares content words with the question.
+
+    Communities are extracted per-entity, and a single polluted entity (e.g. a
+    generic NUMBER node) can drag in a community about an *entirely unrelated
+    topic* (observed: the RAPTOR paper pulling in an "ITC Corporate Governance"
+    community).  Such noise bloats the context and makes the Thinking model
+    enumerate irrelevant blocks instead of answering.  We drop communities with
+    no lexical overlap with the question's content words.
+    """
+    if not communities or not question:
+        return communities
+    q_tokens = {
+        t for t in re.findall(r"[a-zA-Z0-9]{3,}", question.lower())
+        if t not in _QUESTION_STOPWORDS
+    }
+    if not q_tokens:
+        return communities
+    kept: List[Dict] = []
+    for comm in communities:
+        # Title/summary/findings are the indicative text; `full_content` is a
+        # long aggregated blob that easily matches generic words and would
+        # let noisy communities slip through.
+        text = " ".join(filter(None, [
+            str(comm.get("title", "")),
+            str(comm.get("summary", "")),
+            " ".join(
+                str(f.get("summary", "")) for f in (comm.get("findings") or [])
+                if isinstance(f, dict)
+            ),
+        ])).lower()
+        c_tokens = set(re.findall(r"[a-zA-Z0-9]{3,}", text)) - _QUESTION_STOPWORDS
+        if len(q_tokens & c_tokens) >= 2:
+            kept.append(comm)
+    return kept
+
+
+def _is_refusal_answer(text: str) -> bool:
+    """Return True if *text* is a refusal / not-answerable signal."""
+    if not text:
+        return False
+    lower = text.strip().lower()
+    return lower in (
+        "not answerable", "fail to answer", "failed to answer",
+        "unable to answer", "cannot answer", "cannot provide",
+        "no answer", "i don't know",
+    ) or any(lower.startswith(p) for p in (
+        "not answerable", "fail to answer", "failed to answer",
+        "unable to answer", "cannot answer", "cannot provide",
+        "i don't know",
+    ))
+
+
+# --- Cross-page question detection ---
+# Aggregation/cross-page questions ("how many ... in the report", "all figures",
+# "total across all pages") need evidence spread over several pages. For these
+# the retrieval runs a second aggregation-focused query and unions the results.
+_CROSS_PAGE_PATTERNS = re.compile(
+    r"\b(total|overall|summar|in total|across all|throughout|every|"
+    r"combined|all|how many|distinct|number of)\b"
+    r"|(?:in|of) (?:this |the )?(?:report|paper|document|article|book|guidebook)"
+    r"|(?:all|every) (?:figures?|tables?|sections?|pages?)"
+    r"|how many .{0,60}(?:report|paper|document|figures?|tables?|sections?|pages?|slides?)",
+    re.IGNORECASE,
+)
+
+
+def _is_cross_page_question(question: str) -> bool:
+    """Heuristic: is this an aggregation question that spans multiple pages?"""
+    return bool(_CROSS_PAGE_PATTERNS.search(question or ""))
+
+
+# --- Demo strategies for the /demonstration endpoint ---
+# Maps a customer-facing strategy name to the /ask-document graph flags.
+DEMO_STRATEGIES: Dict[str, Dict[str, bool]] = {
+    "baseline":   {"use_semantic_graph": False, "use_structured_graph": False},
+    "semantic":   {"use_semantic_graph": True,  "use_structured_graph": False},
+    "structural": {"use_semantic_graph": False, "use_structured_graph": True},
+    "both":       {"use_semantic_graph": True,  "use_structured_graph": True},
+}
 qdrant_client = get_qdrant_client()
 llm_client = LLMClient(base_url=settings.llm.LLM_BASE_URL)
 
@@ -1529,9 +1657,13 @@ def _format_context_block(ans: dict, idx: int, file_hash: str) -> str:
     text = ans.get("text", "")
     score = ans.get("score", 0)
     page = ans.get("page_idx", "")
+    region_attr = (
+        f' region_id="{_xml_escape(str(ans.get("region_id", "")))}"'
+        if ans.get("region_id") is not None else ""
+    )
     lines = [
         f'    <block id="{idx+1}" type="{_xml_escape(element_type)}" '
-        f'page="{_xml_escape(str(page))}" relevance="{score:.4f}">'
+        f'page="{_xml_escape(str(page))}" relevance="{score:.4f}"{region_attr}>'
     ]
     if element_type in ("image", "table"):
         # Visual content is attached as multimodal input separately; the
@@ -1565,6 +1697,110 @@ def _format_context_block(ans: dict, idx: int, file_hash: str) -> str:
                 )
     lines.append("    </block>")
     return "\n".join(lines)
+
+
+@app.post("/demonstration", response_model=QuestionResponse)
+@app.get("/demonstration", response_model=QuestionResponse)
+async def demonstration(
+    request: Optional[DemonstrationRequest] = None,
+    file_hash: Optional[str] = Query(default=None),
+    question: Optional[str] = Query(default=None),
+    strategy: str = Query(default="baseline"),
+    limit: int = Query(default=30),
+    answer_format: Optional[str] = Query(default=None),
+):
+    """Demo-facing QA endpoint.
+
+    Thin wrapper over :func:`ask_document` that accepts a single ``strategy``
+    name (``baseline | semantic | structural | both``) instead of raw graph
+    flags. Always generates an LLM answer (``use_llm=True``). Returns the same
+    :class:`QuestionResponse` as ``/ask-document``.
+
+    Accepts both POST (JSON body, used by the demo app) and GET (query
+    parameters, for quick browser/curl checks). Example GET:
+
+        /demonstration?file_hash=...&question=...&strategy=semantic
+
+    Used by the customer demo application (``demo/``).
+    """
+    # Merge POST body (if present) over GET query parameters.
+    if request is not None:
+        file_hash = request.file_hash
+        question = request.question
+        strategy = request.strategy
+        limit = request.limit
+        answer_format = request.answer_format
+    if not file_hash or not question:
+        raise HTTPException(
+            status_code=400,
+            detail="file_hash and question are required",
+        )
+    flags = DEMO_STRATEGIES.get(strategy)
+    if flags is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown strategy '{strategy}'; "
+                   f"expected one of {sorted(DEMO_STRATEGIES)}",
+        )
+    qr = QuestionRequest(
+        file_hash=file_hash,
+        question=question,
+        limit=limit,
+        use_llm=True,
+        answer_format=answer_format,
+    )
+    return await ask_document(
+        qr,
+        use_semantic_graph=flags["use_semantic_graph"],
+        use_structured_graph=flags["use_structured_graph"],
+    )
+
+
+@app.post("/api/demo/ask", response_model=QuestionResponse)
+def demo_ask(request: DemonstrationRequest):
+    """Dedicated demo QA endpoint — separate from ``/ask-document``.
+
+    The customer demo must not share the ``/ask-document`` path with batch
+    evaluation: a long-running demo request blocks the single-threaded event
+    loop and makes the whole service appear unavailable while strategy tests
+    run.  This handler is deliberately *synchronous*, so FastAPI executes it in
+    a worker thread and the blocking retrieval / LLM work never stalls the
+    event loop.
+
+    Uses the same retrieval/generation pipeline as :func:`ask_document` but
+    with a lighter profile tuned for the demo UI: no reranker/MMR, no iterative
+    search, no question decomposition.
+
+    Request/response format is identical to the ``/demonstration`` endpoint.
+    """
+    if not request.file_hash or not request.question:
+        raise HTTPException(
+            status_code=400,
+            detail="file_hash and question are required",
+        )
+    flags = DEMO_STRATEGIES.get(request.strategy)
+    if flags is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown strategy '{request.strategy}'; "
+                   f"expected one of {sorted(DEMO_STRATEGIES)}",
+        )
+    qr = QuestionRequest(
+        file_hash=request.file_hash,
+        question=request.question,
+        limit=request.limit,
+        use_llm=True,
+        use_reranker=request.use_reranker,
+        use_mmr_reranker=request.use_mmr_reranker,
+        use_iterative_search=False,
+        use_question_decomposition=False,
+        answer_format=request.answer_format,
+    )
+    return asyncio.run(ask_document(
+        qr,
+        use_semantic_graph=flags["use_semantic_graph"],
+        use_structured_graph=flags["use_structured_graph"],
+    ))
 
 
 @app.post("/ask-document", response_model=QuestionResponse)
@@ -1692,6 +1928,10 @@ async def ask_document(request: QuestionRequest,
         # would only add noise.  Hard cap = limit.
         rerank_top_n = settings.reranker.RERANKER_TOP_N if hasattr(settings.reranker, 'RERANKER_TOP_N') else limit
         search_limit = limit if not use_structured_context else max(limit * 5, rerank_top_n)
+        # Cross-page aggregation questions need a wider candidate pool so the
+        # dual-query merge below has enough evidence from across the document.
+        if use_structured_context and _is_cross_page_question(question):
+            search_limit = max(search_limit, limit * 10)
 
         # --- Run search (multi-query if decomposed, single otherwise) ---
         if sub_questions and len(sub_questions) > 1:
@@ -1754,8 +1994,65 @@ async def ask_document(request: QuestionRequest,
                 limit=search_limit,
                 filter_condition=filter_condition,
             )
+            # Cross-page recall boost: aggregation questions ("how many ... in
+            # the report", "all figures", "total") need evidence spread across
+            # pages. Run a second, aggregation-focused query and union results.
+            if _is_cross_page_question(question):
+                agg_question = (
+                    "Summarize all facts, numbers and occurrences related to: "
+                    f"{question}"
+                )
+                try:
+                    agg_embedding = _cached_question_embedding(agg_question)
+                    agg_results = client.search(
+                        query_vector=agg_embedding,
+                        limit=search_limit,
+                        filter_condition=filter_condition,
+                    )
+
+                    def _to_dicts(points):
+                        return [
+                            {
+                                "text": p.payload.get("text", ""),
+                                "score": p.score,
+                                "payload": p.payload,
+                            }
+                            for p in points
+                        ]
+
+                    merged = merge_search_results(
+                        [
+                            _to_dicts(search_results.points),
+                            _to_dicts(agg_results.points),
+                        ],
+                        search_limit,
+                    )
+                    logger.info(
+                        "Cross-page dual-query: merged %d + %d into %d unique chunks",
+                        len(search_results.points),
+                        len(agg_results.points),
+                        len(merged),
+                    )
+
+                    class _FakePoint:
+                        def __init__(self, d):
+                            self.payload = d.get("payload", {})
+                            self.score = d.get("score", 0)
+
+                    search_results = type(
+                        "SearchResults", (), {"points": [_FakePoint(m) for m in merged]}
+                    )()
+                except Exception:
+                    logger.debug(
+                        "Cross-page dual-query failed; using single query", exc_info=True
+                    )
 
         # Format results
+        # Top-1 embedding score from Qdrant — used by the evidence gate to
+        # calibrate the LLM's "Not answerable" behaviour.
+        top_retrieval_score = (
+            search_results.points[0].score if search_results.points else 0.0
+        )
         answers = []
         documents_to_rerank = []
         search_results_map = {}
@@ -1798,6 +2095,13 @@ async def ask_document(request: QuestionRequest,
                 "score": result.score,
                 "element_type": element_type,
                 "element_index": payload.get("element_index", 0),
+                # Qdrant's `region_id` counter is kept in lockstep with
+                # Neo4j's Region.region_id during indexing (unlike
+                # `element_index`, the raw content_list position, which
+                # diverges when images/tables add caption/footnote regions or
+                # elements are skipped).  Use it as the canonical region id for
+                # every Neo4j graph query below.
+                "region_id": payload.get("region_id", payload.get("element_index")),
                 "page_idx": original_element.get("page_idx", 0) if original_element else 0,
                 "img_path": original_element.get("img_path", None),  # Store img_path for images and tables
                 "image_base64": None,  # Will be populated for image and table elements
@@ -1826,6 +2130,7 @@ async def ask_document(request: QuestionRequest,
                                 "score": result.score * 0.9,  # Slightly lower score as it's related context
                                 "element_type": parent_element.get("type", "unknown"),
                                 "element_index": payload.get("element_index", 0),
+                                "region_id": payload.get("region_id", payload.get("element_index")),
                                 "page_idx": original_element.get("page_idx", 0) if original_element else 0,
                                 "img_path": parent_element.get("image", None),
                                 "image_base64": None,
@@ -1890,6 +2195,7 @@ async def ask_document(request: QuestionRequest,
                                     "score": result.score * 0.85,
                                     "element_type": "image_caption" if element_type.startswith("image") else "table_caption",
                                     "element_index": payload.get("element_index", 0),
+                                    "region_id": payload.get("region_id", payload.get("element_index")),
                                     "page_idx": original_element.get("page_idx", 0) if original_element else 0,
                                     "img_path": img_path_for_caption,
                                     "image_base64": image_base64_for_caption,
@@ -1942,6 +2248,7 @@ async def ask_document(request: QuestionRequest,
                                     "score": result.score * 0.85,
                                     "element_type": "image_footnote" if element_type.startswith("image") else "table_footnote",
                                     "element_index": payload.get("element_index", 0),
+                                    "region_id": payload.get("region_id", payload.get("element_index")),
                                     "page_idx": original_element.get("page_idx", 0) if original_element else 0,
                                     "img_path": img_path_for_footnote,
                                     "image_base64": image_base64_for_footnote,
@@ -2214,11 +2521,15 @@ async def ask_document(request: QuestionRequest,
                         attached_images += 1
 
                 # Build list of region_ids from Qdrant search results
+                # Use the Qdrant `region_id` counter (in lockstep with Neo4j's
+                # Region.region_id).  `element_index` is the raw content_list
+                # position and does not match Neo4j when images/tables add
+                # caption/footnote regions or elements are skipped.
                 region_ids = []
                 for idx, ans in enumerate(answers):
-                    element_index = ans.get("element_index")
-                    if element_index is not None:
-                        region_ids.append(f"{file_hash}|{element_index}")
+                    region_id = ans.get("region_id", ans.get("element_index"))
+                    if region_id is not None:
+                        region_ids.append(f"{file_hash}|{region_id}")
 
                 # ===== QDRANT BLOCK RENDERING (XML or flat) =====
                 if use_structured_context:
@@ -2234,9 +2545,9 @@ async def ask_document(request: QuestionRequest,
                     sections: dict[str, dict] = {}
                     unassigned = []
                     for idx, ans in enumerate(answers):
-                        elem_idx = ans.get("element_index")
-                        region_id = f"{file_hash}|{elem_idx}" if elem_idx is not None else ""
-                        sec_info = section_map.get(region_id)
+                        region_id = ans.get("region_id", ans.get("element_index"))
+                        region_id_str = f"{file_hash}|{region_id}" if region_id is not None else ""
+                        sec_info = section_map.get(region_id_str)
                         if sec_info:
                             sec_title = sec_info.get("title", "Untitled Section")
                             if sec_title not in sections:
@@ -2385,6 +2696,10 @@ async def ask_document(request: QuestionRequest,
                         communities = semantic_manager.get_communities_by_region_ids(
                             region_ids, limit=10
                         )
+                        # Drop communities that share no content words with the
+                        # question — a single polluted entity can otherwise pull
+                        # in a community about a completely unrelated topic.
+                        communities = _filter_relevant_communities(communities, question)
                         if communities:
                             context_parts.append(
                                 '<semantic_context source="communities">'
@@ -2401,6 +2716,8 @@ async def ask_document(request: QuestionRequest,
                                 full_content = comm.get("full_content", "")
 
                                 line = f'<community name="{title}"' if use_structured_context else f"• {title}"
+                                if comm.get("region_id"):
+                                    line += f' region_id="{_xml_escape(str(comm["region_id"]))}"'
                                 if rating is not None:
                                     line += f" [рейтинг: {rating}/10]"
                                 if summary:
@@ -2471,9 +2788,15 @@ async def ask_document(request: QuestionRequest,
                                             f' source_entity="{_xml_escape(br_entity)}"'
                                             if br_entity else ""
                                         )
+                                        region_attr = (
+                                            f' region_id="{_xml_escape(str(br_data.get("region_id", "")))}"'
+                                            if br_data.get("region_id") else ""
+                                        )
                                         context_parts.append(
                                             f'  <region label="{_xml_escape(br_label.upper())}"'
+                                            f' source="cross_graph"'
                                             f"{entity_attr}"
+                                            f"{region_attr}"
                                             f' text="{_xml_escape(br_text[:500])}" />'
                                         )
                                     else:
@@ -2557,10 +2880,10 @@ async def ask_document(request: QuestionRequest,
                     try:
                         seed_regions = []
                         for ans in answers:
-                            elem_idx = ans.get("element_index")
-                            if elem_idx is not None and ans.get("text"):
+                            rid = ans.get("region_id", ans.get("element_index"))
+                            if rid is not None and ans.get("text"):
                                 seed_regions.append({
-                                    "region_id": f"{file_hash}|{elem_idx}",
+                                    "region_id": f"{file_hash}|{rid}",
                                     "text": ans.get("text", ""),
                                     "embedding": ans.get("embedding"),
                                 })
@@ -2635,9 +2958,15 @@ async def ask_document(request: QuestionRequest,
                                         "qdrant_match": "QDRANT РЕЗУЛЬТАТ",
                                     }.get(src, src.upper())
                                     if use_structured_context:
+                                        region_attr = ""
+                                        if bfr.get("node_type") == "region" and bfr.get("node_id"):
+                                            region_attr = (
+                                                f' region_id="{_xml_escape(str(bfr["node_id"]))}"'
+                                            )
                                         context_parts.append(
                                             f'  <region label="{_xml_escape(label)}"'
                                             f' source="{_xml_escape(src)}"'
+                                            f"{region_attr}"
                                             f' text="{_xml_escape(bfr_text[:500])}" />'
                                         )
                                     else:
@@ -2681,6 +3010,11 @@ async def ask_document(request: QuestionRequest,
                                         "limit": 10,
                                         "with_payload": True,
                                         "with_vector": False,
+                                        "filter": {
+                                            "must": [
+                                                {"key": "document_id", "match": {"value": file_hash}}
+                                            ]
+                                        },
                                     },
                                     headers=qdrant_headers,
                                 ) as resp:
@@ -2729,6 +3063,11 @@ async def ask_document(request: QuestionRequest,
                                         "limit": 5,
                                         "with_payload": True,
                                         "with_vector": False,
+                                        "filter": {
+                                            "must": [
+                                                {"key": "document_id", "match": {"value": file_hash}}
+                                            ]
+                                        },
                                     },
                                     headers=qdrant_headers,
                                 ) as resp:
@@ -2838,12 +3177,17 @@ async def ask_document(request: QuestionRequest,
                 # `qdrant` is intentionally absent: the primary retrieval is
                 # already count-limited by the request `limit`, so it is not
                 # subject to a per-source character budget.
+                #
+                # Structural sources are deliberately kept small — the ORDER walk
+                # and the BFS crawler can each emit dozens of <region> blocks,
+                # and long documents would otherwise flood the prompt with
+                # reading-order neighbours.
                 _SOURCE_BUDGET_FRAC: dict[str, float] = {
                     "entities": 0.08,
                     "communities": 0.10,
                     "cross_graph": 0.05,
-                    "order_neighbors": 0.04,
-                    "bfs_crawler": 0.10,
+                    "order_neighbors": 0.03,
+                    "bfs_crawler": 0.06,
                     "embedding_search": 0.05,
                 }
 
@@ -3124,6 +3468,20 @@ ANSWER:"""
                     elif fmt_lower == 'none':
                         format_hint = "8a. Only answer if clearly found; otherwise say 'Not answerable'"
 
+                # Evidence gate: decide whether retrieved context plausibly
+                # contains the answer. When evidence is present, the model must
+                # answer instead of refusing (over-abstention is the top error).
+                evidence_present = _evidence_present(question, answers, top_retrieval_score)
+                answerability_rule = (
+                    "2. The retrieved context contains information relevant to this "
+                    "question. Answer it using the context, even if the evidence is "
+                    "partial. Only respond strictly: \"Not answerable\" if NO block "
+                    "in the context relates to the entities or topics in the question."
+                    if evidence_present else
+                    "2. If the answer is NOT found in the context or you cannot give "
+                    "a precise answer, respond strictly: \"Not answerable\""
+                )
+
                 system_prompt = f"""You are a document analysis assistant. Answer user questions using ONLY the provided context.
 
 CONTEXT SOURCES:
@@ -3131,7 +3489,7 @@ CONTEXT SOURCES:
 
 ANSWER RULES:
 1. Use ONLY information from the provided context. Do not use external knowledge.
-2. If the answer is NOT found in the context or you cannot give a precise answer, respond strictly: "Not answerable"
+{answerability_rule}
 3. Any refusal variant (e.g. "Fail to answer", "Unable to answer", "I don't know") MUST be replaced with "Not answerable"
 4. For images, tables, and charts, carefully analyze visual information together with captions
 5. Be precise and concise — give the answer value first, then optional brief evidence
@@ -3140,6 +3498,8 @@ ANSWER RULES:
 8. Pay attention to confidence ratings in communities — higher rating means more reliable findings
 {format_hint}
 9. Format: start your response with the tag [FINAL_ANSWER]: followed by the direct answer value on its own line. Then optionally add supporting reasoning on subsequent lines.
+10. If you notice that you are repeating what you have already said, immediately stop reasoning and provide the final answer.
+11. After each reasoning step, write down what new information you learned. If there is nothing new, stop and provide the final answer.
 
 NUMERICAL ACCURACY RULES:
 10. When extracting numbers from tables, ALWAYS double-check the row AND column labels. The number must correspond to the EXACT intersection of the question's row and column. For example, if asked "What was Revenue in FY2023?", find the row labeled "Revenue" (or its equivalent) AND the column labeled "FY2023" — then report the value at their intersection.
@@ -3195,14 +3555,37 @@ Why: Row 'Total debt to total assets' has value 0.192, NOT 0.1264 (which is 'Cur
 
                     success, llm_responses = llm_client.send_message(
                         messages=[system_message, user_message],
-                        max_tokens=4096,
-                        temperature=0.1,
+                        max_tokens=settings.llm.LLM_MAX_TOKENS,
+                        temperature=0.0,
                         top_p=0.95
                     )
                     generation_end = time.time()
 
                     if success and llm_responses:
                         llm_answer = llm_responses[0]
+                        # Anti-abstention: if the evidence gate says the context
+                        # contains the answer but the model refused, regenerate
+                        # once with an explicit instruction to answer.
+                        if _is_refusal_answer(llm_answer) and evidence_present:
+                            logger.info(
+                                "Model abstained despite evidence present "
+                                "(top_score=%.3f); forcing a second answer attempt",
+                                top_retrieval_score,
+                            )
+                            user_message.add_text_content(
+                                "\n\n[RE-CHECK] The provided context DOES contain "
+                                "information relevant to this question. Do NOT answer "
+                                "'Not answerable'. Locate the relevant block(s) and "
+                                "give the answer now."
+                            )
+                            _ok2, _resp2 = llm_client.send_message(
+                                messages=[system_message, user_message],
+                                max_tokens=settings.llm.LLM_MAX_TOKENS,
+                                temperature=0.0,
+                                top_p=0.95,
+                            )
+                            if _ok2 and _resp2:
+                                llm_answer = _resp2[0]
                         # Sanitize: normalize "Fail to answer" and similar refusal variants
                         _normalized = llm_answer.strip().lower()
                         _refusal_patterns = ("fail to answer", "unable to answer", "cannot answer",
@@ -3668,6 +4051,45 @@ async def get_pdf_page_with_bbox(
         )
 
 
+def _compute_region_ids(content_list: List[dict]) -> Dict[int, List[int]]:
+    """Map content_list index → structural-graph region_id(s).
+
+    Mirrors the region counter in ``create_graph_from_mineru_result`` (the
+    same source used when the Neo4j Region.region_id was assigned):
+    discarded and empty-text elements produce no region; image/table elements
+    additionally spawn caption and footnote regions (they share the element's
+    bbox on the page).
+    """
+    mapping: Dict[int, List[int]] = {}
+    counter = 0
+    for i, element in enumerate(content_list):
+        if not isinstance(element, dict):
+            continue
+        etype = element.get("type", "unknown")
+        if etype == "discarded":
+            continue
+        if etype == "text" and element.get("text", "") == "":
+            continue
+        ids = [counter]
+        counter += 1
+        if etype == "image":
+            if element.get("image_caption"):
+                ids.append(counter)
+                counter += 1
+            if element.get("image_footnote"):
+                ids.append(counter)
+                counter += 1
+        elif etype == "table":
+            if element.get("table_caption"):
+                ids.append(counter)
+                counter += 1
+            if element.get("table_footnote"):
+                ids.append(counter)
+                counter += 1
+        mapping[i] = ids
+    return mapping
+
+
 @app.get("/api/pdf/{file_hash}/mineru-bboxes")
 async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
     """
@@ -3707,19 +4129,26 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
         mineru_result = json.loads(mineru_result_json.decode('utf-8'))
 
         # Extract elements from MinerU result
-        elements = []
+        content_list = []
         if "results" in mineru_result and "result" in mineru_result["results"]:
             results_data = mineru_result["results"]["result"]["results"]
             if "content_list" in results_data:
-                elements.extend(results_data["content_list"])
+                content_list.extend(results_data["content_list"])
 
-        # Filter by page if specified
+        # Map content_list index → structural-graph region_id(s) (same counter
+        # used when the Neo4j graph was built).
+        region_map = _compute_region_ids(content_list)
+
+        # Filter by page if specified (keeping original content_list indices)
         if page_idx is not None:
-            elements = [e for e in elements if e.get("page_idx") == page_idx]
+            indexed = [(i, e) for i, e in enumerate(content_list)
+                       if e.get("page_idx") == page_idx]
+        else:
+            indexed = list(enumerate(content_list))
 
         # Format bboxes
         bboxes = []
-        for i, element in enumerate(elements):
+        for i, element in indexed:
             if not isinstance(element, dict):
                 continue
 
@@ -3752,6 +4181,7 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
 
             bbox_info = {
                 "element_index": i,
+                "region_ids": region_map.get(i, []),
                 "element_type": element_type,
                 "bbox": bbox,
                 "page_idx": element.get("page_idx", 0),

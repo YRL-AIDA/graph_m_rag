@@ -6,6 +6,13 @@ Extracted answer: [answer]
 Answer format: [answer format]
 ```
 
+Formatting rules:
+- **List**: copy each item EXACTLY as it appears in the analysis. Preserve the order, do NOT add, merge, split, or omit items, and do NOT paraphrase. If an item is repeated, keep it once only if the analysis lists it once.
+- **Integer**: output ONLY the number that directly answers the question. If the analysis contains an expression like "num_classes + 1" or "3*2", compute the final numeric value and output that single integer. Never output units, words, or punctuation.
+- **Float**: output the exact numeric value, keeping the decimal precision shown in the analysis. If the question asks for a percentage, keep the "%" sign (e.g. "18.29%"). Do NOT round or convert units unless the analysis states a conversion.
+- **String**: output the exact answer phrase from the analysis, without an ordinal prefix or list marker (e.g. for "18 Golden Gate Park & the Avenues" output "Golden Gate Park & the Avenues").
+- Only answer "Not answerable" when the analysis explicitly states that the information is absent; otherwise extract the best value the analysis provides.
+
 Please read the following example, then extract the answer from the model response and type it at the end of the prompt. 
 
 ---

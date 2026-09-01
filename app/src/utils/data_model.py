@@ -79,3 +79,18 @@ class UploadedFilesListResponse(BaseModel):
     message: str
     files: List[UploadedFileInfo]
     total_count: int = 0
+
+
+class DemonstrationRequest(BaseModel):
+    """Request model for the demo-facing /demonstration endpoint.
+
+    Wraps the low-level strategy flags of :class:`QuestionRequest` into a
+    single ``strategy`` name understood by the demo application.
+    """
+    file_hash: str
+    question: str
+    strategy: str = "baseline"  # baseline | semantic | structural | both
+    limit: int = 30
+    use_reranker: bool = False  # Option to use API reranker for re-ranking results
+    use_mmr_reranker: bool = False  # Option to use MMR (Maximal Marginal Relevance) diversity-based reranking
+    answer_format: Optional[str] = None

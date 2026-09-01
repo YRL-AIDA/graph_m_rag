@@ -297,6 +297,8 @@ def evaluate_strategy(
     """
     scored_samples: List[dict] = []  # samples that got a score
     elapsed_times: List[float] = []
+    seen_keys: set = set()  # dedup by (doc_id, question) — the dataset contains
+    # one duplicated question, which would otherwise be scored twice
 
     for r in results:
         if r.get("status") != "completed":
@@ -306,7 +308,11 @@ def evaluate_strategy(
 
         doc_id = r.get("doc_id", "")
         question = r.get("question", "")
-        gt_info = ground_truth_map.get((doc_id, question), {})
+        key = (doc_id, question)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        gt_info = ground_truth_map.get(key, {})
 
         # --- Extract predicted answer ---
         # Path 1: extracted_res available (via-API pipeline) — use exact
@@ -425,6 +431,41 @@ def evaluate_strategy(
             "count": len(items),
         }
 
+    # --- Abstention / hallucination / evidence coverage diagnostics ---
+    # over-abstention: answerable question answered "Not answerable"
+    over_abstention = sum(
+        1 for s in scored_samples
+        if str(s.get("answer", "")) != "Not answerable"
+        and str(s.get("pred", "")).startswith("Not answerable")
+    )
+    # hallucination: unanswerable question answered with a value
+    unans_hallucination = sum(
+        1 for s in scored_samples
+        if str(s.get("answer", "")) == "Not answerable"
+        and not str(s.get("pred", "")).startswith("Not answerable")
+    )
+    # evidence coverage: fraction of ground-truth evidence pages present in the
+    # retrieved block set, for answerable questions
+    ev_hits = 0
+    ev_total = 0
+    ev_any = 0
+    ev_any_total = 0
+    for s in scored_samples:
+        ev_pages = [int(p) for p in (s.get("evidence_pages") or [])]
+        if not ev_pages:
+            continue
+        ret_pages = {
+            int(x.get("page_idx"))
+            for x in (s.get("retrieves") or [])
+            if x.get("page_idx") is not None
+        }
+        hits = sum(1 for p in ev_pages if p in ret_pages)
+        ev_hits += hits
+        ev_total += len(ev_pages)
+        ev_any_total += 1
+        if hits > 0:
+            ev_any += 1
+
     # --- Per-question breakdown (lightweight) ---
     per_question: List[Dict[str, Any]] = []
     for s in scored_samples:
@@ -468,6 +509,10 @@ def evaluate_strategy(
         "cross_page_count": len(cross),
         "unanswerable_acc": round(unans_acc, 3),
         "unanswerable_count": len(unans),
+        "over_abstention": over_abstention,
+        "unans_hallucination": unans_hallucination,
+        "evidence_coverage": round(ev_hits / ev_total, 3) if ev_total else 0.0,
+        "evidence_any_present": round(ev_any / ev_any_total, 3) if ev_any_total else 0.0,
         "by_source": by_source,
         "by_doc_type": by_doc_type,
         "per_question": per_question,
@@ -535,6 +580,19 @@ def write_text_report(
         lines.append(
             f"  Unanswerable:  {m['unanswerable_acc']:.3f}  "
             f"(n={m['unanswerable_count']})"
+        )
+        lines.append(
+            f"  Over-abstention:   {m.get('over_abstention', 0)} "
+            f"answerable answered 'Not answerable'"
+        )
+        lines.append(
+            f"  Hallucination:     {m.get('unans_hallucination', 0)} "
+            f"unanswerable answered with a value"
+        )
+        lines.append(
+            f"  Evidence coverage: {m.get('evidence_coverage', 0):.3f} "
+            f"of evidence pages retrieved "
+            f"(any-evidence {m.get('evidence_any_present', 0):.3f})"
         )
 
         if m.get("by_source"):

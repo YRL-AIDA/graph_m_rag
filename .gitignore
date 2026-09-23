@@ -231,7 +231,7 @@ mineru/test/
 artile/
 
 # Presentation — LaTeX sources and build artifacts
-presentation/
+artile/presentation/
 
 # Agent plans and task descriptions
 plans/

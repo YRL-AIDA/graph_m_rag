@@ -207,12 +207,19 @@
   <!-- ================= ASK ================= -->
   <section id="tab-ask" class="tabview">
     <div class="card">
-      <div class="form-row">
+      <div class="form-row form-top">
         <label>Документ <select id="ask-doc" class="input"></select></label>
         <label>Вопрос
           <textarea id="ask-question" class="input" rows="2"
             placeholder="Например: Какой был общий доход компании в 2023 году?"></textarea>
         </label>
+      </div>
+      <div class="form-row">
+        <label>Стратегия <select id="ask-strategy" class="input"></select></label>
+      </div>
+      <div class="ask-opts">
+        <label class="chk"><input type="checkbox" id="ask-reranker" checked> API-реранкер <span class="tip" title="Переупорядочивает найденные фрагменты специальной моделью">?</span></label>
+        <label class="chk"><input type="checkbox" id="ask-mmr"> MMR-реранкер <span class="tip" title="Делает набор фрагментов более разнообразным">?</span></label>
       </div>
       <div class="form-row">
         <button id="ask-btn" class="btn btn-primary btn-lg">Задать вопрос</button>
@@ -222,16 +229,6 @@
         <div class="progress-track"><div id="ask-progress-bar" class="progress-bar"></div></div>
         <span id="ask-progress-label" class="hint">поиск фрагментов…</span>
       </div>
-      <details class="adv">
-        <summary>Расширенные настройки</summary>
-        <div class="form-row">
-          <label>Стратегия <select id="ask-strategy" class="input"></select></label>
-        </div>
-        <div class="ask-opts">
-          <label class="chk"><input type="checkbox" id="ask-reranker"> API-реранкер <span class="tip" title="Переупорядочивает найденные фрагменты специальной моделью">?</span></label>
-          <label class="chk"><input type="checkbox" id="ask-mmr"> MMR-реранкер <span class="tip" title="Делает набор фрагментов более разнообразным">?</span></label>
-        </div>
-      </details>
     </div>
 
     <div id="ask-result" class="result hidden">
@@ -362,15 +359,6 @@
   </section>
 
 </main>
-
-<div class="cta">
-  <div>
-    <h3>Хотите внедрить Graph-M-RAG?</h3>
-    <p>Проведём демонстрацию на ваших документах, покажем архитектуру
-       и поможем с пилотным проектом.</p>
-  </div>
-  <a class="btn btn-primary" href="mailto:demo@graph-m-rag.ru?subject=Graph-M-RAG%20демо">Запросить демо</a>
-</div>
 
 <footer class="footer">
   <p>Graph-M-RAG · разбиение на регионы · структурный граф · семантический граф · Qdrant + Neo4j + Qwen3-VL</p>

@@ -92,6 +92,9 @@ async function bootstrap() {
     $("ask-strategy").innerHTML = state.strategies
       .map((s) => `<option value="${s.name}">${s.label}</option>`)
       .join("");
+    // Default to the full Graph-M-RAG version for the demo.
+    const full = state.strategies.find((s) => s.name === "both") || state.strategies[0];
+    if (full) $("ask-strategy").value = full.name;
   } catch (e) {}
   await Promise.all([loadFiles(), loadSampleQuestions()]);
 }
@@ -110,26 +113,57 @@ async function loadFiles() {
   $("ask-doc").innerHTML = opts || noDocs;
   $("cmp-doc").innerHTML = opts || noDocs;
   $("doc-select").innerHTML = opts || noDocs;
-  $("demo-doc").innerHTML = opts || noDocs;
   renderFiles();
-  renderDemoQuestions();
+  renderDemoDoc();
   if (state.files.length) renderDoc();
+}
+
+// In the "Демо" tab show only documents that have answerable questions
+// (ground-truth from the MMLongBench-Doc dataset), so every offered
+// document/question pair actually produces an answer.
+function renderDemoDoc() {
+  const sel = $("demo-doc");
+  if (!sel) return;
+  const hasQs = (f) =>
+    (state.sampleByDoc[f.filename] && state.sampleByDoc[f.filename].length) ||
+    (state.sampleByDoc[f.file_hash] && state.sampleByDoc[f.file_hash].length);
+  const docs = state.files.filter(hasQs);
+  sel.innerHTML = docs.length
+    ? docs.map((f) => `<option value="${f.file_hash}">${f.filename}</option>`).join("")
+    : '<option value="">нет документов с примерами</option>';
+  renderDemoQuestions();
 }
 
 async function loadSampleQuestions() {
   try {
     const d = await api("/api/sample-questions");
     state.sampleQuestions = d.questions || [];
+    state.sampleByDoc = d.byDoc || {};
   } catch (e) {
     state.sampleQuestions = [];
+    state.sampleByDoc = {};
   }
-  renderDemoQuestions();
+  renderDemoDoc();
 }
 
 function renderDemoQuestions() {
   const catsEl = $("demo-categories");
   const qSel = $("demo-question");
   if (!catsEl || !qSel) return;
+
+  // 1) Prefer per-document questions (guaranteed answerable for this doc).
+  const doc = $("demo-doc").value;
+  const file = state.files.find((x) => x.file_hash === doc);
+  const docQs = file ? (state.sampleByDoc[file.filename] || state.sampleByDoc[file.file_hash] || []) : [];
+  if (docQs.length) {
+    catsEl.innerHTML = "";
+    qSel.innerHTML = docQs
+      .map((q) => `<option value="${escapeHtml(q)}">${escapeHtml(q)}</option>`)
+      .join("");
+    return;
+  }
+
+  // 2) Fallback: generic questions grouped by category.
   const cats = state.sampleQuestions || [];
   if (!cats.length) {
     catsEl.innerHTML = "";
@@ -594,6 +628,7 @@ $("demo-doc").addEventListener("change", () => {
   if (state.files.length) {
     $("ask-doc").value = $("demo-doc").value;
   }
+  renderDemoQuestions();
 });
 $("doc-context-only").addEventListener("change", () => {
   positionOverlay(state.docPage);
@@ -601,17 +636,31 @@ $("doc-context-only").addEventListener("change", () => {
 $("ask-question").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); }
 });
-$("ask-show-evidence").addEventListener("click", () => {
-  if (!state.lastAnswer || !state.docBboxes) return;
-  document.querySelector('.tab[data-tab="doc"]').click();
+$("ask-show-evidence").addEventListener("click", showEvidenceOnPage);
+
+async function showEvidenceOnPage() {
+  if (!state.lastAnswer || !state.lastFileHash) return;
+  // Open the DOCUMENT FROM THE QUESTION, not whatever is currently selected
+  // in the document dropdown.
+  if (!state.docBboxes || state.docBboxes.file_hash !== state.lastFileHash) {
+    try {
+      await loadBboxes(state.lastFileHash);
+    } catch (e) {
+      $("ask-status").textContent = "Не удалось загрузить документ: " + friendlyError(e.message);
+      return;
+    }
+  }
+  // Rebuild the evidence set against the correct document's bboxes.
+  buildEvidenceSet(state.lastAnswer);
   const page = state.evidenceSet && state.evidenceSet.pages.size
     ? Math.max(0, [...state.evidenceSet.pages].find((p) => p >= 0) || 0)
-    : state.docPage;
+    : 0;
   state.docPage = page;
   state.showEvidence = true;
   $("doc-show-evidence").checked = true;
-  drawPage();
-});
+  $("doc-select").value = state.lastFileHash;
+  switchTab("doc");
+}
 
 /* ================= GRAPHS ================= */
 

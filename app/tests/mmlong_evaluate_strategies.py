@@ -37,6 +37,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from evaluate_strategies import (  # type: ignore[import]
     SORT_BY_CHOICES,
     evaluate_strategy,
+    load_results_file,
     read_json,
     sort_strategies,
     write_html_report,
@@ -131,6 +132,7 @@ def main() -> None:
         f for f in os.listdir(results_dir)
         if f.endswith(".json")
         and not f.endswith("_scored.json")
+        and "_llm_judge" not in f
         and f not in ("strategy_summary.json",)
     )
 
@@ -148,7 +150,13 @@ def main() -> None:
         file_path = os.path.join(results_dir, fname)
         print(f"Evaluating: {strategy_name} ...")
 
-        results: List[dict] = read_json(file_path)
+        results, load_note = load_results_file(file_path)
+        if load_note:
+            print(f"  WARNING: {load_note}")
+        if not isinstance(results, list):
+            print(f"  Skipping {fname}: top-level JSON is "
+                  f"{type(results).__name__}, not a list of results")
+            continue
         metrics = evaluate_strategy(results, ground_truth_map, strategy_name)
 
         # Save scored results
@@ -163,6 +171,16 @@ def main() -> None:
             f"Avg score: {metrics['avg_score']:.3f}, "
             f"Avg time: {metrics['avg_elapsed']:.1f}s"
         )
+        if metrics["errors"]:
+            cats = ", ".join(
+                f"{c} ({n})"
+                for c, n in (metrics["error_categories"] or {}).items()
+            )
+            print(
+                f"  Generation errors: {metrics['errors']} of "
+                f"{metrics['total']} questions ({cats}) — rerun the "
+                f"strategy grid to retry them"
+            )
 
         all_metrics.append(metrics)
 
@@ -189,13 +207,14 @@ def main() -> None:
     sorted_metrics = sort_strategies(all_metrics, sort_by=args.sort_by)
     for i, m in enumerate(sorted_metrics[:5]):
         priority = m["accuracy"] / (max(m.get("avg_elapsed", 1), 1) + 1)
+        err_suffix = f", errors: {m['errors']}" if m["errors"] else ""
         print(
             f"  {i + 1}. {m['name']:<30s} "
             f"{m['accuracy']:>5.1f}%  "
             f"(priority: {priority:.1f}, "
             f"correct: {m['correct']}/{m['scored']}, "
             f"F1: {m['f1']:.3f}, "
-            f"time: {m['avg_elapsed']:.1f}s)"
+            f"time: {m['avg_elapsed']:.1f}s{err_suffix})"
         )
     print("=" * 72)
     print(f"\nFull report: {text_path}")

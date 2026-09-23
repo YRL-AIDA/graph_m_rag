@@ -1808,7 +1808,8 @@ async def ask_document(request: QuestionRequest,
                        use_semantic_graph: bool = True,
                        use_structured_graph: bool = True,
                        use_iterative_search: bool = False,
-                       use_question_decomposition: bool = False):
+                       use_question_decomposition: bool = False,
+                       use_bfs_crawler: Optional[bool] = None):
     """
     Ask a question about a specific document by file_hash.
     If the document is not indexed, it will be indexed first.
@@ -1826,6 +1827,9 @@ async def ask_document(request: QuestionRequest,
       Context enrichment:
         use_semantic_graph     — entity + community enrichment
         use_structured_graph   — structural ORDER walk + cross-graph bridge
+        use_bfs_crawler        — unified BFS crawler over both graphs
+                                (None/absent = auto: enabled only when both
+                                semantic + structural graphs are active)
 
       Generation:
         use_iterative_search   — 2-round feedback-driven retrieval
@@ -1852,6 +1856,13 @@ async def ask_document(request: QuestionRequest,
     answer_format = getattr(request, 'answer_format', None)
     use_structured_context = getattr(request, 'use_structured_context', True)
     use_neo4j_enrichment = getattr(request, 'use_neo4j_enrichment', True)
+
+    # BFS crawler flag: explicit query param wins, else body field, else
+    # legacy auto mode (crawler ran only when both graph modes were active).
+    if use_bfs_crawler is None:
+        use_bfs_crawler = getattr(request, 'use_bfs_crawler', None)
+    if use_bfs_crawler is None:
+        use_bfs_crawler = bool(use_semantic_graph and use_structured_graph)
 
     # Use specified collection or default
     client = get_qdrant_client(collection_name=collection_name) if collection_name else qdrant_client
@@ -2068,9 +2079,11 @@ async def ask_document(request: QuestionRequest,
                 logger.warning(f"Failed to initialize Neo4j service: {e}")
                 neo4j_service = None
 
-        # Initialize Semantic Graph Manager for entity/community enrichment
+        # Initialize Semantic Graph Manager for entity/community enrichment.
+        # Also needed by the unified BFS crawler (Strategy E) even when the
+        # semantic context injection flags are off (e.g. structural + BFS).
         semantic_manager = None
-        if SEMANTIC_GRAPH_AVAILABLE and use_semantic_graph:
+        if SEMANTIC_GRAPH_AVAILABLE and (use_semantic_graph or use_bfs_crawler):
             try:
                 sem_config = ManagerConfig(
                     uri=f"neo4j://{os.environ.get('URL', 'localhost:7687')}",
@@ -2875,8 +2888,9 @@ async def ask_document(request: QuestionRequest,
                         logger.debug("Failed to compute question embedding", exc_info=True)
 
                 # --- Unified BFS Crawler (Strategy E) ---
-                if use_semantic_graph and use_structured_graph and region_ids \
-                        and semantic_manager and NEO4J_AVAILABLE and neo4j_service:
+                if use_bfs_crawler and region_ids \
+                        and SEMANTIC_GRAPH_AVAILABLE and semantic_manager \
+                        and NEO4J_AVAILABLE and neo4j_service:
                     try:
                         seed_regions = []
                         for ans in answers:

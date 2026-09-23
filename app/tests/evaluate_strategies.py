@@ -26,7 +26,7 @@ import sys
 from collections import defaultdict
 from html import escape as html_escape
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Path resolution & imports  (mirrors smallerdataset_evaluation.py)
@@ -55,6 +55,203 @@ def read_json(path: str) -> Any:
 def write_json(path: str, data: Any) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Generation-error helpers
+# ---------------------------------------------------------------------------
+#
+# Strategy runs record every failed generation/request as an entry whose
+# ``status`` starts with "error" (newer runs additionally store the message in
+# ``error_msg`` and a ``retryable`` flag). These helpers normalise that state
+# so the statistics can report how many questions each strategy failed on.
+
+def is_error_entry(r: dict) -> bool:
+    """True if ``r`` records a failed generation/request.
+
+    This also catches entries that the API reported as ``completed`` while the
+    model actually returned nothing (empty ``llm_answer``/``response``): those
+    are unusable and must be treated like generation errors.
+    """
+    if not isinstance(r, dict):
+        return False
+    if r.get("error"):
+        return True
+    status = str(r.get("status", "")).lower()
+    if status.startswith("error"):
+        return True
+    if status == "completed":
+        if not r.get("llm_answer") and not r.get("response"):
+            return True
+    return False
+
+
+def is_empty_answer_entry(r: dict) -> bool:
+    """True if the API returned a ``completed`` result with no model output."""
+    return (
+        isinstance(r, dict)
+        and str(r.get("status", "")).lower() == "completed"
+        and not r.get("llm_answer")
+        and not r.get("response")
+    )
+
+
+def is_skipped_entry(r: dict) -> bool:
+    """True if ``r`` was never attempted (e.g. doc not in hash map)."""
+    return isinstance(r, dict) and str(r.get("status", "")) == "hash_not_found"
+
+
+def _error_message_of(r: dict) -> str:
+    """Extract a human-readable failure message from an error entry."""
+    if not isinstance(r, dict):
+        return ""
+    msg = r.get("error_msg")
+    if msg:
+        return str(msg)
+    status = str(r.get("status", ""))
+    if status.lower().startswith("error"):
+        if ":" in status:
+            status = status.split(":", 1)[1]
+        else:
+            status = status[len("error"):]
+        return status.strip()
+    if status.lower() == "completed":
+        return "Model returned no answer (empty llm_answer/response)"
+    return status.strip()
+
+
+def _error_category(message: str) -> str:
+    """Group a raw error message into a coarse, human-readable category."""
+    m = (message or "").lower()
+    if any(k in m for k in (
+        "no answer",
+        "empty llm",
+        "empty answer",
+        "no model output",
+        "empty response",
+    )):
+        return "model returned no answer"
+    if any(k in m for k in (
+        "connection refused",
+        "failed to establish a new connection",
+        "max retries exceeded",
+        "connection error",
+        "name resolution",
+    )):
+        return "LLM/server unreachable"
+    if any(k in m for k in (
+        "timed out",
+        "timeout",
+        "read timed out",
+        "deadline",
+    )):
+        return "request timeout"
+    if any(k in m for k in (
+        "429",
+        "rate limit",
+        "too many requests",
+        "quota",
+    )):
+        return "rate limit / quota"
+    if any(k in m for k in (
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "api key",
+        "api_key",
+        "authentication",
+    )):
+        return "authentication / permissions"
+    return "other"
+
+
+def _error_categories(entries: List[dict]) -> Dict[str, int]:
+    """Count error entries grouped by coarse category."""
+    counts: Dict[str, int] = defaultdict(int)
+    for r in entries:
+        if is_error_entry(r):
+            counts[_error_category(_error_message_of(r))] += 1
+    return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
+
+# ---------------------------------------------------------------------------
+# Robust JSON loading (handles truncated / mid-write result files)
+# ---------------------------------------------------------------------------
+
+def _salvage_json_array(path: str) -> Optional[List[Any]]:
+    """Recover complete list entries from a truncated JSON file."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+
+    # Fast path: the file may already be valid JSON.
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, list) else None
+    except json.JSONDecodeError:
+        pass
+
+    # Locate every point where a top-level object closes, ignoring braces
+    # inside string literals.
+    cut_points: List[int] = []
+    depth = 0
+    in_str = False
+    esc = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                cut_points.append(i)
+        i += 1
+
+    for end in reversed(cut_points):
+        candidate = text[: end + 1].rstrip()
+        if candidate.endswith(","):
+            candidate = candidate[:-1]
+        try:
+            data = json.loads(candidate + "]")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, list):
+            return data
+    return None
+
+
+def load_results_file(path: str) -> Tuple[Any, str]:
+    """Load a strategy results JSON file, tolerating corrupt/truncated files.
+
+    Returns ``(data, note)`` where ``note`` is a non-empty warning string when
+    the file had to be salvaged, and ``(None, note)`` when it is unusable.
+    """
+    try:
+        data = read_json(path)
+        return data, ""
+    except json.JSONDecodeError as exc:
+        salvaged = _salvage_json_array(path)
+        if salvaged is not None:
+            return salvaged, (
+                f"{os.path.basename(path)} was truncated/corrupt "
+                f"({exc}); kept {len(salvaged)} complete entries"
+            )
+        return None, f"{os.path.basename(path)} is unreadable JSON: {exc}"
+    except OSError as exc:
+        return None, f"{os.path.basename(path)}: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -293,12 +490,23 @@ def evaluate_strategy(
       name, total, completed, scored, accuracy, f1, avg_score,
       correct, avg_elapsed,
       single_page_acc, cross_page_acc, unanswerable_acc,
-      by_source, by_doc_type
+      by_source, by_doc_type,
+      errors, error_rate, error_categories, skipped
     """
     scored_samples: List[dict] = []  # samples that got a score
     elapsed_times: List[float] = []
     seen_keys: set = set()  # dedup by (doc_id, question) — the dataset contains
     # one duplicated question, which would otherwise be scored twice
+
+    # Guard against malformed input: some files in the results directory may
+    # not be a list of per-question dicts (e.g. summary objects or stray
+    # entries). Drop anything that is not a dict so the rest can be scored.
+    results = [r for r in results if isinstance(r, dict)]
+
+    # Failed generations (LLM/server unreachable, timeouts, ...) must not be
+    # silently dropped: count them here so reports can show them.
+    n_errors = sum(1 for r in results if is_error_entry(r))
+    n_skipped = sum(1 for r in results if is_skipped_entry(r))
 
     for r in results:
         if r.get("status") != "completed":
@@ -503,6 +711,10 @@ def evaluate_strategy(
         "avg_score": round(avg_score, 3),
         "correct": correct_count,
         "avg_elapsed": round(avg_elapsed, 1),
+        "errors": n_errors,
+        "error_rate": round(n_errors / len(results), 4) if results else 0.0,
+        "error_categories": _error_categories(results),
+        "skipped": n_skipped,
         "single_page_acc": round(single_acc, 3),
         "single_page_count": len(single),
         "cross_page_acc": round(cross_acc, 3),
@@ -544,16 +756,18 @@ def write_text_report(
 
     header = (
         f" {'Rank':<5} {'Strategy':<30} {'Acc%':>7} {'F1':>7} "
-        f"{'Corr':>6} {'Scored':>6} {'Time':>6}"
+        f"{'Corr':>6} {'Scored':>6} {'Err':>5} {'Time':>6}"
     )
     lines.append(header)
-    lines.append("-" * 72)
+    lines.append("-" * 74)
 
     for i, m in enumerate(sorted_metrics):
+        err_mark = f"{m['errors']}" if m["errors"] else "-"
         line = (
             f" {i + 1:<5} {m['name']:<30} "
             f"{m['accuracy']:>6.1f}% {m['f1']:>6.3f} "
-            f"{m['correct']:>5}/{m['scored']:<5} {m['avg_elapsed']:>5.1f}s"
+            f"{m['correct']:>5}/{m['scored']:<5} "
+            f"{err_mark:>5} {m['avg_elapsed']:>5.1f}s"
         )
         lines.append(line)
 
@@ -594,6 +808,22 @@ def write_text_report(
             f"of evidence pages retrieved "
             f"(any-evidence {m.get('evidence_any_present', 0):.3f})"
         )
+        if m.get("errors"):
+            lines.append(
+                f"  Generation errors: {m['errors']} of {m['total']} "
+                f"questions ({m['error_rate'] * 100:.1f}%)"
+            )
+            for cat, cnt in (m.get("error_categories") or {}).items():
+                lines.append(f"    - {cat}: {cnt}")
+            lines.append(
+                f"  NOTE: accuracy/score above covers only the "
+                f"{m['scored']} successfully answered questions; "
+                f"rerun the strategy grid to retry the failures."
+            )
+        if m.get("skipped"):
+            lines.append(
+                f"  Skipped (not in hash map): {m['skipped']}"
+            )
 
         if m.get("by_source"):
             lines.append("  By evidence source:")
@@ -690,6 +920,12 @@ def write_html_report(
             medal = "  🥉"
 
         rb = row_color(m["accuracy"])
+        err_cell = (
+            f"<td style=\"text-align:right;color:#b02a37;"
+            f"font-weight:bold\">{m['errors']}</td>"
+            if m["errors"]
+            else "<td style=\"text-align:right;color:#999\">–</td>"
+        )
         table_rows += f"""
         <tr style="background:{rb}">
           <td style="text-align:right">{i + 1}</td>
@@ -697,6 +933,7 @@ def write_html_report(
           <td style="text-align:right"><strong>{m['accuracy']}%</strong></td>
           <td style="text-align:right">{m['f1']:.3f}</td>
           <td style="text-align:right">{m['correct']}/{m['scored']}</td>
+          {err_cell}
           <td style="text-align:right">{m['avg_elapsed']:.1f}s</td>
           <td style="text-align:right">{m['single_page_acc']:.3f}</td>
           <td style="text-align:right">{m['cross_page_acc']:.3f}</td>
@@ -764,7 +1001,7 @@ def write_html_report(
 <thead>
 <tr>
   <th>#</th><th>Strategy</th><th>Accuracy</th><th>F1</th>
-  <th>Correct</th><th>Avg Time</th><th>Single-Page</th><th>Cross-Page</th>
+  <th>Correct</th><th>Errors</th><th>Avg Time</th><th>Single-Page</th><th>Cross-Page</th>
   <th>Unanswerable</th>
 </tr>
 </thead>
@@ -790,6 +1027,23 @@ def write_html_report(
 <tr><td>Unanswerable</td><td>{m['unanswerable_acc']:.3f}</td>
     <td>{m['unanswerable_count']}</td></tr>
 </table>"""
+
+        if m.get("errors"):
+            html += (
+                "<h4 style=\"color:#b02a37\">Generation errors</h4>"
+                "<table>"
+                "<tr><th>Category</th><th>Count</th></tr>"
+                + "".join(
+                    f"<tr><td>{html_escape(str(cat))}</td>"
+                    f"<td style=\"text-align:right\">{cnt}</td></tr>"
+                    for cat, cnt in (m.get("error_categories") or {}).items()
+                )
+                + "</table>"
+                f"<p style=\"font-size:0.85em;color:#b02a37\">"
+                f"{m['errors']} of {m['total']} questions failed during "
+                f"generation and were excluded from the scores above. "
+                f"Re-run the strategy grid to retry them.</p>"
+            )
 
         if m.get("by_source"):
             html += (
@@ -934,6 +1188,7 @@ def main() -> None:
         f for f in os.listdir(results_dir)
         if f.endswith(".json")
         and not f.endswith("_scored.json")
+        and "_llm_judge" not in f
         and f not in ("strategy_summary.json",)
     )
 
@@ -951,7 +1206,13 @@ def main() -> None:
         file_path = os.path.join(results_dir, fname)
         print(f"Evaluating: {strategy_name} ...")
 
-        results: List[dict] = read_json(file_path)
+        results, load_note = load_results_file(file_path)
+        if load_note:
+            print(f"  WARNING: {load_note}")
+        if not isinstance(results, list):
+            print(f"  Skipping {fname}: top-level JSON is "
+                  f"{type(results).__name__}, not a list of results")
+            continue
         metrics = evaluate_strategy(results, ground_truth_map, strategy_name)
 
         # Save scored results
@@ -966,6 +1227,16 @@ def main() -> None:
             f"Avg score: {metrics['avg_score']:.3f}, "
             f"Avg time: {metrics['avg_elapsed']:.1f}s"
         )
+        if metrics["errors"]:
+            cats = ", ".join(
+                f"{c} ({n})"
+                for c, n in (metrics["error_categories"] or {}).items()
+            )
+            print(
+                f"  Generation errors: {metrics['errors']} of "
+                f"{metrics['total']} questions ({cats}) — rerun the "
+                f"strategy grid to retry them"
+            )
 
         all_metrics.append(metrics)
 
@@ -991,13 +1262,14 @@ def main() -> None:
     sorted_metrics = sort_strategies(all_metrics, sort_by=args.sort_by)
     for i, m in enumerate(sorted_metrics[:5]):
         priority = m["accuracy"] / (max(m.get("avg_elapsed", 1), 1) + 1)
+        err_suffix = f", errors: {m['errors']}" if m["errors"] else ""
         print(
             f"  {i + 1}. {m['name']:<30s} "
             f"{m['accuracy']:>5.1f}%  "
             f"(priority: {priority:.1f}, "
             f"correct: {m['correct']}/{m['scored']}, "
             f"F1: {m['f1']:.3f}, "
-            f"time: {m['avg_elapsed']:.1f}s)"
+            f"time: {m['avg_elapsed']:.1f}s{err_suffix})"
         )
     print("=" * 72)
     print(f"\nFull report: {text_path}")

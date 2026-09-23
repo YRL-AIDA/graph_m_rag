@@ -250,6 +250,129 @@ def read_json(filename: str) -> Any:
         return json.load(f)
 
 
+def _save_json_atomic(path: str, data: Any) -> None:
+    """Write ``data`` to ``path`` atomically.
+
+    The payload is written to a sibling ``.tmp`` file first and then moved
+    into place with ``os.replace``. A crash or Ctrl+C mid-write can therefore
+    never leave a truncated JSON file behind — the previous checkpoint stays
+    intact until the new one is fully on disk.
+    """
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def _salvage_json_array(path: str) -> Optional[List[dict]]:
+    """Recover complete list entries from a JSON file that was truncated.
+
+    Returns ``None`` when nothing usable can be recovered. This is only a
+    safety net for files written by older non-atomic checkpoints (and for the
+    interrupted writes that produced them); all new writes go through
+    ``_save_json_atomic``.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+
+    # Fast path: the file may already be valid JSON.
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, list) else None
+    except json.JSONDecodeError:
+        pass
+
+    # Find where every top-level object closes (brace depth returning to 0,
+    # ignoring braces inside string literals).
+    cut_points: List[int] = []
+    depth = 0
+    in_str = False
+    esc = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                cut_points.append(i)
+        i += 1
+
+    # Try the longest prefix first: the most complete entries we can keep.
+    for end in reversed(cut_points):
+        candidate = text[: end + 1].rstrip()
+        if candidate.endswith(","):
+            candidate = candidate[:-1]
+        try:
+            data = json.loads(candidate + "]")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, list):
+            return data
+    return None
+
+
+def _load_existing_results(path: str) -> List[dict]:
+    """Load a per-strategy results file for resume.
+
+    Handles files that were truncated/corrupted by an interrupted write: the
+    complete entries are salvaged and the missing tail is re-run instead of
+    crashing. Keeps the result list 1:1 aligned with the dataset order.
+    """
+    if not os.path.exists(path):
+        return []
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        data = _salvage_json_array(path)
+        if data is None:
+            print(f"  WARNING: {os.path.basename(path)} is corrupt and could "
+                  f"not be salvaged — restarting it from scratch")
+            return []
+        print(f"  WARNING: {os.path.basename(path)} was truncated/corrupt; "
+              f"recovered {len(data)} complete entries and will resume from there")
+
+    if not isinstance(data, list):
+        print(f"  WARNING: {os.path.basename(path)} does not contain a JSON "
+              f"list ({type(data).__name__}); restarting it from scratch")
+        return []
+
+    # Entries recorded as "completed" by an older run but with no model output
+    # are failed generations: convert them so the resume below retries them and
+    # the statistics count them as errors instead of silently dropping them.
+    converted = 0
+    for r in data:
+        if (isinstance(r, dict)
+                and str(r.get("status")) == "completed"
+                and not r.get("llm_answer")
+                and not r.get("response")):
+            r["status"] = "error"
+            r["error"] = True
+            r["retryable"] = True
+            r.setdefault("error_msg", "Empty LLM answer (no model output)")
+            converted += 1
+    if converted:
+        print(f"  NOTE: {os.path.basename(path)} contains {converted} entries "
+              f"marked 'completed' but with no model output — marking them as "
+              f"errors so they are retried")
+    return data
+
+
 def ask_document(base_url: str, strategy: Strategy,
                  file_hash: str, question: str,
                  limit: int = 30, timeout: int = 300) -> Dict[str, Any]:
@@ -436,98 +559,140 @@ def run_grid_test(
         strategy_results: List[dict] = []
         strategy_output = os.path.join(output_dir, f"{strategy.name}.json")
 
-        # Resume from partial results if present
+        # Resume from partial results if present. The list stays 1:1 aligned
+        # with the dataset order: entries that already produced an LLM answer
+        # (or that will never be answerable) are skipped, while entries marked
+        # as generation errors are retried and REPLACED in place on success.
         if os.path.exists(strategy_output):
-            strategy_results = read_json(strategy_output)
-            print(f"  Resuming from {len(strategy_results)} already processed")
+            strategy_results = _load_existing_results(strategy_output)
+            # Trim trailing junk from pre-fix misaligned resumes.
+            if len(strategy_results) > len(dataset):
+                strategy_results = strategy_results[: len(dataset)]
+            res_completed = sum(
+                1 for r in strategy_results if r.get("llm_answer")
+            )
+            res_errors = sum(
+                1 for r in strategy_results
+                if str(r.get("status", "")).startswith("error")
+            )
+            print(f"  Resuming from {len(strategy_results)} entries "
+                  f"({res_completed} ok, {res_errors} errors to retry)")
 
         for qi, case in enumerate(dataset):
-            # Skip if already processed (check qi index and llm_answer)
-            if (qi < len(strategy_results)
-                    and strategy_results[qi].get("llm_answer")):
-                continue
+            # --- Resume decision -------------------------------------------------
+            prev = strategy_results[qi] if qi < len(strategy_results) else None
+            if prev is not None:
+                prev_status = str(prev.get("status", ""))
+                if (prev.get("llm_answer")
+                        or prev.get("response")
+                        or prev_status == "hash_not_found"):
+                    # Already answered or permanently skipped — keep as is.
+                    # NOTE: an entry whose status is "completed" but that has no
+                    # model output is NOT skipped here — it is retried below,
+                    # because an empty answer is a failed generation.
+                    continue
 
             doc_id = case.get("doc_id", "")
             question = case.get("question", "")
             correct_answer = case.get("answer", "")
 
+            entry: Optional[dict] = None
+
             if doc_id not in hash_map:
                 print(f"  [{qi}/{len(dataset)}] SKIP: {doc_id} "
                       f"not in hash map")
-                strategy_results.append({
+                entry = {
                     "doc_id": doc_id,
                     "question": question,
                     "answer": correct_answer,
                     "status": "hash_not_found",
-                })
-                continue
+                }
+            else:
+                file_hash = hash_map[doc_id]
+                start = time.time()
 
-            file_hash = hash_map[doc_id]
-            start = time.time()
+                try:
+                    result = ask_document(
+                        base_url, strategy, file_hash, question, limit,
+                    )
+                    model_answer_time = time.time() - start
 
-            try:
-                result = ask_document(
-                    base_url, strategy, file_hash, question, limit,
-                )
-                model_answer_time = time.time() - start
+                    llm_answer = result.get("llm_answer", "") or ""
 
-                llm_answer = result.get("llm_answer", "") or ""
-
-                # --- Optional: Extract short answer via Qwen API ---
-                extract_start = time.time()
-                extracted_res = None
-                if llm_answer and extract_prompt and not skip_extraction:
-                    try:
-                        extracted_res = extract_answer_qwen_api(
-                            question, llm_answer, extract_prompt,
+                    # An API response without any model output is NOT a
+                    # successful generation: mark it as an error so the entry
+                    # is counted as such and retried on the next resume.
+                    if not llm_answer and not result.get("response"):
+                        raise RuntimeError(
+                            "Empty LLM answer (model returned no output)"
                         )
-                    except Exception as exc:
-                        print(f"    Extraction failed: {exc}")
-                        extracted_res = "Failed to extract"
-                model_extract_time = time.time() - extract_start
 
-                entry = _build_result_entry(
-                    doc_id=doc_id,
-                    question=question,
-                    correct_answer=correct_answer,
-                    result=result,
-                    file_hash=file_hash,
-                    model_answer_time=model_answer_time,
-                    model_extract_time=model_extract_time,
-                    extracted_res=extracted_res,
-                )
-                strategy_results.append(entry)
+                    # --- Optional: Extract short answer via Qwen API ---
+                    extract_start = time.time()
+                    extracted_res = None
+                    if llm_answer and extract_prompt and not skip_extraction:
+                        try:
+                            extracted_res = extract_answer_qwen_api(
+                                question, llm_answer, extract_prompt,
+                            )
+                        except Exception as exc:
+                            print(f"    Extraction failed: {exc}")
+                            extracted_res = "Failed to extract"
+                    model_extract_time = time.time() - extract_start
 
-                answers_count = entry["answers_count"]
-                print(
-                    f"  [{qi}/{len(dataset)}] OK "
-                    f"(answer: {model_answer_time:.1f}s, "
-                    f"extract: {model_extract_time:.1f}s) - "
-                    f"{len(llm_answer)} chars, {answers_count} retrieves"
-                )
-                if extracted_res:
-                    print(f">>> Extracted answer:\n{extracted_res}\n")
+                    entry = _build_result_entry(
+                        doc_id=doc_id,
+                        question=question,
+                        correct_answer=correct_answer,
+                        result=result,
+                        file_hash=file_hash,
+                        model_answer_time=model_answer_time,
+                        model_extract_time=model_extract_time,
+                        extracted_res=extracted_res,
+                    )
 
-            except Exception as exc:
-                elapsed = time.time() - start
-                print(f"  [{qi}/{len(dataset)}] ERROR: {exc}")
-                strategy_results.append({
-                    "doc_id": doc_id,
-                    "question": question,
-                    "answer": correct_answer,
-                    "status": f"error: {exc}",
-                    "elapsed": round(elapsed, 2),
-                })
+                    answers_count = entry["answers_count"]
+                    print(
+                        f"  [{qi}/{len(dataset)}] OK "
+                        f"(answer: {model_answer_time:.1f}s, "
+                        f"extract: {model_extract_time:.1f}s) - "
+                        f"{len(llm_answer)} chars, {answers_count} retrieves"
+                    )
+                    if extracted_res:
+                        print(f">>> Extracted answer:\n{extracted_res}\n")
 
-            # Save checkpoint every 10 questions
+                except Exception as exc:
+                    # Generation/transport error: mark the entry explicitly so
+                    # the evaluation statistics can count it and a later resume
+                    # retries it in place.
+                    elapsed = time.time() - start
+                    print(f"  [{qi}/{len(dataset)}] ERROR: {exc}")
+                    entry = {
+                        "doc_id": doc_id,
+                        "question": question,
+                        "answer": correct_answer,
+                        "status": "error",
+                        "error": True,
+                        "error_msg": str(exc),
+                        "retryable": True,
+                        "elapsed": round(elapsed, 2),
+                    }
+
+            if entry is not None:
+                # Replace the old (error/partial) entry in place so index
+                # alignment with the dataset is preserved; append only when the
+                # list is shorter than the current question index.
+                if prev is not None:
+                    strategy_results[qi] = entry
+                else:
+                    strategy_results.append(entry)
+
+            # Save checkpoint every 10 questions (atomic write)
             if (qi + 1) % 10 == 0:
-                with open(strategy_output, "w", encoding="utf-8") as f:
-                    json.dump(strategy_results, f, ensure_ascii=False,
-                              indent=2)
+                _save_json_atomic(strategy_output, strategy_results)
 
         # --- Final save for this strategy ---
-        with open(strategy_output, "w", encoding="utf-8") as f:
-            json.dump(strategy_results, f, ensure_ascii=False, indent=2)
+        _save_json_atomic(strategy_output, strategy_results)
 
         all_strategy_results[strategy.name] = strategy_results
         completed = sum(
@@ -535,7 +700,7 @@ def run_grid_test(
         )
         errors = sum(
             1 for r in strategy_results
-            if r.get("status", "").startswith("error:")
+            if str(r.get("status", "")).startswith("error")
         )
         print(f"  Done: {len(strategy_results)} results "
               f"({completed} ok, {errors} errors) → {strategy_output}")

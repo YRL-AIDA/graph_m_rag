@@ -419,3 +419,11 @@ textarea.input { resize: vertical; }
   .form-row { flex-direction: column; }
   .form-row label { min-width: 0; }
 }
+
+/* ---------- demo tab: keep selects within the page width ---------- */
+#tab-demo .form-row label { min-width: 0; }
+#tab-demo .form-row .input { min-width: 0; max-width: 100%; }
+#demo-question { text-overflow: ellipsis; }
+
+/* align label texts (select vs textarea) in the same row */
+.form-top { align-items: flex-start; }

@@ -1,3 +1,4 @@
+import ast
 import re
 from math import isclose
 from collections import defaultdict
@@ -106,9 +107,11 @@ def is_exact_match(s):
 
 def isfloat(num):
     try:
+        if num is None:
+            return False
         float(num)
         return True
-    except ValueError:
+    except (ValueError, TypeError):
         return False
 
 
@@ -135,20 +138,27 @@ def eval_score(gt, pred, answer_type):
             score = anls_compute(gt, pred)
     else:
         if isinstance(gt, str) and gt.startswith("["):
-            gt = eval(gt)
+            try:
+                gt = ast.literal_eval(gt)
+            except (ValueError, SyntaxError):
+                gt = [gt]
         if not isinstance(gt, list):
             gt = [gt]
         if isinstance(pred, str) and pred.startswith("["):
-            pred = eval(pred)
+            try:
+                pred = ast.literal_eval(pred)
+            except (ValueError, SyntaxError):
+                pred = [pred]
         if not isinstance(pred, list):
             pred = [pred]
-        print(len(gt), len(pred))
         if len(gt)!=len(pred):
             score = 0.0
+        elif len(gt)==0:
+            # Empty gold list: a correct answer is an equally empty prediction.
+            score = 1.0 if len(pred)==0 else 0.0
         else:
             gt = sorted([get_clean_string(a) for a in gt])
             pred = sorted([get_clean_string(a) for a in pred])
-            print(gt, pred)
             if isfloat(gt[0]) or is_exact_match(gt[0]):
                 score = ("-".join(gt)=="-".join(pred))
             else:
@@ -175,8 +185,14 @@ def eval_acc_and_f1(samples):
 
 def show_results(samples, show_path=None):
     for sample in samples:
-        sample["evidence_pages"] = eval(sample["evidence_pages"])
-        sample["evidence_sources"] = eval(sample["evidence_sources"])
+        try:
+            sample["evidence_pages"] = ast.literal_eval(sample["evidence_pages"])
+        except (ValueError, SyntaxError):
+            sample["evidence_pages"] = sample["evidence_pages"]
+        try:
+            sample["evidence_sources"] = ast.literal_eval(sample["evidence_sources"])
+        except (ValueError, SyntaxError):
+            sample["evidence_sources"] = sample["evidence_sources"]
     
     with open(show_path, 'w') as f:
         acc, f1 = eval_acc_and_f1(samples)

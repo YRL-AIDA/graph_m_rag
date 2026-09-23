@@ -41,6 +41,7 @@ class QuestionRequest(BaseModel):
     semantic_min_relevance: Optional[float] = None  # Min similarity score for semantic embedding-search entities/communities; None = server default, 0.0 = disabled
     use_structured_graph: bool = False  # Option to enrich context with structural graph neighbours (ORDER walk + cross-graph bridge)
     use_structural_parent_only: bool = False  # When use_structured_graph=True: only walk PARENT edges (skip ORDER neighbours)
+    use_bfs_crawler: Optional[bool] = None  # Unified BFS graph crawler (Strategy E); None = auto — runs only when both semantic + structural graphs are enabled
     use_iterative_search: bool = False  # Option to use iterative (feedback-driven) retrieval for multi-hop questions
     use_question_decomposition: bool = False  # Option to decompose complex questions into sub-questions
     use_structured_context: bool = True  # Option to use XML-structured context (False = flat text)

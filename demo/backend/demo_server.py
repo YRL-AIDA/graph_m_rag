@@ -45,6 +45,16 @@ from minio import Minio
 BACKEND = "http://localhost:9191"
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 SAMPLE_QUESTIONS = Path(__file__).resolve().parent.parent / "sample_questions.json"
+# Strategy-evaluation results: (doc_id -> correctly answered questions).
+# The demo offers only questions the system already answered correctly
+# (score == 1.0) in the MMLongBench-Doc evaluation, so every offered
+# document/question pair is guaranteed to produce a good answer.
+SCORED_QUESTIONS: Optional[Path] = None
+for _p in Path(__file__).resolve().parents:
+    _cand = _p / "app" / "tests" / "mmlong_strategy_grid_results" / "semantic_scored.json"
+    if _cand.exists():
+        SCORED_QUESTIONS = _cand
+        break
 
 # Direct MinIO access — used as a fallback for the document list when the
 # Graph-M-RAG backend is unreachable. Already-uploaded PDFs live in MinIO under
@@ -443,11 +453,45 @@ async def api_compare(body: Dict[str, Any]) -> Dict[str, Any]:
     return {"question": question, "file_hash": file_hash, "results": results}
 
 
+def _is_not_answerable(text: Optional[str]) -> bool:
+    """Return True if *text* is a "Not answerable" style refusal."""
+    if not text:
+        return False
+    v = str(text).strip().lower()
+    return v.startswith("not answerable") or v.startswith("i don't know") \
+        or v.startswith("unable to answer") or v.startswith("cannot answer")
+
+
 @app.get("/api/sample-questions")
 async def api_sample_questions() -> Dict[str, Any]:
+    """Return demo questions.
+
+    ``questions`` — generic showcase questions grouped by category;
+    ``byDoc``    — mapping ``doc_id -> [answerable questions]`` taken from the
+    strategy-evaluation results (``semantic_scored.json``).  Only questions
+    that were answered correctly (``score == 1.0``) AND whose answer is not a
+    "Not answerable" refusal are offered, so every demo pair is guaranteed to
+    produce a real answer.
+    """
+    generic = []
     if SAMPLE_QUESTIONS.exists():
-        return {"questions": json.loads(SAMPLE_QUESTIONS.read_text(encoding="utf-8"))}
-    return {"questions": []}
+        generic = json.loads(SAMPLE_QUESTIONS.read_text(encoding="utf-8"))
+
+    by_doc: Dict[str, List[str]] = {}
+    if SCORED_QUESTIONS and SCORED_QUESTIONS.exists():
+        try:
+            scored = json.loads(SCORED_QUESTIONS.read_text(encoding="utf-8"))
+            for s in scored:
+                did = s.get("doc_id", "")
+                q = s.get("question", "")
+                if did and q and s.get("score") == 1.0 \
+                        and not _is_not_answerable(s.get("pred")):
+                    by_doc.setdefault(did, []).append(q)
+            by_doc = {k: list(dict.fromkeys(v))[:12] for k, v in by_doc.items()}
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Could not load scored questions: %s", exc)
+
+    return {"questions": generic, "byDoc": by_doc}
 
 
 @app.get("/api/demo/pdf/{file_hash}/mineru-bboxes")

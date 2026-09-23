@@ -94,6 +94,7 @@ class Strategy:
 
     name: str           # short identifier, e.g. "baseline"
     label: str          # human-readable, e.g. "Baseline (Qdrant + LLM)"
+    limit: Optional[int] = None  # per-strategy retrieve limit; None → use CLI --limit (default 30)
     use_reranker: bool = False
     reranker_min_relevance: Optional[float] = None  # top-1 score threshold; None=server default, 0.0=disabled
     use_mmr_reranker: bool = False
@@ -103,6 +104,7 @@ class Strategy:
     semantic_min_relevance: Optional[float] = None  # min score for semantic embedding-search entities/communities; None=server default, 0.0=disabled
     use_structured_graph: bool = False
     use_structural_parent_only: bool = False
+    use_bfs_crawler: Optional[bool] = None   # Unified BFS crawler (Strategy E); None = auto (both graphs)
     use_iterative_search: bool = False
     use_question_decomposition: bool = False
     use_structured_context: bool = True   # XML-structured context vs flat plain-text
@@ -111,10 +113,11 @@ class Strategy:
     def to_payload(self, file_hash: str, question: str,
                    limit: int = 30) -> dict:
         """Build the JSON payload for /ask-document."""
+        effective_limit = self.limit if self.limit is not None else limit
         return {
             "file_hash": file_hash,
             "question": question,
-            "limit": limit,
+            "limit": effective_limit,
             "use_llm": True,
             "use_reranker": self.use_reranker,
             "reranker_min_relevance": self.reranker_min_relevance,
@@ -125,6 +128,7 @@ class Strategy:
             "semantic_min_relevance": self.semantic_min_relevance,
             "use_structured_graph": self.use_structured_graph,
             "use_structural_parent_only": self.use_structural_parent_only,
+            "use_bfs_crawler": self.use_bfs_crawler,
             "use_iterative_search": self.use_iterative_search,
             "use_question_decomposition": self.use_question_decomposition,
             "use_structured_context": self.use_structured_context,
@@ -149,10 +153,14 @@ class Strategy:
                 flags.append("structural(parent-only)")
             else:
                 flags.append("structural")
+        if self.use_bfs_crawler:
+            flags.append("bfs")
         if self.use_iterative_search:
             flags.append("iterative")
         if self.use_question_decomposition:
             flags.append("decompose")
+        if self.limit is not None:
+            flags.append(f"limit={self.limit}")
         if not self.use_structured_context:
             flags.append("flat")
         if not self.use_neo4j_enrichment:
@@ -160,105 +168,129 @@ class Strategy:
         return flags if flags else ["baseline"]
 
 
-# --- Strategy definitions: 29 combinations (copied from strategy_grid_test.py) ---
+# --- Strategy definitions: minimal full-dataset experiment grid (L = 15) ---
+#
+# The list below contains ONLY the configurations required for the article's
+# core scientific claims (plans/mmlong_full_results_and_experiment_plan_ru.md,
+# sections 1-2.3): a controlled factorial ablation GRAPH x RERANKER plus the
+# graph-free retrieval controls.  All strategies share the SAME retrieval
+# limit (L = 15) and the same context budgets / generation settings, so any
+# difference between two runs comes only from the mechanism under study.
+# Each strategy NAME is the configuration identifier used in the plan and in
+# the manuscript tables, and every run is saved to --output-dir/<name>.json:
+#
+#                     | no reranker            | cross-encoder reranker |
+#   ------------------+------------------------+------------------------+
+#   no graph          | baseline               | reranker               |
+#   semantic graph    | semantic               | semantic_reranker      |
+#   structural graph  | structural             | structural_reranker    |
+#   both graphs + BFS | both_graphs            | both_reranker          |
+#
+# The three remaining graph-free ablations complete family A:
+#   qdrant_only ..... vector search WITHOUT Neo4j parent/caption enrichment
+#                     (isolates the enrichment step);
+#   flat ............ XML context serialisation off (isolates the XML block
+#                     layout);
+#   mmr_07 .......... MMR post-search reranker (lambda=0.7) instead of the
+#                     cross-encoder (isolates the reranker choice).
+#
+# Result files are written to --output-dir as <name>.json and RESUME by
+# question index; already-computed runs whose configuration is unchanged
+# (qdrant_only, baseline, flat, reranker, mmr_07, structural_reranker,
+# both_reranker) are reused automatically by the resume logic.
+#
+# The remaining cells of the original 18-configuration design
+# (structural_parent_only, both_mmr07, the iterative/decomposition family D
+# and the full system, other MMR lambdas) are kept commented out at the
+# bottom of STRATEGIES: they are NOT needed for the base claim, and the paper
+# covers their absence explicitly (plan, sections 3.5 and 6).
 
 STRATEGIES: List[Strategy] = [
 
-#    Strategy("flat_semantic", "Flat + Semantic Graph",
+    # ============ A. Retrieval & context controls (no graph) ============
+    # Clean vector baseline: Qdrant hits only, NO Neo4j parent/caption
+    # enrichment and no graph context.
+    Strategy("qdrant_only", "Qdrant only (no graph, no enrichment)",
+             use_neo4j_enrichment=False, limit=15),
+    # Default pipeline: Qdrant hits enriched with Neo4j parents/captions;
+    # the "no graph, no reranker" cell of the factor grid.
+    Strategy("baseline", "Baseline (Qdrant + Neo4j enrichment)",
+             limit=15),
+    # Context serialisation: flat plain text instead of XML blocks.
+    Strategy("flat", "Flat context (plain text, no XML)",
+             use_structured_context=False, limit=15),
+    # Post-search re-ranking with a cross-encoder reranker; the "no graph"
+    # cell of the factor grid WITH reranker.
+    Strategy("reranker", "Reranker (cross-encoder)",
+             use_reranker=True, reranker_min_relevance=0.0, limit=15),
+    # Post-search re-ranking with MMR (relevance/diversity, lambda=0.7).
+    Strategy("mmr_07", "MMR (lambda=0.7)",
+             use_mmr_reranker=True, mmr_lambda=0.7, limit=15),
 
-#             use_structured_context=False, use_semantic_graph=True),
-#    Strategy("flat_reranker", "Flat + Reranker",
-#             use_structured_context=False, use_reranker=True,
-#             reranker_min_relevance=0.0),
+    # ============ B. Graph augmentation (no reranker) ============
+    # "No reranker" row of the factor grid.
+    # Semantic graph: entity enrichment + embedding search over
+    # entities/communities.
+    Strategy("semantic", "Semantic graph",
+             use_semantic_graph=True, limit=15),
+    # Structural graph: reading-order walk + parents.
+    Strategy("structural", "Structural graph (ORDER + Parent)",
+             use_structured_graph=True, limit=15),
+    # Both graphs -> activates the unified BFS crawler.
+    Strategy("both_graphs", "Semantic + Structural (BFS)",
+             use_semantic_graph=True, use_structured_graph=True, limit=15),
 
-    # ----- Retrieval variants -----
-
-#    Strategy("mmr_07", "MMR (λ=0.7)",
-#             use_mmr_reranker=True, mmr_lambda=0.7),
-#    Strategy("mmr_05", "MMR (λ=0.5)",
-#             use_mmr_reranker=True, mmr_lambda=0.5),
-#    Strategy("mmr_09", "MMR (λ=0.9)",
-#             use_mmr_reranker=True, mmr_lambda=0.9),
-
-    # ----- Single-graph context enrichment -----
-    Strategy("semantic", "Semantic Graph",
-             use_semantic_graph=True),
-#    Strategy("semantic_minrel", "Semantic Graph (minrel=0.60)",
-#             use_semantic_graph=True, semantic_min_relevance=0.60),
-    Strategy("structural", "Structural Graph (ORDER + Parent)",
-             use_structured_graph=True),
-    # ----- Dual-graph (activates BFS Crawler C10) -----
-    Strategy("both_graphs", "Semantic + Structural",
-             use_semantic_graph=True, use_structured_graph=True),
-    # ----- Single-graph + Reranker -----
-#    Strategy("semantic_reranker", "Semantic + Reranker",
-#             use_semantic_graph=True, use_reranker=True,
-#             reranker_min_relevance=0.0),
+    # ============ C. Cross-encoder reranker on top of graphs ============
+    # "With reranker" row of the factor grid.
+    Strategy("semantic_reranker", "Semantic + Reranker",
+             use_semantic_graph=True, use_reranker=True,
+             reranker_min_relevance=0.0, limit=15),
     Strategy("structural_reranker", "Structural + Reranker",
              use_structured_graph=True, use_reranker=True,
-             reranker_min_relevance=0.0),
-    # ----- Baseline -----
-    Strategy("baseline", "Baseline (Qdrant + LLM)"),
-    Strategy("flat", "Flat Context (Plain-text, no XML)",
-             use_structured_context=False),
-    Strategy("baseline_qdrant_flat", "Baseline (Qdrant only, flat text)",
-             use_neo4j_enrichment=False, use_structured_context=False),
-    Strategy("reranker", "Reranker",
-             use_reranker=True, reranker_min_relevance=0.0),
-    Strategy("baseline_qdrant", "Baseline (Qdrant only, no Neo4j enrichment)",
-             use_neo4j_enrichment=False),
-    # ----- Single-graph + Reranker + min-relevance threshold -----
-#    Strategy("semantic_reranker_thr", "Semantic + Reranker (minrel=0.60)",
-#             use_semantic_graph=True, use_reranker=True,
-#             reranker_min_relevance=0.60),
-#    Strategy("structural_reranker_thr", "Structural + Reranker (minrel=0.60)",
-#             use_structured_graph=True, use_reranker=True,
-#             reranker_min_relevance=0.60),
+             reranker_min_relevance=0.0, limit=15),
+    Strategy("both_reranker", "Both graphs + Reranker (BFS)",
+             use_semantic_graph=True, use_structured_graph=True,
+             use_reranker=True, reranker_min_relevance=0.0, limit=15),
 
-    # ----- Dual-graph (activates BFS Crawler C10) -----
-#    Strategy("both_graphs", "Semantic + Structural",
-#             use_semantic_graph=True, use_structured_graph=True),
-#    Strategy("both_reranker", "Both Graphs + Reranker",
+    # ----- Optional cells of the original 18-config design (uncomment) -----
+    # Not required for the article's core claims (plan, sections 3.5 and 6):
+#    # Structural graph, PARENT edges only -> isolates the ORDER contribution.
+#    Strategy("structural_parent_only", "Structural graph (Parent only)",
+#             use_structured_graph=True, use_structural_parent_only=True,
+#             limit=15),
+#    # MMR analogue of both_reranker.
+#    Strategy("both_mmr07", "Both graphs + MMR (BFS, lambda=0.7)",
 #             use_semantic_graph=True, use_structured_graph=True,
-#             use_reranker=True, reranker_min_relevance=0.0),
-#    Strategy("both_reranker_thr", "Both Graphs + Reranker (minrel=0.60)",
+#             use_mmr_reranker=True, mmr_lambda=0.7, limit=15),
+#    # ----- D. Query processing & full system (optional) -----
+#    Strategy("semantic_iterative", "Semantic + Iterative",
+#             use_semantic_graph=True, use_iterative_search=True, limit=15),
+#    Strategy("structural_iterative", "Structural + Iterative",
+#             use_structured_graph=True, use_iterative_search=True, limit=15),
+#    Strategy("iterative", "Both graphs + Iterative (BFS)",
 #             use_semantic_graph=True, use_structured_graph=True,
-#             use_reranker=True, reranker_min_relevance=0.60),
-#    Strategy("both_mmr07", "Both Graphs + MMR λ=0.7",
+#             use_iterative_search=True, limit=15),
+#    Strategy("decompose", "Both graphs + Decomposition (BFS)",
 #             use_semantic_graph=True, use_structured_graph=True,
-#             use_mmr_reranker=True, mmr_lambda=0.7),
-
-    # ----- Query processing variants -----
-#    Strategy("decompose", "Question Decomposition",
-#             use_semantic_graph=True, use_structured_graph=True,
-#             use_question_decomposition=True),
-#    Strategy("iterative", "Iterative Search",
-#             use_semantic_graph=True, use_structured_graph=True,
-#             use_iterative_search=True),
-
-    # ----- Full system variants -----
-#    Strategy("full_system", "Full System (All)",
+#             use_question_decomposition=True, limit=15),
+#    Strategy("full_system", "Full system (graphs + reranker + iterative)",
 #             use_reranker=True, reranker_min_relevance=0.0,
 #             use_semantic_graph=True, use_structured_graph=True,
-#             use_iterative_search=True),
-#    Strategy("full_mmr07", "Full + MMR λ=0.7",
+#             use_iterative_search=True, limit=15),
+#    Strategy("mmr_05", "MMR (lambda=0.5)",
+#             use_mmr_reranker=True, mmr_lambda=0.5, limit=15),
+#    Strategy("mmr_09", "MMR (lambda=0.9)",
+#             use_mmr_reranker=True, mmr_lambda=0.9, limit=15),
+#    Strategy("structural_mmr07", "Structural + MMR (lambda=0.7)",
+#             use_structured_graph=True, use_mmr_reranker=True,
+#             mmr_lambda=0.7, limit=15),
+#    Strategy("both_mmr05", "Both graphs + MMR (lambda=0.5, BFS)",
+#             use_semantic_graph=True, use_structured_graph=True,
+#             use_mmr_reranker=True, mmr_lambda=0.5, limit=15),
+#    Strategy("full_mmr07", "Full system + MMR (lambda=0.7)",
 #             use_mmr_reranker=True, mmr_lambda=0.7,
 #             use_semantic_graph=True, use_structured_graph=True,
-#             use_iterative_search=False),
-#    Strategy("full_mmr05", "Full + MMR λ=0.5",
-#             use_mmr_reranker=True, mmr_lambda=0.5,
-#             use_semantic_graph=True, use_structured_graph=True,
-#             use_iterative_search=True),
-#    Strategy("full_mmr09", "Full + MMR λ=0.9",
-#             use_mmr_reranker=True, mmr_lambda=0.9,
-#             use_semantic_graph=True, use_structured_graph=True,
-#             use_iterative_search=True),
-
-    # ----- Graph-only + Iterative -----
-#    Strategy("semantic_iterative", "Semantic + Iterative",
-#             use_semantic_graph=True, use_iterative_search=True),
-#    Strategy("structural_iterative", "Structural + Iterative",
-#             use_structured_graph=True, use_iterative_search=True),
+#             use_iterative_search=True, limit=15),
 ]
 
 
@@ -270,6 +302,129 @@ def read_json(filename: str) -> Any:
     """Load a JSON file."""
     with open(filename, encoding="utf-8") as f:
         return json.load(f)
+
+
+def _save_json_atomic(path: str, data: Any) -> None:
+    """Write ``data`` to ``path`` atomically.
+
+    The payload is written to a sibling ``.tmp`` file first and then moved
+    into place with ``os.replace``. A crash or Ctrl+C mid-write can therefore
+    never leave a truncated JSON file behind — the previous checkpoint stays
+    intact until the new one is fully on disk.
+    """
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def _salvage_json_array(path: str) -> Optional[List[dict]]:
+    """Recover complete list entries from a JSON file that was truncated.
+
+    Returns ``None`` when nothing usable can be recovered. This is only a
+    safety net for files written by older non-atomic checkpoints (and for the
+    interrupted writes that produced them); all new writes go through
+    ``_save_json_atomic``.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+
+    # Fast path: the file may already be valid JSON.
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, list) else None
+    except json.JSONDecodeError:
+        pass
+
+    # Find where every top-level object closes (brace depth returning to 0,
+    # ignoring braces inside string literals).
+    cut_points: List[int] = []
+    depth = 0
+    in_str = False
+    esc = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                cut_points.append(i)
+        i += 1
+
+    # Try the longest prefix first: the most complete entries we can keep.
+    for end in reversed(cut_points):
+        candidate = text[: end + 1].rstrip()
+        if candidate.endswith(","):
+            candidate = candidate[:-1]
+        try:
+            data = json.loads(candidate + "]")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, list):
+            return data
+    return None
+
+
+def _load_existing_results(path: str) -> List[dict]:
+    """Load a per-strategy results file for resume.
+
+    Handles files that were truncated/corrupted by an interrupted write: the
+    complete entries are salvaged and the missing tail is re-run instead of
+    crashing. Keeps the result list 1:1 aligned with the dataset order.
+    """
+    if not os.path.exists(path):
+        return []
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        data = _salvage_json_array(path)
+        if data is None:
+            print(f"  WARNING: {os.path.basename(path)} is corrupt and could "
+                  f"not be salvaged — restarting it from scratch")
+            return []
+        print(f"  WARNING: {os.path.basename(path)} was truncated/corrupt; "
+              f"recovered {len(data)} complete entries and will resume from there")
+
+    if not isinstance(data, list):
+        print(f"  WARNING: {os.path.basename(path)} does not contain a JSON "
+              f"list ({type(data).__name__}); restarting it from scratch")
+        return []
+
+    # Entries recorded as "completed" by an older run but with no model output
+    # are failed generations: convert them so the resume below retries them and
+    # the statistics count them as errors instead of silently dropping them.
+    converted = 0
+    for r in data:
+        if (isinstance(r, dict)
+                and str(r.get("status")) == "completed"
+                and not r.get("llm_answer")
+                and not r.get("response")):
+            r["status"] = "error"
+            r["error"] = True
+            r["retryable"] = True
+            r.setdefault("error_msg", "Empty LLM answer (no model output)")
+            converted += 1
+    if converted:
+        print(f"  NOTE: {os.path.basename(path)} contains {converted} entries "
+              f"marked 'completed' but with no model output — marking them as "
+              f"errors so they are retried")
+    return data
 
 
 def ask_document(base_url: str, strategy: Strategy,
@@ -287,6 +442,10 @@ def ask_document(base_url: str, strategy: Strategy,
         "use_iterative_search": str(strategy.use_iterative_search).lower(),
         "use_question_decomposition": str(strategy.use_question_decomposition).lower(),
     }
+    # BFS is Optional[bool]: only send an explicit override when the strategy
+    # pins it; otherwise the server keeps legacy auto behaviour (both graphs).
+    if strategy.use_bfs_crawler is not None:
+        query_params["use_bfs_crawler"] = str(strategy.use_bfs_crawler).lower()
     qs = "&".join(f"{k}={v}" for k, v in query_params.items())
     url = f"{base_url.rstrip('/')}/ask-document?{qs}"
     resp = requests.post(url, json=payload, timeout=timeout)
@@ -468,98 +627,140 @@ def run_grid_test(
         strategy_results: List[dict] = []
         strategy_output = os.path.join(output_dir, f"{strategy.name}.json")
 
-        # Resume from partial results if present
+        # Resume from partial results if present. The list stays 1:1 aligned
+        # with the dataset order: entries that already produced an LLM answer
+        # (or that will never be answerable) are skipped, while entries marked
+        # as generation errors are retried and REPLACED in place on success.
         if os.path.exists(strategy_output):
-            strategy_results = read_json(strategy_output)
-            print(f"  Resuming from {len(strategy_results)} already processed")
+            strategy_results = _load_existing_results(strategy_output)
+            # Trim trailing junk from pre-fix misaligned resumes.
+            if len(strategy_results) > len(dataset):
+                strategy_results = strategy_results[: len(dataset)]
+            res_completed = sum(
+                1 for r in strategy_results if r.get("llm_answer")
+            )
+            res_errors = sum(
+                1 for r in strategy_results
+                if str(r.get("status", "")).startswith("error")
+            )
+            print(f"  Resuming from {len(strategy_results)} entries "
+                  f"({res_completed} ok, {res_errors} errors to retry)")
 
         for qi, case in enumerate(dataset):
-            # Skip if already processed (check qi index and llm_answer)
-            if (qi < len(strategy_results)
-                    and strategy_results[qi].get("llm_answer")):
-                continue
+            # --- Resume decision -------------------------------------------------
+            prev = strategy_results[qi] if qi < len(strategy_results) else None
+            if prev is not None:
+                prev_status = str(prev.get("status", ""))
+                if (prev.get("llm_answer")
+                        or prev.get("response")
+                        or prev_status == "hash_not_found"):
+                    # Already answered or permanently skipped — keep as is.
+                    # NOTE: an entry whose status is "completed" but that has no
+                    # model output is NOT skipped here — it is retried below,
+                    # because an empty answer is a failed generation.
+                    continue
 
             doc_id = case.get("doc_id", "")
             question = case.get("question", "")
             correct_answer = case.get("answer", "")
 
+            entry: Optional[dict] = None
+
             if doc_id not in hash_map:
                 print(f"  [{qi}/{len(dataset)}] SKIP: {doc_id} "
                       f"not in hash map")
-                strategy_results.append({
+                entry = {
                     "doc_id": doc_id,
                     "question": question,
                     "answer": correct_answer,
                     "status": "hash_not_found",
-                })
-                continue
+                }
+            else:
+                file_hash = hash_map[doc_id]
+                start = time.time()
 
-            file_hash = hash_map[doc_id]
-            start = time.time()
+                try:
+                    result = ask_document(
+                        base_url, strategy, file_hash, question, limit,
+                    )
+                    model_answer_time = time.time() - start
 
-            try:
-                result = ask_document(
-                    base_url, strategy, file_hash, question, limit,
-                )
-                model_answer_time = time.time() - start
+                    llm_answer = result.get("llm_answer", "") or ""
 
-                llm_answer = result.get("llm_answer", "") or ""
-
-                # --- Optional: Extract short answer via Qwen API ---
-                extract_start = time.time()
-                extracted_res = None
-                if llm_answer and extract_prompt and not skip_extraction:
-                    try:
-                        extracted_res = extract_answer_qwen_api(
-                            question, llm_answer, extract_prompt,
+                    # An API response without any model output is NOT a
+                    # successful generation: mark it as an error so the entry
+                    # is counted as such and retried on the next resume.
+                    if not llm_answer and not result.get("response"):
+                        raise RuntimeError(
+                            "Empty LLM answer (model returned no output)"
                         )
-                    except Exception as exc:
-                        print(f"    Extraction failed: {exc}")
-                        extracted_res = "Failed to extract"
-                model_extract_time = time.time() - extract_start
 
-                entry = _build_result_entry(
-                    doc_id=doc_id,
-                    question=question,
-                    correct_answer=correct_answer,
-                    result=result,
-                    file_hash=file_hash,
-                    model_answer_time=model_answer_time,
-                    model_extract_time=model_extract_time,
-                    extracted_res=extracted_res,
-                )
-                strategy_results.append(entry)
+                    # --- Optional: Extract short answer via Qwen API ---
+                    extract_start = time.time()
+                    extracted_res = None
+                    if llm_answer and extract_prompt and not skip_extraction:
+                        try:
+                            extracted_res = extract_answer_qwen_api(
+                                question, llm_answer, extract_prompt,
+                            )
+                        except Exception as exc:
+                            print(f"    Extraction failed: {exc}")
+                            extracted_res = "Failed to extract"
+                    model_extract_time = time.time() - extract_start
 
-                answers_count = entry["answers_count"]
-                print(
-                    f"  [{qi}/{len(dataset)}] OK "
-                    f"(answer: {model_answer_time:.1f}s, "
-                    f"extract: {model_extract_time:.1f}s) - "
-                    f"{len(llm_answer)} chars, {answers_count} retrieves"
-                )
-                if extracted_res:
-                    print(f">>> Extracted answer:\n{extracted_res}\n")
+                    entry = _build_result_entry(
+                        doc_id=doc_id,
+                        question=question,
+                        correct_answer=correct_answer,
+                        result=result,
+                        file_hash=file_hash,
+                        model_answer_time=model_answer_time,
+                        model_extract_time=model_extract_time,
+                        extracted_res=extracted_res,
+                    )
 
-            except Exception as exc:
-                elapsed = time.time() - start
-                print(f"  [{qi}/{len(dataset)}] ERROR: {exc}")
-                strategy_results.append({
-                    "doc_id": doc_id,
-                    "question": question,
-                    "answer": correct_answer,
-                    "status": f"error: {exc}",
-                    "elapsed": round(elapsed, 2),
-                })
+                    answers_count = entry["answers_count"]
+                    print(
+                        f"  [{qi}/{len(dataset)}] OK "
+                        f"(answer: {model_answer_time:.1f}s, "
+                        f"extract: {model_extract_time:.1f}s) - "
+                        f"{len(llm_answer)} chars, {answers_count} retrieves"
+                    )
+                    if extracted_res:
+                        print(f">>> Extracted answer:\n{extracted_res}\n")
 
-            # Save checkpoint every 10 questions
+                except Exception as exc:
+                    # Generation/transport error: mark the entry explicitly so
+                    # the evaluation statistics can count it and a later resume
+                    # retries it in place.
+                    elapsed = time.time() - start
+                    print(f"  [{qi}/{len(dataset)}] ERROR: {exc}")
+                    entry = {
+                        "doc_id": doc_id,
+                        "question": question,
+                        "answer": correct_answer,
+                        "status": "error",
+                        "error": True,
+                        "error_msg": str(exc),
+                        "retryable": True,
+                        "elapsed": round(elapsed, 2),
+                    }
+
+            if entry is not None:
+                # Replace the old (error/partial) entry in place so index
+                # alignment with the dataset is preserved; append only when the
+                # list is shorter than the current question index.
+                if prev is not None:
+                    strategy_results[qi] = entry
+                else:
+                    strategy_results.append(entry)
+
+            # Save checkpoint every 10 questions (atomic write)
             if (qi + 1) % 10 == 0:
-                with open(strategy_output, "w", encoding="utf-8") as f:
-                    json.dump(strategy_results, f, ensure_ascii=False,
-                              indent=2)
+                _save_json_atomic(strategy_output, strategy_results)
 
         # --- Final save for this strategy ---
-        with open(strategy_output, "w", encoding="utf-8") as f:
-            json.dump(strategy_results, f, ensure_ascii=False, indent=2)
+        _save_json_atomic(strategy_output, strategy_results)
 
         all_strategy_results[strategy.name] = strategy_results
         completed = sum(
@@ -567,7 +768,7 @@ def run_grid_test(
         )
         errors = sum(
             1 for r in strategy_results
-            if r.get("status", "").startswith("error:")
+            if str(r.get("status", "")).startswith("error")
         )
         print(f"  Done: {len(strategy_results)} results "
               f"({completed} ok, {errors} errors) → {strategy_output}")

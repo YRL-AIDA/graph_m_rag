@@ -382,6 +382,7 @@ async def embed_entities(
     entity_data: List[Dict[str, Any]],
     qdrant_client: AsyncQdrantClient,
     session: Optional[aiohttp.ClientSession] = None,
+    document_id: Optional[str] = None,
 ) -> int:
     """Compute and store embeddings for entity nodes.
 
@@ -396,6 +397,9 @@ async def embed_entities(
         Initialised :class:`AsyncQdrantClient`.
     session:
         Optional shared ``aiohttp.ClientSession``.
+    document_id:
+        Optional document MD5 hash the entities belong to. Stored in the point
+        payload so retrieval can scope embedding search to a single document.
 
     Returns
     -------
@@ -416,16 +420,19 @@ async def embed_entities(
     points: List[PointStruct] = []
     for entity, vector in zip(entity_data, embeddings):
         entity_id = entity["id"]
+        payload: Dict[str, Any] = {
+            "entity_title": entity.get("title", ""),
+            "entity_type": entity.get("type", ""),
+            "entity_id": entity_id,
+            "description": entity.get("description", ""),
+        }
+        if document_id:
+            payload["document_id"] = document_id
         points.append(
             PointStruct(
                 id=entity_id,
                 vector=vector,
-                payload={
-                    "entity_title": entity.get("title", ""),
-                    "entity_type": entity.get("type", ""),
-                    "entity_id": entity_id,
-                    "description": entity.get("description", ""),
-                },
+                payload=payload,
             )
         )
 
@@ -460,6 +467,7 @@ async def embed_communities(
     community_data: List[Dict[str, Any]],
     qdrant_client: AsyncQdrantClient,
     session: Optional[aiohttp.ClientSession] = None,
+    document_id: Optional[str] = None,
 ) -> int:
     """Compute and store embeddings for community nodes.
 
@@ -472,6 +480,9 @@ async def embed_communities(
         Initialised :class:`AsyncQdrantClient`.
     session:
         Optional shared ``aiohttp.ClientSession``.
+    document_id:
+        Optional document MD5 hash the communities belong to. Stored in the
+        point payload so retrieval can scope embedding search to one document.
 
     Returns
     -------
@@ -492,16 +503,19 @@ async def embed_communities(
     points: List[PointStruct] = []
     for community, vector in zip(community_data, embeddings):
         comm_id = community["id"]
+        payload: Dict[str, Any] = {
+            "community_id": comm_id,
+            "title": community.get("title", ""),
+            "summary": community.get("summary", ""),
+            "report": community.get("report", ""),
+        }
+        if document_id:
+            payload["document_id"] = document_id
         points.append(
             PointStruct(
                 id=comm_id,
                 vector=vector,
-                payload={
-                    "community_id": comm_id,
-                    "title": community.get("title", ""),
-                    "summary": community.get("summary", ""),
-                    "report": community.get("report", ""),
-                },
+                payload=payload,
             )
         )
 

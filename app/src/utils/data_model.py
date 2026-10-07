@@ -29,10 +29,24 @@ class QuestionRequest(BaseModel):
     """Request model for asking a question about a document"""
     file_hash: str
     question: str
-    limit: int = 10
+    limit: int = 30
     collection_name: Optional[str] = None  # Optional collection name
     use_llm: bool = False  # Option to generate answer using LLM
-    use_reranker: bool = False  # Option to use reranker for re-ranking results
+    use_reranker: bool = False  # Option to use API reranker for re-ranking results
+    reranker_min_relevance: Optional[float] = None  # Min top-1 reranker score to trust reranking; None = server default, 0.0 = disabled
+    use_mmr_reranker: bool = False  # Option to use MMR (Maximal Marginal Relevance) diversity-based reranking
+    mmr_lambda: float = 0.7  # MMR relevance-diversity tradeoff (1.0 = pure relevance)
+    mmr_min_relevance: float = 0.0  # MMR minimum relevance threshold
+    use_semantic_graph: bool = False  # Option to enrich context with Entity and Community nodes from semantic graph
+    semantic_min_relevance: Optional[float] = None  # Min similarity score for semantic embedding-search entities/communities; None = server default, 0.0 = disabled
+    use_structured_graph: bool = False  # Option to enrich context with structural graph neighbours (ORDER walk + cross-graph bridge)
+    use_structural_parent_only: bool = False  # When use_structured_graph=True: only walk PARENT edges (skip ORDER neighbours)
+    use_bfs_crawler: Optional[bool] = None  # Unified BFS graph crawler (Strategy E); None = auto — runs only when both semantic + structural graphs are enabled
+    use_iterative_search: bool = False  # Option to use iterative (feedback-driven) retrieval for multi-hop questions
+    use_question_decomposition: bool = False  # Option to decompose complex questions into sub-questions
+    use_structured_context: bool = True  # Option to use XML-structured context (False = flat text)
+    use_neo4j_enrichment: bool = True  # Option to enrich original Qdrant regions with Neo4j parent/caption/footnote
+    answer_format: Optional[str] = None  # Expected answer format: 'Int', 'Float', 'List', 'Str', 'None'
 
 
 class QuestionResponse(BaseModel):
@@ -45,7 +59,12 @@ class QuestionResponse(BaseModel):
     indexed: bool
     collection_name: Optional[str] = None  # Collection name used
     llm_answer: Optional[str] = None  # LLM-generated answer if use_llm is True
-
+    context_blocks: Optional[List[str]] = None  # All context blocks sent to LLM
+    response_metadata: Optional[Dict[str, Any]] = None  # Server-side timing breakdown:
+    #   search_ms          — Qdrant search time
+    #   enrichment_ms      — Neo4j + semantic graph enrichment + context building
+    #   llm_generation_ms  — LLM call time
+    #   total_ms           — server-side total (excludes network serialisation)
 class UploadedFileInfo(BaseModel):
     """Model for uploaded file information"""
     file_hash: str
@@ -61,3 +80,18 @@ class UploadedFilesListResponse(BaseModel):
     message: str
     files: List[UploadedFileInfo]
     total_count: int = 0
+
+
+class DemonstrationRequest(BaseModel):
+    """Request model for the demo-facing /demonstration endpoint.
+
+    Wraps the low-level strategy flags of :class:`QuestionRequest` into a
+    single ``strategy`` name understood by the demo application.
+    """
+    file_hash: str
+    question: str
+    strategy: str = "baseline"  # baseline | semantic | structural | both
+    limit: int = 30
+    use_reranker: bool = False  # Option to use API reranker for re-ranking results
+    use_mmr_reranker: bool = False  # Option to use MMR (Maximal Marginal Relevance) diversity-based reranking
+    answer_format: Optional[str] = None

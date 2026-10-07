@@ -230,6 +230,7 @@ class UnifiedGraphCrawler:
                     "text": item.text,
                     "score": -item.priority,
                     "node_type": item.node_type,
+                    "node_id": item.node_id,
                 }
             )
 

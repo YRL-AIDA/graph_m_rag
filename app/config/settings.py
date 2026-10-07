@@ -24,8 +24,8 @@ class S3Settings(BaseSettings):
 class QdrantSettings(BaseSettings):
     """Qdrant vector database configuration."""
     QDRANT_HOST: str = Field(default="localhost", description="Qdrant host")
-    QDRANT_PORT: int = Field(default=6333, description="Qdrant HTTP port")
-    QDRANT_GRPC_PORT: int = Field(default=6334, description="Qdrant gRPC port")
+    QDRANT_PORT: int = Field(default=16333, description="Qdrant HTTP port")
+    QDRANT_GRPC_PORT: int = Field(default=16334, description="Qdrant gRPC port")
     QDRANT_API_KEY: Optional[str] = Field(default=None, description="Qdrant API key")
     QDRANT_COLLECTION_NAME: str = Field(default="documents", description="Default collection name")
 
@@ -70,6 +70,42 @@ class RerankerSettings(BaseSettings):
     RERANKER_BASE_URL: str = Field(default="http://192.168.19.127:10115/reranker", description="Reranker service URL")
     RERANKER_TIMEOUT: int = Field(default=30, description="Request timeout in seconds")
     RERANKER_TOP_N: int = Field(default=100, description="Default number of top results to return")
+    RERANKER_MIN_RELEVANCE: float = Field(
+        default=0.60,
+        description=(
+            "Minimum top-1 reranker score to trust the reranked order. "
+            "Qwen VL Reranker 2B emits sigmoid scores in [0, 1]; below this "
+            "threshold the reranker is considered uncertain and the original "
+            "(non-reranked) retrieval order is kept instead. Calibrated on the "
+            "strategy-grid eval: 0.60 maximizes answerable+unanswerable accuracy. "
+            "Set to 0.0 to disable the threshold."
+        ),
+    )
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+
+class SemanticSettings(BaseSettings):
+    """Semantic graph enrichment configuration."""
+    SEMANTIC_MIN_RELEVANCE: float = Field(
+        default=0.0,
+        description=(
+            "Minimum similarity score for semantic embedding-search entities "
+            "and communities to be included in the context. 0.0 = include all. "
+            "Filtering below this threshold reduces noisy low-relevance semantic "
+            "context for unanswerable questions."
+        ),
+    )
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+
+class MMRSettings(BaseSettings):
+    """MMR (Maximal Marginal Relevance) configuration for context reranking."""
+    USE_MMR_RERANKING: bool = Field(default=True, description="Enable MMR diversity reranking for context blocks")
+    MMR_LAMBDA: float = Field(default=0.7, description="Relevance vs diversity tradeoff (1.0 = pure relevance, 0.0 = pure diversity)")
+    MMR_TOP_K: int = Field(default=30, description="Maximum number of context blocks to keep after MMR")
+    MMR_MIN_RELEVANCE: float = Field(default=0.0, description="Minimum relevance score for a context block to be considered")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -78,10 +114,75 @@ class LLMSettings(BaseSettings):
     LLM_BASE_URL: str = Field(default="http://192.168.19.127:8888/v1", description="LLM service URL")
     LLM_API_KEY: str = Field(default="EMPTY", description="LLM API key")
     LLM_MODEL_NAME: str = Field(default="Qwen/Qwen3-VL-32B-Thinking", description="LLM model name")
-    LLM_MAX_TOKENS: int = Field(default=2048, description="Max tokens for response")
+    LLM_MAX_TOKENS: int = Field(
+        default=8192,
+        description=(
+            "Max output tokens for LLM answer generation. The model is a "
+            "Thinking variant: its chain-of-thought alone can exceed 4k tokens "
+            "on large-context questions, so the budget must leave room for the "
+            "reasoning AND the [FINAL_ANSWER] tag (otherwise the answer gets "
+            "truncated before it is emitted)."
+        ),
+    )
     LLM_TEMPERATURE: float = Field(default=0.7, description="Temperature for generation")
 
+    # C5: Feedback-driven iterative retrieval
+    ITERATIVE_RETRIEVAL_ENABLED: bool = Field(
+        default=False,
+        description="Enable two-round retrieval with LLM-identified gap refinement",
+    )
+
+    # C6: Multi-hop question decomposition
+    QUESTION_DECOMPOSITION_ENABLED: bool = Field(
+        default=True,
+        description="Enable LLM-based decomposition of complex questions into sub-questions",
+    )
+
+    # C8: Generate textual descriptions for caption-less images
+    IMAGE_CAPTIONING_ENABLED: bool = Field(
+        default=True,
+        description="Generate a VLM text description for images without captions",
+    )
+    IMAGE_CAPTIONING_TEMPERATURE: float = Field(
+        default=0.2,
+        description="Temperature for image caption generation",
+    )
+    IMAGE_CAPTIONING_MAX_TOKENS: int = Field(
+        default=512,
+        description="Max tokens for each generated image caption",
+    )
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+class ContextBudgetSettings(BaseSettings):
+    """Context assembly budget configuration for the RAG prompt.
+
+    Controls how much retrieved/enriched content is packed into the prompt sent
+    to the LLM. The primary Qdrant retrieval is bounded by the request ``limit``
+    (block count); graph-enrichment sources are bounded by character fractions
+    defined in ``api.py`` relative to ``MAX_CONTEXT_CHARS``.
+    """
+
+    MAX_CONTEXT_CHARS: int = Field(
+        default=40000,
+        description=(
+            "Total text context budget in characters (hard backstop for every "
+            "source). The model window is 256K tokens, so the cap is not about "
+            "overflow — it keeps the prompt focused and fast. ~40k chars ≈ "
+            "10k tokens of text; per-source graph budgets scale from this value."
+        ),
+    )
+    MAX_IMAGES: int = Field(
+        default=8,
+        description=(
+            "Maximum number of images/tables attached as multimodal input. "
+            "Vision tokens are expensive and are not covered by the character "
+            "budget, so they need a separate hard limit."
+        ),
+    )
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
 
 class AppSettings(BaseSettings):
     """Main application configuration."""
@@ -113,7 +214,10 @@ class Settings(BaseSettings):
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
+    semantic: SemanticSettings = Field(default_factory=SemanticSettings)
+    mmr: MMRSettings = Field(default_factory=MMRSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    context_budget: ContextBudgetSettings = Field(default_factory=ContextBudgetSettings)
     app: AppSettings = Field(default_factory=AppSettings)
 
     # Direct access aliases for backward compatibility

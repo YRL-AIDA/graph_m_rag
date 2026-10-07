@@ -16,7 +16,7 @@ class Message(BaseModel):
         return self
 
     def set_type(self, type: str)-> 'Message':
-        self.type = 'text'
+        self.type = type
         return self
 
 

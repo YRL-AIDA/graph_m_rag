@@ -252,6 +252,8 @@ class QdrantClientWrapper:
             success = self.upload_points(points)
             if success:
                 logger.info(f"Successfully saved {len(embeddings)} embeddings to collection {self.collection_name}")
+                # Ensure payload indexes exist for metadata filtering
+                self.create_payload_indexes()
                 return True
             else:
                 logger.error("Failed to upload embeddings to Qdrant")
@@ -259,6 +261,35 @@ class QdrantClientWrapper:
 
         except Exception as e:
             logger.error(f"Error saving embeddings to Qdrant: {e}")
+            return False
+
+    def create_payload_indexes(self) -> bool:
+        """
+        Создает индексы на payload-поля в Qdrant для эффективной фильтрации.
+        Индексирует file_hash, element_type и page_idx.
+        """
+        try:
+            indexed = False
+            for field_name in ["file_hash", "element_type", "page_idx"]:
+                try:
+                    self.client.create_payload_index(
+                        collection_name=self.collection_name,
+                        field_name=field_name,
+                        field_schema=models.PayloadSchemaType.KEYWORD,
+                    )
+                    indexed = True
+                    logger.info(
+                        f"Payload index created for field '{field_name}' "
+                        f"in collection {self.collection_name}"
+                    )
+                except Exception:
+                    logger.debug(
+                        f"Payload index already exists for field "
+                        f"'{field_name}' in collection {self.collection_name}"
+                    )
+            return indexed
+        except Exception as e:
+            logger.error(f"Error creating payload indexes: {e}")
             return False
 
     def delete_points_by_filter(self, filter_condition: models.Filter) -> bool:

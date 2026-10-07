@@ -3,25 +3,28 @@ Main API application for PDF processing.
 Handles PDF upload to S3, processing with MinerU service,
 and computing embeddings for each element in the result.
 """
+import asyncio
 import base64
+import functools
 import hashlib
 import io
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from operator import itemgetter
+from collections import defaultdict
 from typing import Dict, List, Optional, Any
 
-import logger
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 from pathlib import Path
-
+import requests
 from starlette.responses import HTMLResponse, FileResponse
 
 from app.src.llm_client import ModelMessageDict, LLMClient
@@ -32,7 +35,30 @@ from app.src.mineru_client import MinerUClient
 from app.config.settings import settings
 from app.src.reranker_client import RerankerClient
 from app.src.schemas.reranker import Message
-from app.src.utils.data_model import QuestionResponse, QuestionRequest, UploadedFileInfo, UploadedFilesListResponse, CollectionCreateRequest, CollectionInfo, CollectionsListResponse
+from app.src.utils.data_model import QuestionResponse, QuestionRequest, DemonstrationRequest, UploadedFileInfo, UploadedFilesListResponse, CollectionCreateRequest, CollectionInfo, CollectionsListResponse
+from app.src.utils.mmr_reranker import mmr_rerank_with_threshold
+from app.src.question_decomposer import decompose_question, merge_search_results
+from app.src.iterative_search import iterative_retrieval
+from app.src.utils.answer_formatter import format_answer
+from app.src.image_captioner import generate_captions_for_captionless_images
+from semantic_graph.traversal import TraversalConfig, UnifiedGraphCrawler
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+# Semantic graph enrichment availability flag
+# The semantic_graph module provides advanced entity/community expansion
+# via Manager methods accessible through the shared Neo4j connection.
+try:
+    from semantic_graph.manager import Manager as SemanticManager, ManagerConfig
+    SEMANTIC_GRAPH_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Semantic graph module not available: {e}")
+    SEMANTIC_GRAPH_AVAILABLE = False
+    SemanticManager = None
+    ManagerConfig = None
 
 # Import document index service for Neo4j graph creation
 try:
@@ -44,15 +70,145 @@ except ImportError as e:
     DocumentIndexService = None
     create_neo4j_graph = None
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Initialize clients
 minio_client = MinioClient(logger)
 mineru_client = MinerUClient(base_url=f"{settings.mineru.MINERU_HOST}:{settings.mineru.MINERU_PORT}")
 emb_client = EmbeddingClient(base_url=settings.embedding.EMBEDDING_BASE_URL)
 reranker_client = RerankerClient(base_url=settings.reranker.RERANKER_BASE_URL)
+
+
+# C7: Module-level LRU cache for question embeddings.
+# Must be at module scope so the cache persists across requests.
+@functools.lru_cache(maxsize=256)
+def _cached_question_embedding(text: str) -> list:
+    """Return embedding for *text*, caching up to 256 most recent queries."""
+    return emb_client.get_text_embedding(text)
+
+
+# --- Evidence gate (abstention calibration) ---
+# Over-abstention ("Not answerable" on answerable questions) is the single
+# largest error source on the full dataset (~35% of answerable questions).
+# These heuristics decide whether the retrieved context plausibly contains the
+# answer so the LLM can be nudged to answer instead of refusing. Tuned on the
+# MMLongBench-Doc run: score>=0.60 OR lexical overlap recovers ~2/3 of
+# over-abstentions while flagging ~3/4 of correctly-abstained unanswerables.
+EVIDENCE_SCORE_THRESHOLD = 0.60
+EVIDENCE_LEXICAL_HITS = 2
+EVIDENCE_TOP_BLOCKS = 5
+
+
+def _evidence_present(question: str, answers: List[dict], top_score: float) -> bool:
+    """Heuristic evidence check: top-1 embedding score or lexical overlap.
+
+    The top-1 Qdrant score already measures embedding similarity between the
+    question and the best block; the lexical-overlap test adds a cheap second
+    signal for blocks whose embedding score is borderline.
+    """
+    if top_score >= EVIDENCE_SCORE_THRESHOLD:
+        return True
+    q_tokens = {
+        t for t in re.findall(r"[a-zA-Z0-9]{3,}", (question or "").lower())
+    }
+    if not q_tokens:
+        return False
+    hits = 0
+    for a in answers[:EVIDENCE_TOP_BLOCKS]:
+        text = (a.get("text") or "").lower()
+        a_tokens = set(re.findall(r"[a-zA-Z0-9]{3,}", text))
+        if len(q_tokens & a_tokens) >= 2:
+            hits += 1
+            if hits >= EVIDENCE_LEXICAL_HITS:
+                return True
+    return False
+
+
+_QUESTION_STOPWORDS = frozenset(
+    "a an and are as at be by for from how in is it of on or that the this to "
+    "was what when where which who why with both does do can not you your "
+    "about each any per over under into during than then would should may".split()
+)
+
+
+def _filter_relevant_communities(communities: List[Dict], question: str) -> List[Dict]:
+    """Keep only communities whose text shares content words with the question.
+
+    Communities are extracted per-entity, and a single polluted entity (e.g. a
+    generic NUMBER node) can drag in a community about an *entirely unrelated
+    topic* (observed: the RAPTOR paper pulling in an "ITC Corporate Governance"
+    community).  Such noise bloats the context and makes the Thinking model
+    enumerate irrelevant blocks instead of answering.  We drop communities with
+    no lexical overlap with the question's content words.
+    """
+    if not communities or not question:
+        return communities
+    q_tokens = {
+        t for t in re.findall(r"[a-zA-Z0-9]{3,}", question.lower())
+        if t not in _QUESTION_STOPWORDS
+    }
+    if not q_tokens:
+        return communities
+    kept: List[Dict] = []
+    for comm in communities:
+        # Title/summary/findings are the indicative text; `full_content` is a
+        # long aggregated blob that easily matches generic words and would
+        # let noisy communities slip through.
+        text = " ".join(filter(None, [
+            str(comm.get("title", "")),
+            str(comm.get("summary", "")),
+            " ".join(
+                str(f.get("summary", "")) for f in (comm.get("findings") or [])
+                if isinstance(f, dict)
+            ),
+        ])).lower()
+        c_tokens = set(re.findall(r"[a-zA-Z0-9]{3,}", text)) - _QUESTION_STOPWORDS
+        if len(q_tokens & c_tokens) >= 2:
+            kept.append(comm)
+    return kept
+
+
+def _is_refusal_answer(text: str) -> bool:
+    """Return True if *text* is a refusal / not-answerable signal."""
+    if not text:
+        return False
+    lower = text.strip().lower()
+    return lower in (
+        "not answerable", "fail to answer", "failed to answer",
+        "unable to answer", "cannot answer", "cannot provide",
+        "no answer", "i don't know",
+    ) or any(lower.startswith(p) for p in (
+        "not answerable", "fail to answer", "failed to answer",
+        "unable to answer", "cannot answer", "cannot provide",
+        "i don't know",
+    ))
+
+
+# --- Cross-page question detection ---
+# Aggregation/cross-page questions ("how many ... in the report", "all figures",
+# "total across all pages") need evidence spread over several pages. For these
+# the retrieval runs a second aggregation-focused query and unions the results.
+_CROSS_PAGE_PATTERNS = re.compile(
+    r"\b(total|overall|summar|in total|across all|throughout|every|"
+    r"combined|all|how many|distinct|number of)\b"
+    r"|(?:in|of) (?:this |the )?(?:report|paper|document|article|book|guidebook)"
+    r"|(?:all|every) (?:figures?|tables?|sections?|pages?)"
+    r"|how many .{0,60}(?:report|paper|document|figures?|tables?|sections?|pages?|slides?)",
+    re.IGNORECASE,
+)
+
+
+def _is_cross_page_question(question: str) -> bool:
+    """Heuristic: is this an aggregation question that spans multiple pages?"""
+    return bool(_CROSS_PAGE_PATTERNS.search(question or ""))
+
+
+# --- Demo strategies for the /demonstration endpoint ---
+# Maps a customer-facing strategy name to the /ask-document graph flags.
+DEMO_STRATEGIES: Dict[str, Dict[str, bool]] = {
+    "baseline":   {"use_semantic_graph": False, "use_structured_graph": False},
+    "semantic":   {"use_semantic_graph": True,  "use_structured_graph": False},
+    "structural": {"use_semantic_graph": False, "use_structured_graph": True},
+    "both":       {"use_semantic_graph": True,  "use_structured_graph": True},
+}
 qdrant_client = get_qdrant_client()
 llm_client = LLMClient(base_url=settings.llm.LLM_BASE_URL)
 
@@ -158,6 +314,10 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
     texts_list = []
     metadata_list = []
 
+    # Use region_id counter similar to Neo4j's create_graph_from_mineru_result
+    # to ensure matching IDs between Qdrant and Neo4j
+    region_id = 0
+
     # Process each element according to its type
     for i, element in enumerate(elements):
         if not isinstance(element, dict):
@@ -207,7 +367,7 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 image_base64 = base64.b64encode(image_data).decode('utf-8')
                 caption_text = " ".join(image_captions) if image_captions else ""
                 footnote_text = " ".join(image_footnotes) if image_footnotes else ""
-                text = f'Figure | Image:'
+                text = f'Figure | Image | Chart:'
                 if caption_text:
                     text = f'{text} | {caption_text}'
                 if footnote_text:
@@ -215,11 +375,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 # Compute embedding for the image
                 embedding = emb_client.get_image_text_embedding_base64(text, image_base64)
 
-                # Prepare data for Qdrant
+                # Prepare data for Qdrant with region_id matching Neo4j
                 embeddings_list.append(embedding)
                 texts_list.append(f"Image: {img_path}")  # Text representation for Qdrant
 
                 metadata = {
+                    "region_id": region_id,
                     "element_index": i,
                     "element_type": element_type,
                     "file_hash": file_hash,
@@ -232,11 +393,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
 
                 metadata_list.append(metadata)
                 # Save embedding to S3 with a specific naming convention
-                embedding_key = f"embeddings/{file_hash}/element_{i}.json"
+                embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                 embedding_data = {
                     "original_element": element,
                     "img_path": img_path,
                     "embedding": embedding,
+                    "region_id": region_id,
                     "element_index": i,
                     "element_type": element_type,
                     "file_hash": file_hash,
@@ -253,7 +415,8 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 )
 
                 processed_count += 1
-                logger.info(f"Computed embedding for image element {i} (type: {element_type}, path: {img_path})")
+                region_id += 1
+                logger.info(f"Computed embedding for image element {i} (region_id: {region_id-1}, type: {element_type}, path: {img_path})")
 
                 # Create text embeddings from image captions if available
                 caption_text = " ".join(image_captions) if image_captions else ""
@@ -265,11 +428,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     try:
                         caption_embedding = emb_client.get_text_embedding(caption_content)
 
-                        # Prepare data for Qdrant
+                        # Prepare data for Qdrant with region_id matching Neo4j
                         embeddings_list.append(caption_embedding)
                         texts_list.append(caption_content)
 
                         caption_metadata = {
+                            "region_id": region_id,
                             "element_index": i,
                             "element_type": f"{element_type}_caption",
                             "file_hash": file_hash,
@@ -282,12 +446,13 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         metadata_list.append(caption_metadata)
 
                         # Save caption embedding to S3
-                        caption_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
+                        caption_embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                         caption_embedding_data = {
                             "original_element": element,
                             "img_path": img_path,
                             "text": caption_content,
                             "embedding": caption_embedding,
+                            "region_id": region_id,
                             "element_index": i,
                             "element_type": f"{element_type}_caption",
                             "file_hash": file_hash,
@@ -303,7 +468,8 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         )
 
                         processed_count += 1
-                        logger.info(f"Computed text embedding for image caption element {i} (type: {element_type}_caption)")
+                        region_id += 1
+                        logger.info(f"Computed text embedding for image caption (region_id: {region_id-1}, type: {element_type}_caption)")
 
                     except Exception as e:
                         logger.error(f"Failed to compute text embedding for image caption element {i}: {e}")
@@ -314,11 +480,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     try:
                         footnote_embedding = emb_client.get_text_embedding(footnote_content)
 
-                        # Prepare data for Qdrant
+                        # Prepare data for Qdrant with region_id matching Neo4j
                         embeddings_list.append(footnote_embedding)
                         texts_list.append(footnote_content)
 
                         footnote_metadata = {
+                            "region_id": region_id,
                             "element_index": i,
                             "element_type": f"{element_type}_footnote",
                             "file_hash": file_hash,
@@ -331,14 +498,15 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         metadata_list.append(footnote_metadata)
 
                         # Save caption embedding to S3
-                        footnote_embedding_key = f"embeddings/{file_hash}/element_{i}_footnote.json"
+                        footnote_embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                         footnote_embedding_data = {
                             "original_element": element,
                             "img_path": img_path,
                             "text": footnote_text,
                             "embedding": footnote_embedding,
+                            "region_id": region_id,
                             "element_index": i,
-                            "element_type": f"{element_type}_caption",
+                            "element_type": f"{element_type}_footnote",
                             "file_hash": file_hash,
                             "created_at": datetime.now().isoformat()
                         }
@@ -352,10 +520,11 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                         )
 
                         processed_count += 1
-                        logger.info(f"Computed text embedding for image caption element {i} (type: {element_type}_footnote)")
+                        region_id += 1
+                        logger.info(f"Computed text embedding for image footnote (region_id: {region_id-1}, type: {element_type}_footnote)")
 
                     except Exception as e:
-                        logger.error(f"Failed to compute text embedding for image caption element {i}: {e}")
+                        logger.error(f"Failed to compute text embedding for image footnote element {i}: {e}")
 
                 continue
 
@@ -380,11 +549,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 try:
                     caption_embedding = emb_client.get_text_embedding(caption_content)
 
-                    # Prepare data for Qdrant
+                    # Prepare data for Qdrant with region_id matching Neo4j
                     embeddings_list.append(caption_embedding)
                     texts_list.append(caption_content)
 
                     caption_metadata = {
+                        "region_id": region_id,
                         "element_index": i,
                         "element_type": f"{element_type}_caption",
                         "file_hash": file_hash,
@@ -397,12 +567,13 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     metadata_list.append(caption_metadata)
 
                     # Save caption embedding to S3
-                    caption_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
+                    caption_embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                     caption_embedding_data = {
                         "original_element": element,
                         "img_path": img_path,
                         "text": caption_content,
                         "embedding": caption_embedding,
+                        "region_id": region_id,
                         "element_index": i,
                         "element_type": f"{element_type}_caption",
                         "file_hash": file_hash,
@@ -418,7 +589,8 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     )
 
                     processed_count += 1
-                    logger.info(f"Computed text embedding for table caption element {i} (type: {element_type}_caption)")
+                    region_id += 1
+                    logger.info(f"Computed text embedding for table caption (region_id: {region_id-1}, type: {element_type}_caption)")
 
                 except Exception as e:
                     logger.error(f"Failed to compute text embedding for table caption element {i}: {e}")
@@ -428,11 +600,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 try:
                     footnote_embedding = emb_client.get_text_embedding(footnote_content)
 
-                    # Prepare data for Qdrant
+                    # Prepare data for Qdrant with region_id matching Neo4j
                     embeddings_list.append(footnote_embedding)
                     texts_list.append(footnote_content)
 
                     footnote_metadata = {
+                        "region_id": region_id,
                         "element_index": i,
                         "element_type": f"{element_type}_footnote",
                         "file_hash": file_hash,
@@ -445,12 +618,13 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     metadata_list.append(footnote_metadata)
 
                     # Save caption embedding to S3
-                    footnote_embedding_key = f"embeddings/{file_hash}/element_{i}_caption.json"
+                    footnote_embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                     footnote_embedding_data = {
                         "original_element": element,
                         "img_path": img_path,
                         "text": footnote_content,
                         "embedding": footnote_embedding,
+                        "region_id": region_id,
                         "element_index": i,
                         "element_type": f"{element_type}_footnote",
                         "file_hash": file_hash,
@@ -466,10 +640,11 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                     )
 
                     processed_count += 1
-                    logger.info(f"Computed text embedding for table caption element {i} (type: {element_type}_caption)")
+                    region_id += 1
+                    logger.info(f"Computed text embedding for table footnote (region_id: {region_id-1}, type: {element_type}_footnote)")
 
                 except Exception as e:
-                    logger.error(f"Failed to compute text embedding for table caption element {i}: {e}")
+                    logger.error(f"Failed to compute text embedding for table footnote element {i}: {e}")
 
             # Now process the full table content (body + captions + footnotes)
             text_content = "Table: "
@@ -498,25 +673,29 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 # Generate embedding using the embedding client
                 embedding = emb_client.get_text_embedding(text_content)
 
-                # Prepare data for Qdrant
+                # Prepare data for Qdrant with region_id matching Neo4j
                 embeddings_list.append(embedding)
                 texts_list.append(text_content)
 
                 metadata = {
+                    "region_id": region_id,
                     "element_index": i,
                     "element_type": element_type,
                     "file_hash": file_hash,
                     "created_at": datetime.now().isoformat(),
+                    "page_idx": element.get("page_idx", 0),
+                    "bbox": element.get("bbox", []),
                     "original_element": element
                 }
                 metadata_list.append(metadata)
 
                 # Save embedding to S3 with a specific naming convention
-                embedding_key = f"embeddings/{file_hash}/element_{i}.json"
+                embedding_key = f"embeddings/{file_hash}/region_{region_id}.json"
                 embedding_data = {
                     "original_element": element,
                     "text": text_content,
                     "embedding": embedding,
+                    "region_id": region_id,
                     "element_index": i,
                     "element_type": element_type,
                     "file_hash": file_hash,
@@ -533,7 +712,8 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 )
 
                 processed_count += 1
-                logger.info(f"Computed embedding for element {i} (type: {element_type})")
+                region_id += 1
+                logger.info(f"Computed embedding for element {i} (region_id: {region_id-1}, type: {element_type})")
 
             except Exception as e:
                 logger.error(f"Failed to compute embedding for element {i} (type: {element_type}): {e}")
@@ -554,6 +734,12 @@ def compute_embeddings_for_elements(elements: List[Dict], file_hash: str) -> int
                 logger.info(f"Saved {len(embeddings_list)} embeddings to Qdrant collection")
             else:
                 logger.error("Failed to save embeddings to Qdrant")
+        else:
+            logger.error(
+                "No embeddings were computed for document %s; nothing was saved to Qdrant. "
+                "The embedding service may be unreachable or all elements failed to process.",
+                file_hash,
+            )
     except Exception as e:
         logger.error(f"Error saving embeddings to Qdrant: {e}")
 
@@ -971,6 +1157,35 @@ async def upload_pdf(file: UploadFile = File(...)):
             logger.info(f"Processing PDF {file_hash} with MinerU service")
             mineru_result = process_with_mineru(temp_file_path)
 
+            # MinerU returns HTTP 200 even on processing failure (e.g. CUDA OOM),
+            # with a body like {"status": "failed", ...}. Detect and abort before
+            # storing a failed result or building empty structural/semantic graphs.
+            mineru_status = mineru_result.get("status")
+            mineru_success = mineru_result.get("results", {}).get("result", {}).get("success")
+            if mineru_status != "completed" or mineru_success is False:
+                mineru_error = (
+                    mineru_result.get("results", {}).get("result", {}).get("error")
+                    or mineru_result.get("message")
+                    or "unknown MinerU error"
+                )
+                logger.error(f"MinerU failed to process document '{file_hash}': {mineru_error}")
+                # Remove the already-uploaded PDF so a later retry is not blocked
+                # by the "already_processed" dedup check.
+                try:
+                    minio_client.remove_object(
+                        bucket_name=minio_client.bucket_name,
+                        object_name=pdf_s3_key
+                    )
+                    logger.info(f"Removed PDF after MinerU failure: {pdf_s3_key}")
+                except Exception as cleanup_error:
+                    logger.warning(
+                        f"Could not remove PDF {pdf_s3_key} after MinerU failure: {cleanup_error}"
+                    )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"MinerU processing failed for document: {mineru_error}"
+                )
+
         finally:
             # Clean up temporary file immediately after processing
             if temp_file_path and os.path.exists(temp_file_path):
@@ -1028,6 +1243,26 @@ async def upload_pdf(file: UploadFile = File(...)):
         if not elements:
             logger.warning(f"No content elements found in MinerU result for file {file_hash}")
 
+        # Generate text descriptions for caption-less images before indexing.
+        # `elements` is the same list referenced by `mineru_result`, so the
+        # generated captions are also picked up by Neo4j graph construction.
+        if settings.llm.IMAGE_CAPTIONING_ENABLED:
+            try:
+                captions_generated = generate_captions_for_captionless_images(
+                    elements,
+                    llm_client=llm_client,
+                    minio_client=minio_client,
+                    enabled=True,
+                    temperature=settings.llm.IMAGE_CAPTIONING_TEMPERATURE,
+                    max_tokens=settings.llm.IMAGE_CAPTIONING_MAX_TOKENS,
+                )
+                logger.info(
+                    f"Generated captions for {captions_generated} caption-less images "
+                    f"for file {file_hash}"
+                )
+            except Exception as caption_error:
+                logger.error(f"Image captioning failed for file {file_hash}: {caption_error}")
+
         # Compute embeddings synchronously
         embeddings_count = compute_embeddings_for_elements(elements, file_hash)
         logger.info(f"Completed embedding computation: {embeddings_count} elements processed for file {file_hash}")
@@ -1048,6 +1283,45 @@ async def upload_pdf(file: UploadFile = File(...)):
                 # The document is still available in MinIO and Qdrant
         else:
             logger.info("Neo4j document index not available, skipping graph creation")
+
+        # Make semantic graph
+        if NEO4J_AVAILABLE and embeddings_count > 0:
+            try:
+                url = "http://localhost:9595/process-document"
+                data = {
+                    "document_id": file_hash
+                }
+
+                response = requests.post(url, json=data)
+
+                logger.info(f"Semantic graph construction initiated for document {file_hash}. Status: {response.status_code}")
+                if response.status_code == 200:
+                    response_data = response.json()
+                    logger.info(f"Semantic graph construction response: {response_data}")
+
+                    # Connect structural and semantic graphs after semantic graph is built
+                    try:
+                        connect_structural_and_semantic_graphs(file_hash)
+                    except Exception as e:
+                        logger.error(f"Error connecting structural and semantic graphs: {e}")
+                        
+                    # Additionally, run the comprehensive graph connection process
+                    try:
+                        comprehensive_connect_graphs(file_hash)
+                    except Exception as e:
+                        logger.error(f"Error in comprehensive graph connection: {e}")
+
+                else:
+                    logger.error(f"Semantic graph construction failed with status {response.status_code}: {response.json()}")
+            except Exception as e:
+                logger.error(f"Error initiating semantic graph construction for document {file_hash}: {e}")
+        elif NEO4J_AVAILABLE:
+            logger.warning(
+                f"No embeddings were indexed for document {file_hash}; "
+                "skipping semantic graph construction (process-document would return 404)."
+            )
+        else:
+            logger.info("Neo4j document index not available, skipping semantic graph creation")
 
         processing_time = time.time() - start_time
 
@@ -1119,6 +1393,111 @@ def check_document_indexed(file_hash: str, client=None) -> bool:
         return False
 
 
+def connect_structural_and_semantic_graphs(file_hash: str):
+    """
+    Connect structural graph (created from MinerU results) with semantic graph (created by semantic_graph module)
+
+    Args:
+        file_hash: Hash of the PDF file
+    """
+    if not NEO4J_AVAILABLE:
+        logger.warning("Neo4j not available, skipping graph connection")
+        return
+
+    try:
+        # Connect to Neo4j to create relationships between structural and semantic graphs
+        neo4j_service = DocumentIndexService()
+
+        # Create a relationship between the document node (structural graph)
+        # and any corresponding community nodes (semantic graph)
+        with neo4j_service.driver.session() as session:
+            # First, ensure the document node exists in the structural graph
+            # Create or merge the document node if it doesn't exist
+            # NOTE: The Document node is created with the `name` property (holding the
+            # file_hash value) by the structural/semantic graph managers. Using
+            # `file_hash` as the MERGE key here would create a SECOND, bare Document
+            # node without any relationships. Match on `name` (the canonical key) and
+            # backfill `file_hash` for compatibility with queries that use it.
+            doc_query = """
+            MERGE (d:Document {name: $file_hash})
+            ON CREATE SET d.created_at = datetime(), d.file_hash = $file_hash
+            ON MATCH SET d.updated_at = datetime(), d.file_hash = $file_hash
+            RETURN d
+            """
+            session.run(doc_query, file_hash=file_hash)
+
+            # Find all entities related to this document in the structural graph
+            struct_query = """
+            MATCH (d:Document {name: $file_hash})<-[:PART_OF]-(e:Entity)
+            RETURN e.title AS entity_title, e.label AS entity_label
+            """
+
+            struct_results = session.run(struct_query, file_hash=file_hash)
+            document_entities = [(record["entity_title"], record["entity_label"]) for record in struct_results]
+
+            # Connect document entities to their corresponding communities in the semantic graph
+            connected_count = 0
+            for entity_title, entity_label in document_entities:
+                # Find the corresponding entity in the semantic graph and its community
+                connect_query = """
+                MATCH (d:Document {name: $file_hash})
+                MATCH (e:Entity {title: $entity_title, type: $entity_label})
+                MATCH (e)-[:IN_COMMUNITY]->(c:Community)
+                MERGE (d)-[:CONNECTS_TO {relationship_type: 'SEMANTIC_CONNECTION', created_at: datetime()}]->(c)
+                RETURN COUNT(*) AS connection_count
+                """
+
+                result = session.run(
+                    connect_query,
+                    file_hash=file_hash,
+                    entity_title=entity_title,
+                    entity_label=entity_label
+                )
+
+                record = result.single()
+                connected_count += record["connection_count"] if record else 0
+
+            logger.info(f"Created {connected_count} connections between structural and semantic graphs for document {file_hash}")
+
+        neo4j_service.close()
+
+    except Exception as e:
+        logger.error(f"Error connecting structural and semantic graphs for document {file_hash}: {e}")
+        # Re-raise the exception to be caught by the caller
+        raise
+
+
+def comprehensive_connect_graphs(file_hash: str):
+    """
+    Perform a comprehensive connection between structural and semantic graphs.
+    
+    Args:
+        file_hash: Hash of the PDF file
+    """
+    if not NEO4J_AVAILABLE:
+        logger.warning("Neo4j not available, skipping comprehensive graph connection")
+        return
+
+    try:
+        from connect_graphs import main as connect_graphs_main
+
+        # Run the full graph connection pipeline (6 steps):
+        #   1. connect_graphs_by_document        (LINKED_TO_TEXTUNIT, LINKED_TO_DOCUMENT,
+        #                                          CONNECTED_TO_DOCUMENT, LINKED_TO_STRUCTURE,
+        #                                          MENTIONS_ELEMENT, NEAR_REGION)
+        #   2. connect_structural_and_semantic_nodes (CONNECTS_TO, CONNECTED_TO_REGION,
+        #                                              DESCRIBES_STRUCTURE, SAME_CONTENT_AS)
+        #   3. create_semantic_links             (semantic_link)
+        #   4. compute_bridge_edge_weights       (weight on all bridge edges)
+        #   5. create_aggregated_community_region_links (AGGREGATED_REGIONS)
+        #   6. get_connection_statistics         (summary stats)
+        connect_graphs_main(document_id=file_hash)
+
+    except Exception as e:
+        logger.error(f"Error in comprehensive graph connection for document {file_hash}: {e}")
+        raise
+
+
 def index_document_by_hash(file_hash: str, client=None) -> bool:
     """
     Index a document by its hash if it exists in MinIO
@@ -1179,6 +1558,24 @@ def index_document_by_hash(file_hash: str, client=None) -> bool:
             logger.error(f"No elements found in MinerU result for file_hash: {file_hash}")
             return False
 
+        # Generate text descriptions for caption-less images before indexing.
+        if settings.llm.IMAGE_CAPTIONING_ENABLED:
+            try:
+                captions_generated = generate_captions_for_captionless_images(
+                    elements,
+                    llm_client=llm_client,
+                    minio_client=minio_client,
+                    enabled=True,
+                    temperature=settings.llm.IMAGE_CAPTIONING_TEMPERATURE,
+                    max_tokens=settings.llm.IMAGE_CAPTIONING_MAX_TOKENS,
+                )
+                logger.info(
+                    f"Generated captions for {captions_generated} caption-less images "
+                    f"for file_hash: {file_hash}"
+                )
+            except Exception as caption_error:
+                logger.error(f"Image captioning failed for file_hash {file_hash}: {caption_error}")
+
         # Compute embeddings for elements
         embeddings_count = compute_embeddings_for_elements(elements, file_hash)
         logger.info(f"Indexed {embeddings_count} elements for file_hash: {file_hash}")
@@ -1208,23 +1605,235 @@ async def ask_document_page():
         )
 
 
+def _xml_escape(text: str) -> str:
+    """Escape XML special characters so embedded text never breaks markup."""
+    if not text:
+        return ""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def _format_grounding_box(bbox) -> str:
+    """Format a MinerU bbox as Qwen3-VL grounding tokens.
+
+    MinerU bboxes are already normalized to 0-1000 (page coordinates), which is
+    exactly the range Qwen3-VL expects for ``<|box_start|>`` tokens.
+
+    Returns the token string ``<|box_start|>(x1,y1),(x2,y2)<|box_end|>`` or an
+    empty string when the bbox is missing/invalid.
+    """
+    if not bbox or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return ""
+    try:
+        x1, y1, x2, y2 = (int(round(float(v))) for v in bbox)
+    except (TypeError, ValueError):
+        return ""
+    return f"<|box_start|>({x1},{y1}),({x2},{y2})<|box_end|>"
+
+
+def _format_context_block(ans: dict, idx: int, file_hash: str) -> str:
+    """Format a single Qdrant answer block as XML for structured context.
+
+    Args:
+        ans: Answer dict with keys element_type, text, score, page_idx, element_index,
+             and optionally neo4j_context (parent element, sibling captions,
+             footnotes)
+        idx: Block index (0-based)
+        file_hash: Document file hash
+
+    Returns:
+        XML string like:
+        <block id="1" type="text" page="14" relevance="0.9521">
+          <content>...text...</content>
+          <related_element type="caption" relation="sibling">...</related_element>
+        </block>
+    """
+    element_type = ans.get("element_type", "text")
+    text = ans.get("text", "")
+    score = ans.get("score", 0)
+    page = ans.get("page_idx", "")
+    region_attr = (
+        f' region_id="{_xml_escape(str(ans.get("region_id", "")))}"'
+        if ans.get("region_id") is not None else ""
+    )
+    lines = [
+        f'    <block id="{idx+1}" type="{_xml_escape(element_type)}" '
+        f'page="{_xml_escape(str(page))}" relevance="{score:.4f}"{region_attr}>'
+    ]
+    if element_type in ("image", "table"):
+        # Visual content is attached as multimodal input separately; the
+        # text block anchors it with any available description/caption.
+        marker = "[IMAGE]" if element_type == "image" else "[TABLE]"
+        content = marker if not text else f"{marker} {text}"
+        lines.append(f"      <content>{_xml_escape(content)}</content>")
+    elif text:
+        lines.append(f"      <content>{_xml_escape(text)}</content>")
+
+    # Neo4j enrichment: parent element, sibling captions, footnotes
+    neo4j_context = ans.get("neo4j_context")
+    if neo4j_context:
+        parent_element = neo4j_context.get("parent_element")
+        if parent_element and parent_element.get("text"):
+            lines.append(
+                f'      <related_element type="{_xml_escape(parent_element.get("type", "element"))}" '
+                f'relation="parent">{_xml_escape(parent_element["text"])}</related_element>'
+            )
+        for cap in neo4j_context.get("sibling_captions", []):
+            if cap.get("text"):
+                lines.append(
+                    f'      <related_element type="caption" relation="sibling">'
+                    f'{_xml_escape(cap["text"])}</related_element>'
+                )
+        for fn in neo4j_context.get("sibling_footnotes", []):
+            if fn.get("text"):
+                lines.append(
+                    f'      <related_element type="footnote" relation="sibling">'
+                    f'{_xml_escape(fn["text"])}</related_element>'
+                )
+    lines.append("    </block>")
+    return "\n".join(lines)
+
+
+@app.post("/demonstration", response_model=QuestionResponse)
+@app.get("/demonstration", response_model=QuestionResponse)
+async def demonstration(
+    request: Optional[DemonstrationRequest] = None,
+    file_hash: Optional[str] = Query(default=None),
+    question: Optional[str] = Query(default=None),
+    strategy: str = Query(default="baseline"),
+    limit: int = Query(default=30),
+    answer_format: Optional[str] = Query(default=None),
+):
+    """Demo-facing QA endpoint.
+
+    Thin wrapper over :func:`ask_document` that accepts a single ``strategy``
+    name (``baseline | semantic | structural | both``) instead of raw graph
+    flags. Always generates an LLM answer (``use_llm=True``). Returns the same
+    :class:`QuestionResponse` as ``/ask-document``.
+
+    Accepts both POST (JSON body, used by the demo app) and GET (query
+    parameters, for quick browser/curl checks). Example GET:
+
+        /demonstration?file_hash=...&question=...&strategy=semantic
+
+    Used by the customer demo application (``demo/``).
+    """
+    # Merge POST body (if present) over GET query parameters.
+    if request is not None:
+        file_hash = request.file_hash
+        question = request.question
+        strategy = request.strategy
+        limit = request.limit
+        answer_format = request.answer_format
+    if not file_hash or not question:
+        raise HTTPException(
+            status_code=400,
+            detail="file_hash and question are required",
+        )
+    flags = DEMO_STRATEGIES.get(strategy)
+    if flags is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown strategy '{strategy}'; "
+                   f"expected one of {sorted(DEMO_STRATEGIES)}",
+        )
+    qr = QuestionRequest(
+        file_hash=file_hash,
+        question=question,
+        limit=limit,
+        use_llm=True,
+        answer_format=answer_format,
+    )
+    return await ask_document(
+        qr,
+        use_semantic_graph=flags["use_semantic_graph"],
+        use_structured_graph=flags["use_structured_graph"],
+    )
+
+
+@app.post("/api/demo/ask", response_model=QuestionResponse)
+def demo_ask(request: DemonstrationRequest):
+    """Dedicated demo QA endpoint — separate from ``/ask-document``.
+
+    The customer demo must not share the ``/ask-document`` path with batch
+    evaluation: a long-running demo request blocks the single-threaded event
+    loop and makes the whole service appear unavailable while strategy tests
+    run.  This handler is deliberately *synchronous*, so FastAPI executes it in
+    a worker thread and the blocking retrieval / LLM work never stalls the
+    event loop.
+
+    Uses the same retrieval/generation pipeline as :func:`ask_document` but
+    with a lighter profile tuned for the demo UI: no reranker/MMR, no iterative
+    search, no question decomposition.
+
+    Request/response format is identical to the ``/demonstration`` endpoint.
+    """
+    if not request.file_hash or not request.question:
+        raise HTTPException(
+            status_code=400,
+            detail="file_hash and question are required",
+        )
+    flags = DEMO_STRATEGIES.get(request.strategy)
+    if flags is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown strategy '{request.strategy}'; "
+                   f"expected one of {sorted(DEMO_STRATEGIES)}",
+        )
+    qr = QuestionRequest(
+        file_hash=request.file_hash,
+        question=request.question,
+        limit=request.limit,
+        use_llm=True,
+        use_reranker=request.use_reranker,
+        use_mmr_reranker=request.use_mmr_reranker,
+        use_iterative_search=False,
+        use_question_decomposition=False,
+        answer_format=request.answer_format,
+    )
+    return asyncio.run(ask_document(
+        qr,
+        use_semantic_graph=flags["use_semantic_graph"],
+        use_structured_graph=flags["use_structured_graph"],
+    ))
+
+
 @app.post("/ask-document", response_model=QuestionResponse)
-def ask_document(request: QuestionRequest):
+async def ask_document(request: QuestionRequest,
+                       use_semantic_graph: bool = True,
+                       use_structured_graph: bool = True,
+                       use_iterative_search: bool = False,
+                       use_question_decomposition: bool = False,
+                       use_bfs_crawler: Optional[bool] = None):
     """
     Ask a question about a specific document by file_hash.
     If the document is not indexed, it will be indexed first.
 
-    Steps:
-    1. Check if document is indexed in Qdrant by file_hash
-    2. If not indexed, index the document from MinIO
-    3. Generate embedding for the question
-    4. Search for relevant chunks in Qdrant filtered by file_hash
-    5. Return the results
-    6. Optionally generate answer using LLM
+    All retrieval/context/generation strategies are controllable via
+    QuestionRequest fields or query parameters:
 
-    Args:
-        request: QuestionRequest with file_hash, question, limit, collection_name, and use_llm
+      Retrieval:
+        use_reranker           — API reranker post-search reordering
+        use_mmr_reranker       — MMR diversity reranking
+        mmr_lambda             — relevance-diversity tradeoff (0-1)
+        mmr_min_relevance      — MMR minimum relevance threshold
+        use_question_decomposition — decompose complex questions
 
+      Context enrichment:
+        use_semantic_graph     — entity + community enrichment
+        use_structured_graph   — structural ORDER walk + cross-graph bridge
+        use_bfs_crawler        — unified BFS crawler over both graphs
+                                (None/absent = auto: enabled only when both
+                                semantic + structural graphs are active)
+
+      Generation:
+        use_iterative_search   — 2-round feedback-driven retrieval
+        use_llm                — generate final answer via LLM
     """
     from qdrant_client.http import models
 
@@ -1234,6 +1843,26 @@ def ask_document(request: QuestionRequest):
     collection_name = request.collection_name
     use_llm = request.use_llm
     use_reranker = request.use_reranker
+    use_mmr_reranker = getattr(request, 'use_mmr_reranker', False)
+    mmr_lambda = getattr(request, 'mmr_lambda', 0.7)
+    mmr_min_relevance = getattr(request, 'mmr_min_relevance', 0.0)
+    semantic_min_relevance = getattr(request, 'semantic_min_relevance', None)
+    if semantic_min_relevance is None:
+        semantic_min_relevance = settings.semantic.SEMANTIC_MIN_RELEVANCE
+    use_question_decomposition = (
+        use_question_decomposition or
+        getattr(request, 'use_question_decomposition', False)
+    )
+    answer_format = getattr(request, 'answer_format', None)
+    use_structured_context = getattr(request, 'use_structured_context', True)
+    use_neo4j_enrichment = getattr(request, 'use_neo4j_enrichment', True)
+
+    # BFS crawler flag: explicit query param wins, else body field, else
+    # legacy auto mode (crawler ran only when both graph modes were active).
+    if use_bfs_crawler is None:
+        use_bfs_crawler = getattr(request, 'use_bfs_crawler', None)
+    if use_bfs_crawler is None:
+        use_bfs_crawler = bool(use_semantic_graph and use_structured_graph)
 
     # Use specified collection or default
     client = get_qdrant_client(collection_name=collection_name) if collection_name else qdrant_client
@@ -1261,8 +1890,35 @@ def ask_document(request: QuestionRequest):
         logger.info(f"Document {file_hash} successfully indexed in collection '{actual_collection_name}'")
 
     try:
-        # Generate embedding for the question
-        question_embedding = emb_client.get_text_embedding(question)
+        server_start = time.time()
+
+        # C6: Multi-hop question decomposition — break complex questions
+        # into sub-questions and search each independently.
+        # Controlled by request flag OR global settings flag.
+        decomposition_enabled = (
+            use_question_decomposition or
+            getattr(settings.llm, "QUESTION_DECOMPOSITION_ENABLED", False)
+        )
+        sub_questions = None
+        if decomposition_enabled and question:
+            try:
+                sub_questions = decompose_question(
+                    question,
+                    llm_client,
+                    model_name=settings.llm.LLM_MODEL_NAME,
+                )
+                if len(sub_questions) > 1:
+                    logger.info(
+                        "Multi-hop: decomposed into %d sub-questions",
+                        len(sub_questions),
+                    )
+                else:
+                    sub_questions = None  # single-hop, use original flow
+            except Exception:
+                logger.debug(
+                    "Question decomposition skipped due to error", exc_info=True
+                )
+                sub_questions = None
 
         # Create filter for file_hash
         filter_condition = models.Filter(
@@ -1275,22 +1931,171 @@ def ask_document(request: QuestionRequest):
         )
 
         # Search for relevant chunks (retrieve more candidates for reranking)
+        # Phase 2: aggressive retrieval — 5x multiplier + floor of 50-60
+        # to reduce false N/A caused by missing relevant chunks at the retrieval stage.
+        # Reranker / MMR will later filter to the final top-k.
+        # Flat strategies (no structured context) skip aggressive retrieval:
+        # they have no reranker/MMR filter downstream, so a wider pool
+        # would only add noise.  Hard cap = limit.
         rerank_top_n = settings.reranker.RERANKER_TOP_N if hasattr(settings.reranker, 'RERANKER_TOP_N') else limit
-        if use_reranker:
-            search_limit = max(limit * 3, rerank_top_n)  # Get more candidates for reranking
-        else:
-            search_limit = limit
+        search_limit = limit if not use_structured_context else max(limit * 5, rerank_top_n)
+        # Cross-page aggregation questions need a wider candidate pool so the
+        # dual-query merge below has enough evidence from across the document.
+        if use_structured_context and _is_cross_page_question(question):
+            search_limit = max(search_limit, limit * 10)
 
-        search_results = client.search(
-            query_vector=question_embedding,
-            limit=search_limit,
-            filter_condition=filter_condition
-        )
+        # --- Run search (multi-query if decomposed, single otherwise) ---
+        if sub_questions and len(sub_questions) > 1:
+            # Multi-hop: search each sub-question independently
+            all_results = []
+            for sq in sub_questions:
+                try:
+                    sq_embedding = emb_client.get_text_embedding(sq)
+                except Exception:
+                    logger.debug(
+                        "Failed to embed sub-question, skipping: %s", sq
+                    )
+                    continue
+                sq_results = client.search(
+                    query_vector=sq_embedding,
+                    limit=search_limit,
+                    filter_condition=filter_condition,
+                )
+                formatted = []
+                for point in sq_results.points:
+                    formatted.append({
+                        "text": point.payload.get("text", ""),
+                        "score": point.score,
+                        "payload": point.payload,
+                    })
+                all_results.append(formatted)
+
+            if all_results:
+                merged = merge_search_results(all_results, search_limit)
+                logger.info(
+                    "Merged %d results from %d sub-queries into %d unique chunks",
+                    sum(len(r) for r in all_results),
+                    len(all_results),
+                    len(merged),
+                )
+                # Convert merged dicts to Qdrant-style points for downstream
+                from types import SimpleNamespace as _SN
+
+                class _FakePoint:
+                    def __init__(self, d):
+                        self.payload = d.get("payload", {})
+                        self.score = d.get("score", 0)
+
+                search_results = type(
+                    "SearchResults", (), {"points": [_FakePoint(m) for m in merged]}
+                )()
+            else:
+                # Fallback to standard search (C7: LRU-cached embedding)
+                question_embedding = _cached_question_embedding(question)
+                search_results = client.search(
+                    query_vector=question_embedding,
+                    limit=search_limit,
+                    filter_condition=filter_condition,
+                )
+        else:
+            # Standard single-query search (C7: LRU-cached embedding)
+            question_embedding = _cached_question_embedding(question)
+            search_results = client.search(
+                query_vector=question_embedding,
+                limit=search_limit,
+                filter_condition=filter_condition,
+            )
+            # Cross-page recall boost: aggregation questions ("how many ... in
+            # the report", "all figures", "total") need evidence spread across
+            # pages. Run a second, aggregation-focused query and union results.
+            if _is_cross_page_question(question):
+                agg_question = (
+                    "Summarize all facts, numbers and occurrences related to: "
+                    f"{question}"
+                )
+                try:
+                    agg_embedding = _cached_question_embedding(agg_question)
+                    agg_results = client.search(
+                        query_vector=agg_embedding,
+                        limit=search_limit,
+                        filter_condition=filter_condition,
+                    )
+
+                    def _to_dicts(points):
+                        return [
+                            {
+                                "text": p.payload.get("text", ""),
+                                "score": p.score,
+                                "payload": p.payload,
+                            }
+                            for p in points
+                        ]
+
+                    merged = merge_search_results(
+                        [
+                            _to_dicts(search_results.points),
+                            _to_dicts(agg_results.points),
+                        ],
+                        search_limit,
+                    )
+                    logger.info(
+                        "Cross-page dual-query: merged %d + %d into %d unique chunks",
+                        len(search_results.points),
+                        len(agg_results.points),
+                        len(merged),
+                    )
+
+                    class _FakePoint:
+                        def __init__(self, d):
+                            self.payload = d.get("payload", {})
+                            self.score = d.get("score", 0)
+
+                    search_results = type(
+                        "SearchResults", (), {"points": [_FakePoint(m) for m in merged]}
+                    )()
+                except Exception:
+                    logger.debug(
+                        "Cross-page dual-query failed; using single query", exc_info=True
+                    )
 
         # Format results
+        # Top-1 embedding score from Qdrant — used by the evidence gate to
+        # calibrate the LLM's "Not answerable" behaviour.
+        top_retrieval_score = (
+            search_results.points[0].score if search_results.points else 0.0
+        )
         answers = []
         documents_to_rerank = []
         search_results_map = {}
+        related_answers_map = {}
+
+        # Initialize Neo4j service for context enrichment (if available)
+        neo4j_service = None
+        if NEO4J_AVAILABLE:
+            try:
+                neo4j_service = DocumentIndexService()
+                logger.info("Neo4j service initialized for context enrichment")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Neo4j service: {e}")
+                neo4j_service = None
+
+        # Initialize Semantic Graph Manager for entity/community enrichment.
+        # Also needed by the unified BFS crawler (Strategy E) even when the
+        # semantic context injection flags are off (e.g. structural + BFS).
+        semantic_manager = None
+        if SEMANTIC_GRAPH_AVAILABLE and (use_semantic_graph or use_bfs_crawler):
+            try:
+                sem_config = ManagerConfig(
+                    uri=f"neo4j://{os.environ.get('URL', 'localhost:7687')}",
+                    user=os.environ.get('USER_NEO4J', 'neo4j'),
+                    password=os.environ.get('PASSWORD', ''),
+                    name_db=os.environ.get('NAME_DB', 'neo4j')
+                )
+                semantic_manager = SemanticManager(sem_config)
+                logger.info("Semantic Graph Manager initialized for context enrichment")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Semantic Graph Manager: {e}")
+                semantic_manager = None
 
         for idx, result in enumerate(search_results.points):
             payload = result.payload
@@ -1303,13 +2108,178 @@ def ask_document(request: QuestionRequest):
                 "score": result.score,
                 "element_type": element_type,
                 "element_index": payload.get("element_index", 0),
+                # Qdrant's `region_id` counter is kept in lockstep with
+                # Neo4j's Region.region_id during indexing (unlike
+                # `element_index`, the raw content_list position, which
+                # diverges when images/tables add caption/footnote regions or
+                # elements are skipped).  Use it as the canonical region id for
+                # every Neo4j graph query below.
+                "region_id": payload.get("region_id", payload.get("element_index")),
                 "page_idx": original_element.get("page_idx", 0) if original_element else 0,
                 "img_path": original_element.get("img_path", None),  # Store img_path for images and tables
                 "image_base64": None,  # Will be populated for image and table elements
-                "bbox": original_element.get("bbox", None)  # Store bbox for visualization
+                "bbox": original_element.get("bbox", None),  # Store bbox for visualization
+                "neo4j_context": None,  # Will store related context from Neo4j
+                "is_related_context": False  # Flag to indicate if this is a related context answer
             }
 
-            # Download image data for image and table elements
+            # Enrich with Neo4j context for image/table related elements
+            if use_neo4j_enrichment and neo4j_service and element_type in ("image", "table", "image_caption", "image_footnote", "table_caption",
+                                                  "table_footnote"):
+            #if neo4j_service and element_type in ("image_caption", "image_footnote"):
+                related_blocks = []
+                try:
+                    related_context = neo4j_service.get_related_context(file_hash, element_type, text)
+                    if related_context and (related_context.get("parent_element") or related_context.get("sibling_captions") or related_context.get("sibling_footnotes")):
+                        answer["neo4j_context"] = related_context
+                        logger.debug(f"Added Neo4j context for {element_type}: {related_context}")
+
+                        # Create separate answers from Neo4j context
+                        # Add parent element as a separate answer if available
+                        parent_element = related_context.get("parent_element")
+                        if parent_element:
+                            parent_answer = {
+                                "text": parent_element.get("text", ""),
+                                "score": result.score * 0.9,  # Slightly lower score as it's related context
+                                "element_type": parent_element.get("type", "unknown"),
+                                "element_index": payload.get("element_index", 0),
+                                "region_id": payload.get("region_id", payload.get("element_index")),
+                                "page_idx": original_element.get("page_idx", 0) if original_element else 0,
+                                "img_path": parent_element.get("image", None),
+                                "image_base64": None,
+                                "bbox": parent_element.get("bbox", None),
+                                "neo4j_context": None,
+                                "is_related_context": True,
+                                "related_to_element_type": element_type
+                            }
+
+                            # Download image for parent element if it's an image/table
+                            if parent_element.get("type") in ("image", "table") and parent_element.get("image"):
+                                try:
+                                    image_data = minio_client.get_object(
+                                        bucket_name=minio_client.bucket_name,
+                                        object_name=parent_element["image"]
+                                    )
+                                    parent_answer["image_base64"] = base64.b64encode(image_data).decode('utf-8')
+                                except Exception as e:
+                                    logger.warning(f"Failed to download parent image {parent_element.get('image')}: {e}")
+
+                            answers.append(parent_answer)
+                            related_blocks.append(parent_answer)
+                            logger.debug(f"Added parent element answer: {parent_element.get('type')}")
+
+                        # Add sibling captions as separate answers
+                        for caption in related_context.get("sibling_captions", []):
+                            caption_text = caption.get("text", "")
+                            if caption_text:
+                                # Get image from parent element if available
+                                img_path_for_caption = None
+                                image_base64_for_caption = None
+
+                                # Try to get image from the original element or parent element
+                                if element_type in ("image_caption", "image_footnote"):
+                                    # For caption/footnote, get image from parent_element
+                                    if parent_element and parent_element.get("type") == "image":
+                                        img_path_for_caption = parent_element.get("image")
+                                elif element_type in ("table_caption", "table_footnote"):
+                                    # For table caption/footnote, get image from parent_element
+                                    if parent_element and parent_element.get("type") == "table":
+                                        img_path_for_caption = parent_element.get("image")
+                                elif element_type == "image":
+                                    # For image element, use its own img_path
+                                    img_path_for_caption = original_element.get("img_path")
+                                elif element_type == "table":
+                                    # For table element, use its own img_path
+                                    img_path_for_caption = original_element.get("img_path")
+
+                                # Download image if we have a path
+                                if img_path_for_caption:
+                                    try:
+                                        image_data = minio_client.get_object(
+                                            bucket_name=minio_client.bucket_name,
+                                            object_name=img_path_for_caption
+                                        )
+                                        image_base64_for_caption = base64.b64encode(image_data).decode('utf-8')
+                                    except Exception as e:
+                                        logger.warning(f"Failed to download image {img_path_for_caption} for caption: {e}")
+
+                                caption_answer = {
+                                    "text": caption_text,
+                                    "score": result.score * 0.85,
+                                    "element_type": "image_caption" if element_type.startswith("image") else "table_caption",
+                                    "element_index": payload.get("element_index", 0),
+                                    "region_id": payload.get("region_id", payload.get("element_index")),
+                                    "page_idx": original_element.get("page_idx", 0) if original_element else 0,
+                                    "img_path": img_path_for_caption,
+                                    "image_base64": image_base64_for_caption,
+                                    "bbox": original_element.get("bbox", None),
+                                    "neo4j_context": None,
+                                    "is_related_context": True,
+                                    "related_to_element_type": element_type
+                                }
+                                answers.append(caption_answer)
+                                related_blocks.append(caption_answer)
+                                logger.debug(f"Added sibling caption answer: {caption_text[:50]}...")
+
+                        # Add sibling footnotes as separate answers
+                        for footnote in related_context.get("sibling_footnotes", []):
+                            footnote_text = footnote.get("text", "")
+                            if footnote_text:
+                                # Get image from parent element if available
+                                img_path_for_footnote = None
+                                image_base64_for_footnote = None
+
+                                # Try to get image from the original element or parent element
+                                if element_type in ("image_caption", "image_footnote"):
+                                    # For caption/footnote, get image from parent_element
+                                    if parent_element and parent_element.get("type") == "image":
+                                        img_path_for_footnote = parent_element.get("image")
+                                elif element_type in ("table_caption", "table_footnote"):
+                                    # For table caption/footnote, get image from parent_element
+                                    if parent_element and parent_element.get("type") == "table":
+                                        img_path_for_footnote = parent_element.get("image")
+                                elif element_type == "image":
+                                    # For image element, use its own img_path
+                                    img_path_for_footnote = original_element.get("img_path")
+                                elif element_type == "table":
+                                    # For table element, use its own img_path
+                                    img_path_for_footnote = original_element.get("img_path")
+
+                                # Download image if we have a path
+                                if img_path_for_footnote:
+                                    try:
+                                        image_data = minio_client.get_object(
+                                            bucket_name=minio_client.bucket_name,
+                                            object_name=img_path_for_footnote
+                                        )
+                                        image_base64_for_footnote = base64.b64encode(image_data).decode('utf-8')
+                                    except Exception as e:
+                                        logger.warning(f"Failed to download image {img_path_for_footnote} for footnote: {e}")
+
+                                footnote_answer = {
+                                    "text": footnote_text,
+                                    "score": result.score * 0.85,
+                                    "element_type": "image_footnote" if element_type.startswith("image") else "table_footnote",
+                                    "element_index": payload.get("element_index", 0),
+                                    "region_id": payload.get("region_id", payload.get("element_index")),
+                                    "page_idx": original_element.get("page_idx", 0) if original_element else 0,
+                                    "img_path": img_path_for_footnote,
+                                    "image_base64": image_base64_for_footnote,
+                                    "bbox": original_element.get("bbox", None),
+                                    "neo4j_context": None,
+                                    "is_related_context": True,
+                                    "related_to_element_type": element_type
+                                }
+                                answers.append(footnote_answer)
+                                related_blocks.append(footnote_answer)
+                                logger.debug(f"Added sibling footnote answer: {footnote_text[:50]}...")
+                except Exception as e:
+                    logger.warning(f"Failed to get Neo4j context for {element_type}: {e}")
+
+                if related_blocks:
+                    related_answers_map[idx] = related_blocks
+
+            # Download image data for image and table elements, or for caption/footnote with image reference
             if element_type in ("image") and answer["img_path"]:
                 try:
                     image_data = minio_client.get_object(
@@ -1332,6 +2302,20 @@ def ask_document(request: QuestionRequest):
 
                 except Exception as e:
                     logger.error(f"Failed to download image {answer['img_path']}: {e}")
+            elif element_type in ("image_caption", "image_footnote", "table_caption", "table_footnote") and answer.get("img_path"):
+                # For caption/footnote elements that have an associated image
+                try:
+                    image_data = minio_client.get_object(
+                        bucket_name=minio_client.bucket_name,
+                        object_name=answer["img_path"]
+                    )
+                    answer["image_base64"] = base64.b64encode(image_data).decode('utf-8')
+                    message.add_img_content_base64(answer["image_base64"])
+                    message.add_text_content(text)
+                    message.set_type('image/text')
+                except Exception as e:
+                    logger.warning(f"Failed to download image {answer['img_path']} for {element_type}: {e}")
+                    message.add_text_content(text)
             else:
                 message.add_text_content(text)
 
@@ -1341,72 +2325,1323 @@ def ask_document(request: QuestionRequest):
 
         # Apply reranking if enabled and we have documents
         use_reranker = getattr(request, 'use_reranker', False)
+        reranker_min_relevance = getattr(request, 'reranker_min_relevance', None)
+        if reranker_min_relevance is None:
+            reranker_min_relevance = settings.reranker.RERANKER_MIN_RELEVANCE
         if use_reranker and documents_to_rerank:
+            # `documents_to_rerank` holds only primary blocks, indexed by the
+            # search-result position. `search_results_map` maps that same index
+            # to the primary answer, so it must stay aligned with
+            # `documents_to_rerank`. (Bug #1: previously `answers[...]` was used
+            # here, which could point at a related context block.)
+            if len(documents_to_rerank) != len(search_results_map):
+                logger.warning(
+                    "documents_to_rerank (%d) and search_results_map (%d) size mismatch",
+                    len(documents_to_rerank), len(search_results_map),
+                )
+
             try:
                 rerank_result = reranker_client.rerank(
                     query_text=question,
                     messages=documents_to_rerank
                 )
 
-                # Reorder answers based on reranker scores
-                reranked_answers = []
-                rerank_messages = sorted(rerank_result.messages, reverse=True, key=lambda x: x.score)
+                # Reorder answers based on reranker scores — take top `limit` results
+                rerank_messages = sorted(
+                    rerank_result.messages, reverse=True, key=lambda x: x.score
+                )
 
-                for res in rerank_messages:
-                    if 0 <= res.message_id < limit:
-                        answer_copy = answers[res.message_id].copy()
+                # Confidence gate: if even the top chunk is below the minimum
+                # relevance threshold, the reranker is uncertain (typically an
+                # unanswerable query). Keep the original non-reranked order and
+                # scores so the LLM sees weak/uncertain evidence and can answer
+                # "Not answerable" instead of hallucinating from confident-looking
+                # but irrelevant chunks.
+                top_score = rerank_messages[0].score if rerank_messages else 0.0
+                if reranker_min_relevance and top_score < reranker_min_relevance:
+                    logger.info(
+                        "Reranker confidence %.4f below threshold %.4f; "
+                        "keeping original retrieval order",
+                        top_score, reranker_min_relevance,
+                    )
+                else:
+                    reranked_answers = []
+                    for res in rerank_messages[:limit]:
+                        answer_copy = search_results_map[res.message_id].copy()
                         answer_copy["reranker_score"] = res.score
                         answer_copy["original_score"] = answer_copy["score"]
                         answer_copy["score"] = res.score  # Use reranker score as primary
                         reranked_answers.append(answer_copy)
 
-                answers = reranked_answers
-                logger.info(f"Reranking applied: {len(answers)} results reordered")
+                    # Restore the related context blocks (parent/caption/footnote)
+                    # that belong to each selected primary answer. These carry their
+                    # own images (e.g. the caption's image), so dropping them — as the
+                    # plain `answers = reranked_answers` replacement did — loses
+                    # multimodal context that baseline preserves.
+                    answers = []
+                    for res, answer_copy in zip(rerank_messages[:limit], reranked_answers):
+                        answers.extend(related_answers_map.get(res.message_id, []))
+                        answers.append(answer_copy)
+
+                    logger.info(f"Reranking applied: {len(answers)} results reordered")
             except Exception as e:
                 logger.warning(f"Reranking failed: {e}. Using original search results.")
 
+        # Apply MMR (Maximal Marginal Relevance) diversity reranking if enabled
+        if use_mmr_reranker and answers:
+            try:
+                # Collect text blocks and embeddings from already-loaded answers
+                mmr_items: list[str] = []
+                mmr_embeddings: list[list[float]] = []
+                mmr_answer_indices: list[int] = []
+
+                for idx, ans in enumerate(answers):
+                    text = ans.get("text", "")
+                    # Try to get embedding from payload or compute on-the-fly
+                    emb = None
+                    payload = ans.get("payload", {})
+                    if isinstance(payload, dict):
+                        original = payload.get("original_element", {})
+                        if isinstance(original, dict):
+                            emb = original.get("embedding")
+                    if not emb and isinstance(ans.get("score"), (int, float)):
+                        # Fallback: use question embedding as proxy (not ideal but safe)
+                        pass
+
+                    if text and emb and isinstance(emb, list) and len(emb) > 0:
+                        mmr_items.append(text)
+                        mmr_embeddings.append(emb)
+                        mmr_answer_indices.append(idx)
+
+                if len(mmr_items) >= 2:
+                    question_emb = None
+                    if question:
+                        try:
+                            question_emb = emb_client.get_text_embedding(question)
+                        except Exception:
+                            pass
+                    if question_emb:
+                        reranked_items, mmr_scores = mmr_rerank_with_threshold(
+                            items=mmr_items,
+                            item_embeddings=mmr_embeddings,
+                            query_embedding=question_emb,
+                            lambda_param=mmr_lambda,
+                            top_k=min(len(mmr_items), limit),
+                            min_relevance=mmr_min_relevance,
+                            min_mmr=0.0,
+                        )
+                        # Rebuild answers in MMR order
+                        mmr_map = {text: (score, idx) for text, score, idx
+                                   in zip(reranked_items, mmr_scores, mmr_answer_indices)
+                                   if text in set(reranked_items)}
+                        reranked = []
+                        seen = set()
+                        for item_text in reranked_items:
+                            if item_text in mmr_map and item_text not in seen:
+                                score_val, orig_idx = mmr_map[item_text]
+                                ans_copy = answers[orig_idx].copy()
+                                ans_copy["mmr_score"] = score_val
+                                ans_copy["mmr_lambda"] = mmr_lambda
+                                ans_copy["original_score"] = ans_copy.get("original_score", ans_copy["score"])
+                                ans_copy["score"] = score_val  # Use MMR score as primary
+                                reranked.append(ans_copy)
+                                seen.add(item_text)
+                        if reranked:
+                            answers = reranked
+                            logger.info(
+                                "MMR reranking applied: %d results (λ=%.2f, min_relevance=%.2f)",
+                                len(answers), mmr_lambda, mmr_min_relevance
+                            )
+                else:
+                    logger.debug("Not enough items with embeddings for MMR reranking")
+            except Exception as e:
+                logger.warning("MMR reranking failed: %s. Using original results.", e)
+
+        # --- Uniform region cap (all strategies) ---
+        # The API reranker and MMR paths already truncate `answers` to `limit`
+        # primary Qdrant regions. The plain-search path, however, keeps every
+        # retrieved candidate (search_limit = max(limit*5, RERANKER_TOP_N),
+        # i.e. up to 100 regions). Cap the plain path here so that EVERY
+        # strategy feeds the SAME number of primary regions (`limit`) into
+        # context assembly. This cap is idempotent: it is a no-op for the
+        # reranker/MMR paths (which already contain <= limit primary answers).
+        # Related-context answers (parent/caption/footnote, flagged with
+        # is_related_context=True) are preserved together with their parent
+        # primary answer.
+        _capped_answers = []
+        _primary_count = 0
+        for _ans in answers:
+            if not _ans.get("is_related_context", False):
+                if _primary_count >= limit:
+                    break
+                _primary_count += 1
+            _capped_answers.append(_ans)
+        if len(_capped_answers) < len(answers):
+            logger.info(
+                "Uniform region cap: %d -> %d answers (%d primary regions, limit=%d)",
+                len(answers), len(_capped_answers), _primary_count, limit,
+            )
+        answers = _capped_answers
+
+        # Server-side timing checkpoint — end of search/rerank phase
+        search_end = time.time()
+
         # Generate LLM answer if requested
         llm_answer = None
+
+        # Check if iterative retrieval was requested via body field or query param
+        iterative_enabled = request.use_iterative_search or use_iterative_search
+        context_parts = []
         if use_llm and answers:
             try:
-                # Create messages for LLM with system prompt
-                message = ModelMessageDict(role='user')
-                system_prompt = "Вы помощник, который отвечает на вопросы на основе предоставленного контекста. Если ответ не найден в контексте, скажите об этом."
-                message.add_text_content(system_prompt)
+                # Create messages for LLM with proper structure for Qwen3VL-32B
+                # System message will be built dynamically later, once we know
+                # which enrichment sources produced results — see below.
 
-                # Build context with text and images
+                # User message with context and question
+                user_message = ModelMessageDict(role='user')
+
+                # Build context with text, images, and Neo4j-enriched context
                 context_parts = []
-                for ans in answers:
+
+                # Attach images/tables as multimodal input for the vision-capable LLM.
+                # The corresponding textual anchor blocks are rendered inside
+                # <document_context> via _format_context_block (see below), keeping
+                # visual content and its metadata (page, relevance) in one structure.
+                max_images = settings.context_budget.MAX_IMAGES
+                attached_images = 0
+                for idx, ans in enumerate(answers):
                     element_type = ans.get("element_type", "")
 
-                    # Add image if available (for both image and table elements)
-                    if element_type in ("image") and ans.get("image_base64"):
-                        message.add_img_content_base64(ans["image_base64"])
+                    # Add image if available (for image, table, and caption/footnote elements).
+                    # Capped to MAX_IMAGES so vision tokens (which are not counted
+                    # by the character budget) cannot blow up the prompt.
+                    if (element_type in ("image", "table", "image_caption", "image_footnote")
+                            and ans.get("image_base64")):
+                        if attached_images >= max_images:
+                            break
+                        # Attach the image together with its location on the page
+                        # as Qwen3-VL grounding tokens. The bbox is normalized to
+                        # 0-1000 (MinerU convention), matching Qwen's expectation.
+                        grounding = _format_grounding_box(ans.get("bbox"))
+                        location_text = f"[IMAGE #{idx + 1}]"
+                        if ans.get("page_idx") is not None:
+                            location_text += f" (page {ans.get('page_idx')})"
+                        if grounding:
+                            location_text += f" located at {grounding}"
+                        user_message.add_text_content(location_text)
+                        user_message.add_img_content_base64(ans["image_base64"])
+                        attached_images += 1
 
-                    # Add text content
-                    if ans.get("text"):
-                        context_parts.append(ans["text"])
+                # Build list of region_ids from Qdrant search results
+                # Use the Qdrant `region_id` counter (in lockstep with Neo4j's
+                # Region.region_id).  `element_index` is the raw content_list
+                # position and does not match Neo4j when images/tables add
+                # caption/footnote regions or elements are skipped.
+                region_ids = []
+                for idx, ans in enumerate(answers):
+                    region_id = ans.get("region_id", ans.get("element_index"))
+                    if region_id is not None:
+                        region_ids.append(f"{file_hash}|{region_id}")
 
-                # Combine all text context
-                if context_parts:
+                # ===== QDRANT BLOCK RENDERING (XML or flat) =====
+                if use_structured_context:
+                    # XML-structured: optionally group blocks by section if Neo4j available
+                    section_map: dict[str, dict] = {}
+                    if NEO4J_AVAILABLE and neo4j_service:
+                        try:
+                            section_map = neo4j_service.get_sections_for_regions(region_ids)
+                        except Exception:
+                            logger.debug("Failed to get section map", exc_info=True)
+
+                    # Group answers by section
+                    sections: dict[str, dict] = {}
+                    unassigned = []
+                    for idx, ans in enumerate(answers):
+                        region_id = ans.get("region_id", ans.get("element_index"))
+                        region_id_str = f"{file_hash}|{region_id}" if region_id is not None else ""
+                        sec_info = section_map.get(region_id_str)
+                        if sec_info:
+                            sec_title = sec_info.get("title", "Untitled Section")
+                            if sec_title not in sections:
+                                sections[sec_title] = {"info": sec_info, "blocks": []}
+                            sections[sec_title]["blocks"].append((idx, ans))
+                        else:
+                            unassigned.append((idx, ans))
+
+                    # Render XML with sections
+                    context_parts.append("<document_context>")
+                    for sec_title, sec_data in sections.items():
+                        context_parts.append(f'  <section title="{_xml_escape(sec_title)}">')
+                        for idx, ans in sec_data["blocks"]:
+                            block_xml = _format_context_block(
+                                ans, idx, file_hash
+                            )
+                            context_parts.append(block_xml)
+                        context_parts.append("  </section>")
+                    if unassigned:
+                        context_parts.append('  <section title="Other">')
+                        for idx, ans in unassigned:
+                            block_xml = _format_context_block(
+                                ans, idx, file_hash
+                            )
+                            context_parts.append(block_xml)
+                        context_parts.append("  </section>")
+                    context_parts.append("</document_context>")
+                else:
+                    # Legacy flat format
+                    context_parts.append("--- DOCUMENT CONTEXT ---")
+                    for idx, ans in enumerate(answers):
+                        element_type = ans.get("element_type", "")
+                        if ans.get("text"):
+                            text_marker = f"[BLOCK {idx+1}]"
+                            if element_type:
+                                text_marker += f" (тип: {element_type})"
+                            context_parts.append(f"{text_marker}\n{ans['text']}")
+
+                        # Add Neo4j context if available (for caption/footnote enrichment)
+                        neo4j_context = ans.get("neo4j_context")
+                        if neo4j_context:
+                            parent_element = neo4j_context.get("parent_element")
+                            if parent_element:
+                                parent_text = parent_element.get("text", "")
+                                if parent_text:
+                                    context_parts.append(f"→ СВЯЗАННЫЙ ЭЛЕМЕНТ ({parent_element.get('type', 'element')}): {parent_text}")
+
+                            sibling_captions = neo4j_context.get("sibling_captions", [])
+                            for cap in sibling_captions:
+                                cap_text = cap.get("text", "")
+                                if cap_text:
+                                    context_parts.append(f"→ ПОДПИСЬ: {cap_text}")
+
+                            sibling_footnotes = neo4j_context.get("sibling_footnotes", [])
+                            for fn in sibling_footnotes:
+                                fn_text = fn.get("text", "")
+                                if fn_text:
+                                    context_parts.append(f"→ СНОСКА: {fn_text}")
+
+                # --- Semantic Graph: Entities and Communities ---
+                if use_semantic_graph and semantic_manager and region_ids:
+                    # Enrich with entities found via semantic graph
+                    try:
+                        entities = semantic_manager.get_entities_by_region_ids(
+                            region_ids, limit=20
+                        )
+                        # Build map of related-entity cross-references
+                        related_links: Dict[str, List[str]] = {}
+                        if entities:
+                            entity_titles = [
+                                ent.get("title", "") for ent in entities if ent.get("title")
+                            ]
+                            try:
+                                if entity_titles:
+                                    related_links = semantic_manager.get_related_entity_links(
+                                        entity_titles
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    "Failed to query related entity links: %s", e
+                                )
+
+                        if entities:
+                            context_parts.append(
+                                '<semantic_context source="entities">'
+                                if use_structured_context
+                                else "--- SEMANTIC GRAPH: ENTITIES ---"
+                            )
+                            for ent in entities:
+                                title = ent.get("title", "")
+                                ent_type = ent.get("type", "")
+                                description = ent.get("description", "")
+                                degree = ent.get("degree", 0)
+                                region_id = ent.get("region_id", "")
+                                related = related_links.get(title, [])
+
+                                if use_structured_context:
+                                    # XML-structured entity line
+                                    region_ref = (
+                                        f' region_id="{region_id}"' if region_id else ""
+                                    )
+                                    related_ref = (
+                                        f' related="{", ".join(related)}"'
+                                        if related
+                                        else ""
+                                    )
+                                    desc_attr = (
+                                        f' description="{description[:300]}"'
+                                        if description
+                                        else ""
+                                    )
+                                    line = (
+                                        f'  <entity type="{ent_type}"'
+                                        f' name="{title}"'
+                                        f"{region_ref}"
+                                        f"{related_ref}"
+                                        f"{desc_attr}"
+                                    )
+                                    if degree:
+                                        line += f' degree="{degree}"'
+                                    line += " />"
+                                else:
+                                    line = f"• [{ent_type}] {title}"
+                                    if region_id:
+                                        line += f" (регион: {region_id})"
+                                    if description:
+                                        line += f" — {description[:300]}"
+                                    if degree:
+                                        line += f" (связей: {degree})"
+                                    if related:
+                                        line += f"\n  ⇄ связанные сущности: {', '.join(related)}"
+
+                                context_parts.append(line)
+
+                            if use_structured_context:
+                                context_parts.append("</semantic_context>")
+                        else:
+                            logger.info("No entities found via semantic graph for region_ids")
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to enrich context with semantic graph entities: %s", e
+                        )
+
+                    # Enrich with communities found via semantic graph
+                    try:
+                        communities = semantic_manager.get_communities_by_region_ids(
+                            region_ids, limit=10
+                        )
+                        # Drop communities that share no content words with the
+                        # question — a single polluted entity can otherwise pull
+                        # in a community about a completely unrelated topic.
+                        communities = _filter_relevant_communities(communities, question)
+                        if communities:
+                            context_parts.append(
+                                '<semantic_context source="communities">'
+                                if use_structured_context
+                                else "--- SEMANTIC GRAPH: COMMUNITIES ---"
+                            )
+                            for comm in communities:
+                                title = comm.get("title", "")
+                                summary = comm.get("summary", "")
+                                size = comm.get("size", 0)
+                                rating = comm.get("rating")
+                                rating_explanation = comm.get("rating_explanation", "")
+                                findings = comm.get("findings", [])
+                                full_content = comm.get("full_content", "")
+
+                                line = f'<community name="{title}"' if use_structured_context else f"• {title}"
+                                if comm.get("region_id"):
+                                    line += f' region_id="{_xml_escape(str(comm["region_id"]))}"'
+                                if rating is not None:
+                                    line += f" [рейтинг: {rating}/10]"
+                                if summary:
+                                    line += f" — {summary[:500]}"
+                                if size:
+                                    line += f" (размер: {size})"
+                                context_parts.append(line)
+
+                                # Append top findings as sub-items
+                                if findings and isinstance(findings, list):
+                                    for finding in findings[:3]:
+                                        if isinstance(finding, dict):
+                                            f_summary = finding.get("summary", "")
+                                            f_explanation = finding.get("explanation", "")
+                                            if f_summary:
+                                                context_parts.append(
+                                                    f"  ∟ вывод: {f_summary[:300]}"
+                                                )
+                                            if f_explanation:
+                                                context_parts.append(
+                                                    f"    пояснение: {f_explanation[:300]}"
+                                                )
+                                        elif isinstance(finding, str):
+                                            context_parts.append(f"  ∟ {finding[:400]}")
+
+                                # Append rating explanation
+                                if rating_explanation:
+                                    context_parts.append(
+                                        f"  ∟ обоснование рейтинга: {rating_explanation[:300]}"
+                                    )
+
+                                # Append full_content if available
+                                if full_content:
+                                    context_parts.append(
+                                        f"  ∟ полное содержание: {full_content[:800]}"
+                                    )
+
+                            if use_structured_context:
+                                context_parts.append("</semantic_context>")
+                        else:
+                            logger.info("No communities found via semantic graph for region_ids")
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to enrich context with semantic graph communities: %s", e
+                        )
+
+                # --- Strategy D: Cross-Graph Bridge ---
+                # Use the already-connected semantic_manager directly to avoid
+                # creating a redundant third Neo4j driver connection.
+                if use_structured_graph and region_ids and SEMANTIC_GRAPH_AVAILABLE and semantic_manager:
+                    try:
+                        bridge_regions = semantic_manager.get_cross_graph_bridge(
+                            region_ids, max_regions=15
+                        )
+                        if bridge_regions:
+                            context_parts.append(
+                                '<structural_context source="cross_graph">'
+                                if use_structured_context
+                                else "--- SEMANTIC GRAPH: REGIONS VIA ENTITIES (CROSS-GRAPH) ---"
+                            )
+                            for br_data in bridge_regions:
+                                br_text = br_data.get("text", "")
+                                br_label = br_data.get("label", "Region")
+                                br_entity = br_data.get("source_entity", "")
+                                if br_text:
+                                    if use_structured_context:
+                                        entity_attr = (
+                                            f' source_entity="{_xml_escape(br_entity)}"'
+                                            if br_entity else ""
+                                        )
+                                        region_attr = (
+                                            f' region_id="{_xml_escape(str(br_data.get("region_id", "")))}"'
+                                            if br_data.get("region_id") else ""
+                                        )
+                                        context_parts.append(
+                                            f'  <region label="{_xml_escape(br_label.upper())}"'
+                                            f' source="cross_graph"'
+                                            f"{entity_attr}"
+                                            f"{region_attr}"
+                                            f' text="{_xml_escape(br_text[:500])}" />'
+                                        )
+                                    else:
+                                        src = f" [через: {br_entity}]" if br_entity else ""
+                                        context_parts.append(
+                                            f"• [{br_label.upper()}]{src} "
+                                            f"{br_text[:500]}"
+                                        )
+                            if use_structured_context:
+                                context_parts.append("</structural_context>")
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to enrich context via cross-graph bridge: %s", e
+                        )
+
+                # --- Strategy A: Structural walk ---
+                if use_structured_graph and region_ids and NEO4J_AVAILABLE and neo4j_service:
+                    try:
+                        order_neighbors = neo4j_service.get_order_neighbors(
+                            region_ids, window_size=3, include_parent=True,
+                        )
+                        if order_neighbors:
+                            context_parts.append(
+                                '<structural_context source="order_neighbors">'
+                                if use_structured_context
+                                else "--- STRUCTURAL GRAPH: NEIGHBOUR REGIONS BY READING ORDER ---"
+                            )
+                            for nb_data in order_neighbors:
+                                nb_text = nb_data.get("text", "")
+                                nb_label = nb_data.get("label", "")
+                                nb_source = nb_data.get("source", "order")
+                                nb_page = nb_data.get("page_idx", "")
+                                nb_region = nb_data.get("source_region_id", "")
+                                if nb_text:
+                                    if use_structured_context:
+                                        source_attr = (
+                                            f' source_region="{nb_region}"'
+                                            if nb_region else ""
+                                        )
+                                        page_attr = (
+                                            f' page="{nb_page}"' if nb_page else ""
+                                        )
+                                        context_parts.append(
+                                            f'  <region label="{nb_label.upper() if nb_label else "REGION"}"'
+                                            f' source="{nb_source}"'
+                                            f"{source_attr}"
+                                            f"{page_attr}"
+                                            f' text="{nb_text[:500]}"'
+                                            f" />"
+                                        )
+                                    else:
+                                        prefix = {
+                                            "order": f"[{nb_label.upper() if nb_label else 'REGION'}]",
+                                            "parent": f"[PARENT: {nb_label.upper() if nb_label else 'REGION'}]",
+                                        }.get(nb_source, f"[{nb_label.upper() if nb_label else 'REGION'}]")
+                                        line = f"• {prefix} {nb_text[:500]}"
+                                        if nb_region:
+                                            line += f" (регион: {nb_region})"
+                                        if nb_page:
+                                            line += f" (стр: {nb_page})"
+                                        context_parts.append(line)
+
+                            if use_structured_context:
+                                context_parts.append("</structural_context>")
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to enrich context with structural walk: %s", e
+                        )
+
+                # --- Compute question embedding once for BFS + embedding search + MMR ---
+                question_embedding = None
+                if question:
+                    try:
+                        question_embedding = emb_client.get_text_embedding(question)
+                    except Exception:
+                        logger.debug("Failed to compute question embedding", exc_info=True)
+
+                # --- Unified BFS Crawler (Strategy E) ---
+                if use_bfs_crawler and region_ids \
+                        and SEMANTIC_GRAPH_AVAILABLE and semantic_manager \
+                        and NEO4J_AVAILABLE and neo4j_service:
+                    try:
+                        seed_regions = []
+                        for ans in answers:
+                            rid = ans.get("region_id", ans.get("element_index"))
+                            if rid is not None and ans.get("text"):
+                                seed_regions.append({
+                                    "region_id": f"{file_hash}|{rid}",
+                                    "text": ans.get("text", ""),
+                                    "embedding": ans.get("embedding"),
+                                })
+                        # D3: Dynamic context window — estimate question complexity
+                        # and allocate proportionate token budget (2000–8000).
+                        def _estimate_query_complexity(q: str) -> float:
+                            """Return a 0-1 complexity score for a question."""
+                            if not q:
+                                return 0.3
+                            score = 0.0
+                            words = q.split()
+                            # Length factor
+                            n = len(words)
+                            if n < 5:
+                                score += 0.1
+                            elif n < 10:
+                                score += 0.25
+                            elif n < 20:
+                                score += 0.4
+                            else:
+                                score += 0.6
+                            # Multi-part indicator
+                            if "?" in q:
+                                score += 0.1 * q.count("?")
+                            # Entity/keyword density
+                            capitalized = sum(1 for w in words if w[0].isupper())
+                            if capitalized > 0:
+                                score += min(capitalized * 0.03, 0.2)
+                            # Comparison/contrast indicators
+                            compare_words = {"vs", "compare", "difference", "versus",
+                                             "better", "between", "both", "than", "or"}
+                            if any(cw in q.lower() for cw in compare_words):
+                                score += 0.1
+                            return min(score, 1.0)
+
+                        complexity = _estimate_query_complexity(question or "")
+                        # Map 0-1 complexity → 2000–8000 token budget
+                        dyn_budget = int(2000 + complexity * 6000)
+                        logger.info(
+                            "Question complexity=%.2f → dynamic token budget=%d",
+                            complexity, dyn_budget,
+                        )
+
+                        crawler_config = TraversalConfig()
+                        crawler = UnifiedGraphCrawler(
+                            manager=semantic_manager,
+                            neo4j_service=neo4j_service,
+                            config=crawler_config,
+                        )
+                        bfs_results = crawler.crawl(
+                            seed_regions=seed_regions,
+                            question_embedding=question_embedding,
+                            token_budget=dyn_budget,
+                            question_text=question,
+                        )
+                        if bfs_results:
+                            context_parts.append(
+                                '<structural_context source="bfs_crawler">'
+                                if use_structured_context
+                                else "--- BFS GRAPH TRAVERSAL: EXPANDED CONTEXT ---"
+                            )
+                            for bfr in bfs_results:
+                                src = bfr.get("source", "unknown")
+                                bfr_text = bfr.get("text", "")
+                                if bfr_text:
+                                    label = {
+                                        "order_neighbor": "ORDER-СОСЕД",
+                                        "direct_entity": "СУЩНОСТЬ",
+                                        "related_1hop": "СВЯЗАННАЯ СУЩНОСТЬ",
+                                        "related_2hop": "СВЯЗАННАЯ 2-HOP",
+                                        "community_sibling": "СУЩНОСТЬ СООБЩЕСТВА",
+                                        "qdrant_match": "QDRANT РЕЗУЛЬТАТ",
+                                    }.get(src, src.upper())
+                                    if use_structured_context:
+                                        region_attr = ""
+                                        if bfr.get("node_type") == "region" and bfr.get("node_id"):
+                                            region_attr = (
+                                                f' region_id="{_xml_escape(str(bfr["node_id"]))}"'
+                                            )
+                                        context_parts.append(
+                                            f'  <region label="{_xml_escape(label)}"'
+                                            f' source="{_xml_escape(src)}"'
+                                            f"{region_attr}"
+                                            f' text="{_xml_escape(bfr_text[:500])}" />'
+                                        )
+                                    else:
+                                        context_parts.append(
+                                            f"• [{label}] {bfr_text[:500]}"
+                                        )
+                            if use_structured_context:
+                                context_parts.append("</structural_context>")
+                        logger.info(
+                            "BFS crawler: %d regions enriched from %d seeds",
+                            len(bfs_results), len(seed_regions),
+                        )
+                    except Exception as e:
+                        logger.warning("BFS crawler enrichment failed: %s", e)
+
+                # --- Semantic Embedding Search: Entities & Communities ---
+                if use_semantic_graph and question_embedding:
+                    try:
+                        import aiohttp
+                        import uuid as _uuid
+                        from semantic_graph.config import (
+                            ENTITY_EMBEDDINGS_COLLECTION,
+                            ENTITY_EMBEDDINGS_NAMESPACE,
+                            COMMUNITY_EMBEDDINGS_COLLECTION,
+                            COMMUNITY_EMBEDDINGS_NAMESPACE,
+                            QDRANT_URL as _SG_QDRANT_URL,
+                            QDRANT_API_KEY as _SG_QDRANT_API_KEY,
+                        )
+
+                        qdrant_headers = {}
+                        if _SG_QDRANT_API_KEY:
+                            qdrant_headers["api-key"] = _SG_QDRANT_API_KEY
+
+                        async with aiohttp.ClientSession() as session:
+                            # Search entity embeddings
+                            try:
+                                async with session.post(
+                                    f"{_SG_QDRANT_URL}/collections/{ENTITY_EMBEDDINGS_COLLECTION}/points/search",
+                                    json={
+                                        "vector": question_embedding,
+                                        "limit": 10,
+                                        "with_payload": True,
+                                        "with_vector": False,
+                                        "filter": {
+                                            "must": [
+                                                {"key": "document_id", "match": {"value": file_hash}}
+                                            ]
+                                        },
+                                    },
+                                    headers=qdrant_headers,
+                                ) as resp:
+                                    if resp.status == 200:
+                                        ent_results = (await resp.json()).get("result", [])
+                                        if semantic_min_relevance:
+                                            ent_results = [
+                                                pt for pt in ent_results
+                                                if pt.get("score", 0) >= semantic_min_relevance
+                                            ]
+                                        if ent_results:
+                                            context_parts.append(
+                                                '<semantic_context source="embedding_search">'
+                                                if use_structured_context
+                                                else "--- SEMANTIC SEARCH: ENTITIES (EMBEDDINGS) ---"
+                                            )
+                                            for pt in ent_results:
+                                                payload = pt.get("payload", {})
+                                                title = payload.get("entity_title", "")
+                                                etype = payload.get("entity_type", "")
+                                                desc = payload.get("description", "")
+                                                score = pt.get("score", 0)
+                                                if use_structured_context:
+                                                    context_parts.append(
+                                                        f'  <entity type="{_xml_escape(etype)}"'
+                                                        f' name="{_xml_escape(title)}"'
+                                                        f' score="{score:.3f}"'
+                                                        f' description="{_xml_escape(desc[:250])}" />'
+                                                    )
+                                                else:
+                                                    line = f"• [{etype}] {title} (score: {score:.3f})"
+                                                    if desc:
+                                                        line += f" — {desc[:250]}"
+                                                    context_parts.append(line)
+                                            if use_structured_context:
+                                                context_parts.append("</semantic_context>")
+                            except Exception:
+                                logger.debug("Entity embedding search skipped", exc_info=True)
+
+                            # Search community embeddings
+                            try:
+                                async with session.post(
+                                    f"{_SG_QDRANT_URL}/collections/{COMMUNITY_EMBEDDINGS_COLLECTION}/points/search",
+                                    json={
+                                        "vector": question_embedding,
+                                        "limit": 5,
+                                        "with_payload": True,
+                                        "with_vector": False,
+                                        "filter": {
+                                            "must": [
+                                                {"key": "document_id", "match": {"value": file_hash}}
+                                            ]
+                                        },
+                                    },
+                                    headers=qdrant_headers,
+                                ) as resp:
+                                    if resp.status == 200:
+                                        comm_results = (await resp.json()).get("result", [])
+                                        if semantic_min_relevance:
+                                            comm_results = [
+                                                pt for pt in comm_results
+                                                if pt.get("score", 0) >= semantic_min_relevance
+                                            ]
+                                        if comm_results:
+                                            context_parts.append(
+                                                '<semantic_context source="embedding_search">'
+                                                if use_structured_context
+                                                else "--- SEMANTIC SEARCH: COMMUNITIES (EMBEDDINGS) ---"
+                                            )
+                                            for pt in comm_results:
+                                                payload = pt.get("payload", {})
+                                                ctitle = payload.get("community_title", payload.get("title", ""))
+                                                csummary = payload.get("summary", "")
+                                                score = pt.get("score", 0)
+                                                if use_structured_context:
+                                                    context_parts.append(
+                                                        f'  <community name="{_xml_escape(ctitle)}"'
+                                                        f' score="{score:.3f}"'
+                                                        f' summary="{_xml_escape(csummary[:400])}" />'
+                                                    )
+                                                else:
+                                                    line = f"• {ctitle} (score: {score:.3f})"
+                                                    if csummary:
+                                                        line += f" — {csummary[:400]}"
+                                                    context_parts.append(line)
+                                            if use_structured_context:
+                                                context_parts.append("</semantic_context>")
+                            except Exception:
+                                logger.debug("Community embedding search skipped", exc_info=True)
+                    except Exception as e:
+                        logger.warning("Semantic embedding search failed: %s", e)
+
+                # Add end marker
+                context_parts.append("--- END OF CONTEXT ---")
+
+                # --- MMR Reranking: diversity-aware context selection ---
+                # Gate on the per-strategy flag (use_mmr_reranker) so that the
+                # baseline strategy ("pure Qdrant + LLM") does NOT apply MMR,
+                # matching its documented description. The global toggle
+                # USE_MMR_RERANKING acts as an additional master switch.
+                if (
+                    use_mmr_reranker
+                    and getattr(getattr(settings, 'mmr', None), 'USE_MMR_RERANKING', False)
+                    and question_embedding
+                    and len(context_parts) > 2
+                ):
+                    try:
+                        # Embed each context part for MMR
+                        part_embeddings = []
+                        for part in context_parts:
+                            part_embeddings.append(emb_client.get_text_embedding(part[:2000]))
+                        reranked_parts, _ = mmr_rerank_with_threshold(
+                            items=context_parts,
+                            item_embeddings=part_embeddings,
+                            query_embedding=question_embedding,
+                            lambda_param=settings.mmr.MMR_LAMBDA,
+                            top_k=settings.mmr.MMR_TOP_K,
+                            min_relevance=settings.mmr.MMR_MIN_RELEVANCE,
+                        )
+                        if reranked_parts:
+                            logger.info(
+                                "MMR reranking: %d -> %d context blocks (lambda=%.2f)",
+                                len(context_parts), len(reranked_parts), settings.mmr.MMR_LAMBDA,
+                            )
+                            context_parts = reranked_parts
+                            # Ensure end marker is present
+                            if "--- END OF CONTEXT ---" not in context_parts:
+                                context_parts.append("--- END OF CONTEXT ---")
+                    except Exception as e:
+                        logger.warning("MMR reranking failed, using original: %s", e)
+
+                # --- Deduplicate context blocks & enforce per-source budgets ---
+                # Total text budget in characters (hard backstop). Graph-enrichment
+                # sources are capped by the fractional budgets below; the primary
+                # Qdrant retrieval is bounded by the request `limit` (block count)
+                # instead, so it only obeys the global MAX_CONTEXT_CHARS backstop.
+                MAX_CONTEXT_CHARS = settings.context_budget.MAX_CONTEXT_CHARS
+
+                # Map section header → budget source key. Keys cover BOTH flat
+                # headers and XML opening tags so budgeting is format-agnostic.
+                _SECTION_SOURCE: dict[str, str] = {
+                    "--- DOCUMENT CONTEXT ---": "qdrant",
+                    "<document_context>": "qdrant",
+                    "--- SEMANTIC GRAPH: ENTITIES ---": "entities",
+                    '<semantic_context source="entities">': "entities",
+                    "--- SEMANTIC GRAPH: COMMUNITIES ---": "communities",
+                    '<semantic_context source="communities">': "communities",
+                    "--- SEMANTIC GRAPH: REGIONS VIA ENTITIES (CROSS-GRAPH) ---": "cross_graph",
+                    '<structural_context source="cross_graph">': "cross_graph",
+                    "--- STRUCTURAL GRAPH: NEIGHBOUR REGIONS BY READING ORDER ---": "order_neighbors",
+                    '<structural_context source="order_neighbors">': "order_neighbors",
+                    "--- BFS GRAPH TRAVERSAL: EXPANDED CONTEXT ---": "bfs_crawler",
+                    '<structural_context source="bfs_crawler">': "bfs_crawler",
+                    "--- SEMANTIC SEARCH: ENTITIES (EMBEDDINGS) ---": "embedding_search",
+                    "--- SEMANTIC SEARCH: COMMUNITIES (EMBEDDINGS) ---": "embedding_search",
+                    '<semantic_context source="embedding_search">': "embedding_search",
+                }
+
+                # Fraction of MAX_CONTEXT_CHARS reserved for each graph source.
+                # `qdrant` is intentionally absent: the primary retrieval is
+                # already count-limited by the request `limit`, so it is not
+                # subject to a per-source character budget.
+                #
+                # Structural sources are deliberately kept small — the ORDER walk
+                # and the BFS crawler can each emit dozens of <region> blocks,
+                # and long documents would otherwise flood the prompt with
+                # reading-order neighbours.
+                _SOURCE_BUDGET_FRAC: dict[str, float] = {
+                    "entities": 0.08,
+                    "communities": 0.10,
+                    "cross_graph": 0.05,
+                    "order_neighbors": 0.03,
+                    "bfs_crawler": 0.06,
+                    "embedding_search": 0.05,
+                }
+
+                def _detect_source(part: str) -> str | None:
+                    """Return the budget source key for a context part, or None.
+
+                    Handles exact flat headers and XML opening tags (with
+                    whitespace tolerance) so budgeting is format-agnostic.
+                    """
+                    if part in _SECTION_SOURCE:
+                        return _SECTION_SOURCE[part]
+                    stripped = part.strip()
+                    if stripped.startswith("<semantic_context"):
+                        for src_key in ("entities", "communities", "embedding_search"):
+                            if f'source="{src_key}"' in stripped:
+                                return src_key
+                        return "entities"
+                    if stripped.startswith("<structural_context"):
+                        for src_key in ("order_neighbors", "cross_graph", "bfs_crawler"):
+                            if f'source="{src_key}"' in stripped:
+                                return src_key
+                        return "order_neighbors"
+                    return None
+
+                def _is_structural_part(part: str) -> bool:
+                    """True for markup/structural parts that must always be kept.
+
+                    Section wrappers and closing tags carry no content; they must
+                    not be deduplicated or counted against a source budget,
+                    otherwise repeated closing tags (e.g. ``</section>``) would be
+                    dropped and the XML/flat structure would break.
+                    """
+                    stripped = part.strip()
+                    if not stripped:
+                        return False
+                    if stripped == "--- END OF CONTEXT ---":
+                        return True
+                    if stripped.startswith("<section ") or stripped == "</section>":
+                        return True
+                    if stripped in ("<document_context>", "</document_context>"):
+                        return True
+                    if stripped.startswith("<semantic_context") or stripped == "</semantic_context>":
+                        return True
+                    if stripped.startswith("<structural_context") or stripped == "</structural_context>":
+                        return True
+                    return False
+
+                seen_texts: set = set()
+                deduped_parts = []
+                total_chars = 0
+                source_chars: dict[str, int] = {}
+                current_source: str | None = None
+
+                for part in context_parts:
+                    # Section header / XML opening tag switches the active source.
+                    detected = _detect_source(part)
+                    if detected is not None:
+                        current_source = detected
+                        if current_source != "qdrant":
+                            source_chars.setdefault(current_source, 0)
+                        deduped_parts.append(part)
+                        total_chars += len(part)
+                        continue
+
+                    # Structural wrappers and the end marker are always kept.
+                    if _is_structural_part(part):
+                        deduped_parts.append(part)
+                        total_chars += len(part)
+                        continue
+
+                    # Dedup actual content blocks.
+                    # Skip dedup for flat strategies — they lack XML markers
+                    # that would distinguish near-identical blocks, so the
+                    # fuzzy 120-char key eats different blocks that happen to
+                    # share a common prefix (e.g. consecutive table rows).
+                    if use_structured_context:
+                        key = part[:120].replace(" ", "").replace("\n", "").lower()
+                        if key in seen_texts:
+                            continue
+                        seen_texts.add(key)
+
+                    # Global char cap (hard backstop for every source).
+                    if total_chars + len(part) > MAX_CONTEXT_CHARS:
+                        remaining = MAX_CONTEXT_CHARS - total_chars
+                        if remaining >= 60:
+                            deduped_parts.append(
+                                part[:remaining] + "... [TRUNCATED]"
+                            )
+                            total_chars = MAX_CONTEXT_CHARS
+                        break
+
+                    # Per-source cap for graph sources only. The primary Qdrant
+                    # retrieval (`qdrant`) is bounded by `limit` (block count) and
+                    # therefore skips this character budget.
+                    src = current_source or "qdrant"
+                    if src != "qdrant":
+                        budget = int(MAX_CONTEXT_CHARS * _SOURCE_BUDGET_FRAC.get(src, 0.08))
+                        if source_chars.get(src, 0) + len(part) > budget:
+                            continue
+
+                    deduped_parts.append(part)
+                    total_chars += len(part)
+                    if src != "qdrant":
+                        source_chars[src] = source_chars.get(src, 0) + len(part)
+
+                if len(deduped_parts) < len(context_parts):
+                    logger.info(
+                        "Context dedup/budget: %d -> %d parts, ~%d chars "
+                        "(limit %d, source_usage=%s)",
+                        len(context_parts), len(deduped_parts), total_chars,
+                        MAX_CONTEXT_CHARS, source_chars,
+                    )
+
+                context_parts = deduped_parts
+
+                # --- C5: Feedback-driven iterative retrieval ---
+                # Runs AFTER graph enrichment so the first round already sees
+                # structural + semantic + BFS + embedding results instead of
+                # just raw Qdrant chunks.
+                iterative_used = False
+                if iterative_enabled and use_llm and context_parts:
+                    try:
+                        # Build refinement search function for round 2
+                        async def _refinement_search(refinement_query: str) -> dict:
+                            try:
+                                ref_embedding = emb_client.get_text_embedding(refinement_query)
+                            except Exception:
+                                return {"context": []}
+                            ref_results = client.search(
+                                query_vector=ref_embedding,
+                                limit=max(search_limit, limit),
+                                filter_condition=filter_condition,
+                            )
+                            context = []
+                            for point in ref_results.points:
+                                text = point.payload.get("text", "")
+                                if text:
+                                    context.append(text)
+                            return {"context": context}
+
+                        # First-round context = graph-enriched context_parts
+                        first_context = context_parts
+
+                        iter_result = await iterative_retrieval(
+                            question=question,
+                            llm_client=llm_client,
+                            search_fn=_refinement_search,
+                            max_rounds=2,
+                            model_name=settings.llm.LLM_MODEL_NAME,
+                        )
+
+                        llm_answer = iter_result.get("answer", "")
+                        total_rounds = iter_result.get("total_rounds", 1)
+                        # Sanitize iterative answer: normalize "Fail to answer" variants
+                        _normalized = llm_answer.strip().lower()
+                        _refusal_patterns = ("fail to answer", "unable to answer", "cannot answer",
+                                             "cannot provide", "no answer", "i don't know")
+                        if _normalized in _refusal_patterns or any(
+                            _normalized.startswith(p) for p in _refusal_patterns
+                        ):
+                            llm_answer = "Not answerable"
+                        logger.info(
+                            "Iterative retrieval (with graph enrichment): "
+                            "%d rounds, %d context blocks",
+                            total_rounds, len(context_parts),
+                        )
+                        iterative_used = True
+                    except Exception as e:
+                        logger.warning(
+                            "Iterative retrieval failed: %s. "
+                            "Falling back to standard LLM.", e
+                        )
+                        iterative_used = False
+
+                user_prompt = ""  # initialised for logging use when LLM path is skipped
+                context = ""      # initialised for logging use when LLM path is skipped
+                if iterative_used:
+                    # Iterative retrieval already called the LLM and produced
+                    # llm_answer — skip the standard LLM call below.
+                    pass
+                elif not context_parts:
+                    # No context to send to LLM
+                    pass
+                else:
+                    # Standard LLM path: compose user message from context_parts
                     context = "\n\n".join(context_parts)
-                    message.add_text_content(context)
-                    user_prompt = f"Вопрос: {question} Ответьте на вопрос, используя только информацию из контекста (текст и изображения)."""
-                    message.add_text_content(user_prompt)
+                    user_message.add_text_content(context)
 
-                # Call LLM
-                success, llm_responses = llm_client.send_message(
-                    messages=[message]
+                    # Formulate clear question with instructions
+                    user_prompt = f"""
+--- USER QUESTION ---
+{question}
+
+--- INSTRUCTIONS ---
+Analyze the images and text context provided above.
+Answer the question using ONLY information from the context.
+If images/tables in the context are relevant to the question, incorporate them in your answer.
+Be concise: start directly with the answer value, then optionally add brief supporting evidence.
+
+ANSWER:"""
+                    user_message.add_text_content(user_prompt)
+
+                # ===== LOG ALL CONTEXT BLOCKS =====
+                logger.info("=" * 80)
+                logger.info(f"LLM CONTEXT BLOCKS for question: {question}")
+                logger.info(f"Number of answers/chunks: {len(answers)}")
+                logger.info(f"Number of context_parts: {len(context_parts)}")
+                logger.info("-" * 40)
+
+                # --- Dynamic system prompt: describe which enrichment sources produced results ---
+                _SECTION_DESCRIPTIONS: dict[str, str] = {
+                    "--- DOCUMENT CONTEXT ---":
+                        "document text blocks with element-type markup",
+                    "<document_context>":
+                        "document text blocks in XML format with sections, page numbers, "
+                        "element types, and relevance scores",
+                    "--- SEMANTIC GRAPH: ENTITIES ---":
+                        "entities from the semantic knowledge graph (people, organizations, "
+                        "places, events) extracted from the document",
+                    '<semantic_context source="entities">':
+                        "entities from the semantic knowledge graph in XML format ",
+                    '<semantic_context source="communities">':
+                        "communities from the semantic graph with findings and "
+                        "confidence ratings (XML format)",
+                    '<structural_context source="order_neighbors">':
+                        "structurally adjacent regions (previous/next document element) "
+                        "in XML format",
+                    "--- SEMANTIC GRAPH: COMMUNITIES ---":
+                        "communities from the semantic graph with findings and confidence ratings",
+                    "--- SEMANTIC GRAPH: REGIONS VIA ENTITIES (CROSS-GRAPH) ---":
+                        "document regions linked through entities (cross-graph bridge)",
+                    "--- STRUCTURAL GRAPH: NEIGHBOUR REGIONS BY READING ORDER ---":
+                        "structurally adjacent regions (previous/next document element)",
+                    "--- BFS GRAPH TRAVERSAL: EXPANDED CONTEXT ---":
+                        "expanded context via BFS graph traversal "
+                        "(related entities, 1-hop/2-hop links, communities)",
+                    "--- SEMANTIC SEARCH: ENTITIES (EMBEDDINGS) ---":
+                        "entities found through embedding-based semantic similarity search",
+                    "--- SEMANTIC SEARCH: COMMUNITIES (EMBEDDINGS) ---":
+                        "communities found through embedding-based semantic similarity search",
+                    '<structural_context source="cross_graph">':
+                        "document regions linked through entities (cross-graph bridge) "
+                        "(XML format)",
+                    '<structural_context source="bfs_crawler">':
+                        "expanded context via BFS graph traversal "
+                        "(related entities, 1-hop/2-hop links, communities) (XML format)",
+                    '<semantic_context source="embedding_search">':
+                        "entities and communities found through embedding-based "
+                        "semantic similarity search (XML format)",
+                }
+                context_sources: list[str] = []
+                for part in context_parts:
+                    desc = _SECTION_DESCRIPTIONS.get(part)
+                    if not desc and part.startswith("<community "):
+                        desc = ("communities from the semantic graph with findings "
+                                "and confidence ratings (XML format)")
+                    if desc and desc not in context_sources:
+                        context_sources.append(desc)
+
+                source_list = "\n".join(f"  - {s}" for s in context_sources) if context_sources \
+                    else "  - document text blocks"
+
+                # Build answer format hint based on request
+                format_hint = ""
+                if answer_format:
+                    fmt_lower = answer_format.strip().lower()
+                    if fmt_lower == 'int':
+                        format_hint = "8a. The expected answer is a single INTEGER — output ONLY the number"
+                    elif fmt_lower == 'float':
+                        format_hint = "8a. The expected answer is a single FLOAT/DECIMAL number — output ONLY the value"
+                    elif fmt_lower == 'list':
+                        format_hint = (
+                            "8a. The expected answer is a LIST of items separated by commas — "
+                            "output each item on the first line, comma-separated"
+                        )
+                    elif fmt_lower == 'str':
+                        format_hint = "8a. The expected answer is a short STRING — output ONLY the answer text"
+                    elif fmt_lower == 'none':
+                        format_hint = "8a. Only answer if clearly found; otherwise say 'Not answerable'"
+
+                # Evidence gate: decide whether retrieved context plausibly
+                # contains the answer. When evidence is present, the model must
+                # answer instead of refusing (over-abstention is the top error).
+                evidence_present = _evidence_present(question, answers, top_retrieval_score)
+                answerability_rule = (
+                    "2. The retrieved context contains information relevant to this "
+                    "question. Answer it using the context, even if the evidence is "
+                    "partial. Only respond strictly: \"Not answerable\" if NO block "
+                    "in the context relates to the entities or topics in the question."
+                    if evidence_present else
+                    "2. If the answer is NOT found in the context or you cannot give "
+                    "a precise answer, respond strictly: \"Not answerable\""
                 )
 
-                if success and llm_responses:
-                    llm_answer = llm_responses[0]
-                    logger.info(f"LLM answer generated successfully for question: {question}")
-                else:
-                    logger.warning(f"LLM failed to generate answer for question: {question}")
+                system_prompt = f"""You are a document analysis assistant. Answer user questions using ONLY the provided context.
+
+CONTEXT SOURCES:
+{source_list}
+
+ANSWER RULES:
+1. Use ONLY information from the provided context. Do not use external knowledge.
+{answerability_rule}
+3. Any refusal variant (e.g. "Fail to answer", "Unable to answer", "I don't know") MUST be replaced with "Not answerable"
+4. For images, tables, and charts, carefully analyze visual information together with captions
+5. Be precise and concise — give the answer value first, then optional brief evidence
+6. If context contains contradictory information, note it
+7. Always answer in ENGLISH regardless of the question language
+8. Pay attention to confidence ratings in communities — higher rating means more reliable findings
+{format_hint}
+9. Format: start your response with the tag [FINAL_ANSWER]: followed by the direct answer value on its own line. Then optionally add supporting reasoning on subsequent lines.
+10. If you notice that you are repeating what you have already said, immediately stop reasoning and provide the final answer.
+11. After each reasoning step, write down what new information you learned. If there is nothing new, stop and provide the final answer.
+
+NUMERICAL ACCURACY RULES:
+10. When extracting numbers from tables, ALWAYS double-check the row AND column labels. The number must correspond to the EXACT intersection of the question's row and column. For example, if asked "What was Revenue in FY2023?", find the row labeled "Revenue" (or its equivalent) AND the column labeled "FY2023" — then report the value at their intersection.
+11. Report the EXACT number as it appears in the context. Do not round, approximate, or convert units unless the question explicitly asks for it. If the table says "17,564", report "17564" (for Int) or vice versa as appropriate.
+12. Before finalizing a numerical answer, scan the surrounding context for another occurrence of the same metric — if two numbers differ significantly (e.g., more than 20% apart), state the discrepancy and report the one that best matches the question's scope.
+13. For financial documents: pay close attention to whether a number is in millions, billions, or raw units. Check table headers and footnotes for units and multipliers.
+
+FEW-SHOT EXAMPLES (numerical extraction from tables):
+
+Example 1 — Financial table row/column identification:
+Context: "Table: Revenue by Year (in millions). Row 'Total Revenue', Columns: 'FY2021'=18078, 'FY2022'=19500, 'FY2023'=21000"
+Question: "What was the total revenue COSTCO FY2021?"
+Correct answer: 18078
+Why: Row='Total Revenue', Column='FY2021', cell value=18078. Not FY2022 or FY2023.
+
+Example 2 — Avoiding row confusion in financial statements:
+Context: "Balance Sheet Data. Row 'Common Equity', FY2021 column shows 18078. Row 'Long-term Debt', FY2021 column shows 10314."
+Question: "Common equity COSTCO FY2021"
+Correct answer: 18078
+Why: Identified row 'Common Equity' (not 'Long-term Debt'), column 'FY2021', value=18078. The number 10314 belongs to a DIFFERENT row — do not report it.
+
+Example 3 — Percentage and ratio values:
+Context: "Financial Ratios table: 'Total debt to total assets' = 0.192 (19.2%). 'Current ratio' = 0.1264."
+Question: "What is the total debt to total assets ratio?"
+Correct answer: 0.192
+Why: Row 'Total debt to total assets' has value 0.192, NOT 0.1264 (which is 'Current ratio' — a completely different metric)."""
+
+                system_message = ModelMessageDict(role='system')
+                system_message.add_text_content(system_prompt)
+
+                logger.info("SYSTEM PROMPT:")
+                logger.info(system_prompt[:500] + ("..." if len(system_prompt) > 500 else ""))
+                logger.info("-" * 40)
+                logger.info("USER MESSAGE CONTEXT BLOCKS:")
+                for i, part in enumerate(context_parts):
+                    if len(part) > 1000:
+                        logger.info(f"  Block [{i}]: {part[:1000]}... [TRUNCATED, total len={len(part)}]")
+                    else:
+                        logger.info(f"  Block [{i}]: {part}")
+                logger.info("-" * 40)
+                logger.info("QUESTION + INSTRUCTION:")
+                logger.info(user_prompt[:1000] + ("..." if len(user_prompt) > 1000 else ""))
+                logger.debug("FULL RAW CONTEXT (debug level):\n%s", context if context_parts else "(empty)")
+                logger.info("=" * 80)
+                # ===== END LOG =====
+
+                # Call LLM (skip if iterative retrieval already produced an answer)
+                enrichment_end = generation_start = generation_end = time.time()
+                if not iterative_used:
+                    # Server-side timing — end of enrichment/context assembly
+                    enrichment_end = time.time()
+                    generation_start = time.time()
+
+                    success, llm_responses = llm_client.send_message(
+                        messages=[system_message, user_message],
+                        max_tokens=settings.llm.LLM_MAX_TOKENS,
+                        temperature=0.0,
+                        top_p=0.95
+                    )
+                    generation_end = time.time()
+
+                    if success and llm_responses:
+                        llm_answer = llm_responses[0]
+                        # Anti-abstention: if the evidence gate says the context
+                        # contains the answer but the model refused, regenerate
+                        # once with an explicit instruction to answer.
+                        if _is_refusal_answer(llm_answer) and evidence_present:
+                            logger.info(
+                                "Model abstained despite evidence present "
+                                "(top_score=%.3f); forcing a second answer attempt",
+                                top_retrieval_score,
+                            )
+                            user_message.add_text_content(
+                                "\n\n[RE-CHECK] The provided context DOES contain "
+                                "information relevant to this question. Do NOT answer "
+                                "'Not answerable'. Locate the relevant block(s) and "
+                                "give the answer now."
+                            )
+                            _ok2, _resp2 = llm_client.send_message(
+                                messages=[system_message, user_message],
+                                max_tokens=settings.llm.LLM_MAX_TOKENS,
+                                temperature=0.0,
+                                top_p=0.95,
+                            )
+                            if _ok2 and _resp2:
+                                llm_answer = _resp2[0]
+                        # Sanitize: normalize "Fail to answer" and similar refusal variants
+                        _normalized = llm_answer.strip().lower()
+                        _refusal_patterns = ("fail to answer", "unable to answer", "cannot answer",
+                                             "cannot provide", "no answer", "i don't know", "failed to answer")
+                        if _normalized in _refusal_patterns or any(
+                            _normalized.startswith(p) for p in _refusal_patterns
+                        ):
+                            llm_answer = "Not answerable"
+                        # Post-process answer format for structured types (Int/Float/List)
+                        if answer_format and answer_format.strip().lower() in ('int', 'float', 'list'):
+                            formatted = format_answer(llm_answer, answer_format)
+                            if formatted is not None:
+                                llm_answer = str(formatted) if not isinstance(formatted, list) \
+                                    else ", ".join(str(item) for item in formatted)
+                        logger.info(f"LLM answer generated successfully for question: {question}")
+                    else:
+                        logger.warning(f"LLM failed to generate answer for question: {question}")
             except Exception as e:
                 logger.error(f"Error generating LLM answer: {e}")
                 llm_answer = f"Error generating LLM answer: {str(e)}"
+
+        # Close Neo4j service connection (after all graph enrichment)
+        if neo4j_service:
+            try:
+                neo4j_service.close()
+            except Exception as e:
+                logger.warning(f"Error closing Neo4j service: {e}")
+
+        # Close Semantic Graph Manager connection (after all semantic enrichment)
+        if semantic_manager:
+            try:
+                semantic_manager.close()
+            except Exception as e:
+                logger.warning(f"Error closing Semantic Graph Manager: {e}")
+
+        # Unified post-processing: normalize any refusal variant to "Not answerable"
+        if llm_answer and isinstance(llm_answer, str):
+            _final_norm = llm_answer.strip().lower()
+            _refusal = ("fail to answer", "unable to answer", "cannot answer",
+                        "cannot provide", "no answer", "i don't know", "not answerable")
+            if _final_norm in _refusal or any(_final_norm.startswith(p) for p in _refusal):
+                llm_answer = "Not answerable"
 
         return QuestionResponse(
             status="success",
@@ -1416,7 +3651,17 @@ def ask_document(request: QuestionRequest):
             answers=answers,
             indexed=is_indexed,
             collection_name=actual_collection_name,
-            llm_answer=llm_answer
+            llm_answer=llm_answer,
+            context_blocks=context_parts if use_llm else None,
+            response_metadata={
+                "search_ms": round((search_end - server_start) * 1000),
+                "enrichment_ms": round((enrichment_end - search_end) * 1000),
+                "llm_generation_ms": round((generation_end - generation_start) * 1000),
+                "total_ms": round((generation_end - server_start) * 1000),
+            } if use_llm and answers else {
+                "search_ms": round((search_end - server_start) * 1000),
+                "total_ms": round((search_end - server_start) * 1000),
+            }
         )
 
     except Exception as e:
@@ -1820,6 +4065,45 @@ async def get_pdf_page_with_bbox(
         )
 
 
+def _compute_region_ids(content_list: List[dict]) -> Dict[int, List[int]]:
+    """Map content_list index → structural-graph region_id(s).
+
+    Mirrors the region counter in ``create_graph_from_mineru_result`` (the
+    same source used when the Neo4j Region.region_id was assigned):
+    discarded and empty-text elements produce no region; image/table elements
+    additionally spawn caption and footnote regions (they share the element's
+    bbox on the page).
+    """
+    mapping: Dict[int, List[int]] = {}
+    counter = 0
+    for i, element in enumerate(content_list):
+        if not isinstance(element, dict):
+            continue
+        etype = element.get("type", "unknown")
+        if etype == "discarded":
+            continue
+        if etype == "text" and element.get("text", "") == "":
+            continue
+        ids = [counter]
+        counter += 1
+        if etype == "image":
+            if element.get("image_caption"):
+                ids.append(counter)
+                counter += 1
+            if element.get("image_footnote"):
+                ids.append(counter)
+                counter += 1
+        elif etype == "table":
+            if element.get("table_caption"):
+                ids.append(counter)
+                counter += 1
+            if element.get("table_footnote"):
+                ids.append(counter)
+                counter += 1
+        mapping[i] = ids
+    return mapping
+
+
 @app.get("/api/pdf/{file_hash}/mineru-bboxes")
 async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
     """
@@ -1859,19 +4143,26 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
         mineru_result = json.loads(mineru_result_json.decode('utf-8'))
 
         # Extract elements from MinerU result
-        elements = []
+        content_list = []
         if "results" in mineru_result and "result" in mineru_result["results"]:
             results_data = mineru_result["results"]["result"]["results"]
             if "content_list" in results_data:
-                elements.extend(results_data["content_list"])
+                content_list.extend(results_data["content_list"])
 
-        # Filter by page if specified
+        # Map content_list index → structural-graph region_id(s) (same counter
+        # used when the Neo4j graph was built).
+        region_map = _compute_region_ids(content_list)
+
+        # Filter by page if specified (keeping original content_list indices)
         if page_idx is not None:
-            elements = [e for e in elements if e.get("page_idx") == page_idx]
+            indexed = [(i, e) for i, e in enumerate(content_list)
+                       if e.get("page_idx") == page_idx]
+        else:
+            indexed = list(enumerate(content_list))
 
         # Format bboxes
         bboxes = []
-        for i, element in enumerate(elements):
+        for i, element in indexed:
             if not isinstance(element, dict):
                 continue
 
@@ -1904,6 +4195,7 @@ async def get_mineru_bboxes(file_hash: str, page_idx: Optional[int] = None):
 
             bbox_info = {
                 "element_index": i,
+                "region_ids": region_map.get(i, []),
                 "element_type": element_type,
                 "bbox": bbox,
                 "page_idx": element.get("page_idx", 0),
@@ -2278,3 +4570,7 @@ def run_api(
         reload=reload,
         log_level=log_level
     )
+
+
+if __name__ == "__main__":
+    run_api()

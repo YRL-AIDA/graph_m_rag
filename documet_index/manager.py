@@ -1,5 +1,5 @@
 from neo4j import GraphDatabase
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 import logging
 import json
 
@@ -28,12 +28,13 @@ class Neo4jConnection:
             self.graph.close()
             logger.info("Neo4j connection closed")
 
-    def query(self, query: str, db: Optional[str] = None) -> list:
+    def query(self, query: str, db: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> list:
         """Execute a Cypher query.
 
         Args:
             query: Cypher query string
             db: Optional database name
+            params: Optional dictionary of parameters for the query
 
         Returns:
             List of query results
@@ -43,7 +44,10 @@ class Neo4jConnection:
         response = None
         try:
             session = self.graph.session(database=db) if db is not None else self.graph.session()
-            response = list(session.run(query))
+            if params:
+                response = list(session.run(query, **params))
+            else:
+                response = list(session.run(query))
         except Exception as e:
             logger.error(f"Query failed: {e}")
             raise
@@ -84,11 +88,95 @@ class Manager:
         self.conn = Neo4jConnection(config.uri, config.user, config.password)
         self.name_db = config.name_db
 
-    def add_document(self, document: Document) -> bool:
+    def _build_sections(self, document_name: str, regions: dict) -> list:
+        """Build section hierarchy from title regions (A3 improvement).
+
+        Identifies title regions and groups subsequent regions into sections.
+        Each section spans from one title to the next title.
+        Regions before the first title belong to a «Preamble» section.
+
+        Args:
+            document_name: Document identifier (file_hash)
+            regions: Dict of region data keyed by region id
+
+        Returns:
+            List of section dicts with keys:
+                section_id, title, regions, start_order, end_order
+        """
+        # Collect all regions with their order for sorting
+        region_list = []
+        for rid, reg_data in regions.items():
+            region_list.append({
+                "id": rid,
+                "label": reg_data.get("label", ""),
+                "text": reg_data.get("text", ""),
+                "order": reg_data.get("order", 0),
+            })
+
+        # Sort regions by order
+        region_list.sort(key=lambda r: r["order"])
+
+        # Identify title indices
+        title_indices = [
+            i for i, r in enumerate(region_list) if r["label"] == "title"
+        ]
+
+        if not title_indices:
+            # No titles found — return a single default section
+            return [{
+                "section_id": f"{document_name}|section_default",
+                "title": "Document",
+                "regions": [r["id"] for r in region_list],
+                "start_order": region_list[0]["order"] if region_list else 0,
+                "end_order": region_list[-1]["order"] if region_list else 0,
+            }]
+
+        sections = []
+
+        # Handle regions before the first title (preamble)
+        if title_indices[0] > 0:
+            preamble_regions = region_list[:title_indices[0]]
+            sections.append({
+                "section_id": f"{document_name}|section_preamble",
+                "title": "Preamble",
+                "regions": [r["id"] for r in preamble_regions],
+                "start_order": preamble_regions[0]["order"],
+                "end_order": preamble_regions[-1]["order"],
+            })
+
+        # Build sections from title boundaries
+        for i, ti in enumerate(title_indices):
+            title_region = region_list[ti]
+            # Extract clean title text (remove "Title: " prefix)
+            raw_text = title_region.get("text", "")
+            clean_title = raw_text.replace("Title: ", "").strip() if raw_text else "Untitled"
+
+            # Determine end of section: next title or end of list
+            if i + 1 < len(title_indices):
+                end_idx = title_indices[i + 1]
+            else:
+                end_idx = len(region_list)
+
+            # Extract regions in this section (including the title itself)
+            section_regions = region_list[ti:end_idx]
+
+            section_id = f"{document_name}|section_{i}"
+            sections.append({
+                "section_id": section_id,
+                "title": clean_title,
+                "regions": [r["id"] for r in section_regions],
+                "start_order": section_regions[0]["order"],
+                "end_order": section_regions[-1]["order"],
+            })
+
+        return sections
+
+    def add_document(self, document: Document, *, enable_sections: bool = True) -> bool:
         """Add a document to the graph database.
 
         Args:
             document: Document object to add
+            enable_sections: Whether to create hierarchical Section nodes (A3)
 
         Returns:
             True if document was added, False if it already exists
@@ -105,19 +193,49 @@ class Manager:
                 style = reg.get('style', {})
                 order = reg.get('order', 0)
                 element_data = reg.get('element_data', '')
+                page_idx = reg.get('page_idx', 0)
+                # Generate region_id using file_hash and region id
+                region_id = f"{document.name}|{id}"
 
-                # Escape single quotes in text fields
-                text_escaped = text.replace("'", "\\'") if text else ''
-                image_escaped = image.replace("'", "\\'") if image else ''
-                element_data_escaped = str(element_data).replace("'", "\\'") if element_data else ''
+                # Escape backslashes and single quotes for Cypher string literals
+                text_escaped = text.replace("\\", "\\\\").replace("'", "\\'") if text else ''
+                image_escaped = image.replace("\\", "\\\\").replace("'", "\\'") if image else ''
+                element_data_escaped = str(element_data).replace("\\", "\\\\").replace("'", "\\'") if element_data else ''
 
                 # Convert bbox and style to JSON strings for storage
                 bbox_json = json.dumps(bbox) if bbox else '{}'
                 style_json = json.dumps(style) if style else '{}'
 
-                query += (f"CREATE (reg{id}:Region:{label} {{text: '{text_escaped}', image: '{image_escaped}', "
-                          f"bbox: '{bbox_json}', style: '{style_json}', order: {order}, element_data: "
+                query += (f"CREATE (reg{id}:Region:{label} {{region_id: '{region_id}', text: '{text_escaped}', image: '{image_escaped}', "
+                          f"bbox: '{bbox_json}', style: '{style_json}', order: {order}, page_idx: {page_idx}, element_data: "
                           f"'{element_data_escaped}'}})\n")
+
+            # A3: Build hierarchical section structure from title regions.
+            # Creates Section nodes with SECTION edges: Document → Section → Region.
+            if enable_sections and graph['nodes']['regions']:
+                sections = self._build_sections(
+                    document.name, graph['nodes']['regions']
+                )
+                for sec in sections:
+                    sec_id_norm = sec['section_id'].replace("'", "\\'").replace("|", "_")
+                    title_escaped = sec['title'].replace("\\", "\\\\").replace("'", "\\'")
+                    query += (
+                        f"CREATE (sec_{sec_id_norm}:Section {{section_id: "
+                        f"'{sec_id_norm}', title: '{title_escaped}', "
+                        f"start_order: {sec['start_order']}, "
+                        f"end_order: {sec['end_order']}}})\n"
+                    )
+                    # Document → Section
+                    query += f"CREATE (d) -[:SECTION]-> (sec_{sec_id_norm})\n"
+                    # Section → Region for each region in this section
+                    for rid in sec['regions']:
+                        query += (
+                            f"CREATE (sec_{sec_id_norm}) -[:SECTION]-> (reg{rid})\n"
+                        )
+                logger.info(
+                    "Built %d sections for document '%s'",
+                    len(sections), document.name,
+                )
 
             for order in graph['edges']['order']:
                 n1, n2 = order
@@ -202,16 +320,138 @@ class Manager:
             logger.error(f"Error deleting all documents: {e}")
             return False
 
-    def query(self, query: str) -> list:
+    def get_related_context(self, file_hash: str, element_type: str, text: str) -> Dict[str, Any]:
+        """Get related context from Neo4j for a given element.
+
+        For image_caption/image_footnote, returns the parent image node.
+        For table_caption/table_footnote, returns the parent table node.
+        For image/table, returns associated caption and footnote nodes.
+
+        Args:
+            file_hash: Document identifier
+            element_type: Type of the element (image_caption, image_footnote, table_caption, table_footnote, image, table)
+            text: Text content of the element to match
+
+        Returns:
+            Dictionary with related context information
+        """
+        try:
+            # Escape backslashes and single quotes for Cypher string literals
+            text_escaped = text.replace("\\", "\\\\").replace("'", "\\'")
+
+            related_context = {
+                "parent_element": None,
+                "sibling_captions": [],
+                "sibling_footnotes": []
+            }
+
+            # For caption/footnote elements, find the parent image/table
+            if element_type in ("image_caption", "image_footnote"):
+                # Find the image that this caption/footnote belongs to
+                # Look for an image node that comes before this caption/footnote in ORDER
+                query = f"""
+                        MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (caption:Region:{element_type} {{text: '{text_escaped}'}})
+                        OPTIONAL MATCH (d) -[:ORDER*]-> (img:Region:image) -[:ORDER*]-> (caption)
+                        WITH img, caption
+                        ORDER BY caption.order - img.order ASC
+                        LIMIT 1
+                        RETURN img.text as text, img.image as image, img.bbox as bbox, img.element_data as element_data
+                        """
+                result = self.query(query)
+                if result:
+                    data = result[0].data()
+                    related_context["parent_element"] = {
+                        "type": "image",
+                        "text": data.get('text', ''),
+                        "image": data.get('image', ''),
+                        "bbox": data.get('bbox', '{}'),
+                        "element_data": data.get('element_data', '')
+                    }
+
+            elif element_type in ("table_caption", "table_footnote"):
+                # Find the table that this caption/footnote belongs to
+                query = f"""
+                   MATCH (d:Document {{name: '{file_hash}'}}) -[:PARENT*]-> (caption:Region:{element_type} {{text: '{text_escaped}'}})
+                   OPTIONAL MATCH (tbl:Region:table) -[:ORDER*]-> (caption)
+                   WHERE tbl.image IS NOT NULL AND tbl.image <> ''
+                   WITH tbl, caption
+                   ORDER BY caption.order - tbl.order ASC
+                   LIMIT 1
+                   RETURN tbl.text as text, tbl.image as image, tbl.bbox as bbox, tbl.element_data as element_data
+                   """
+                result = self.query(query)
+                if result and result[0].data().get('text'):
+                    data = result[0].data()
+                    related_context["parent_element"] = {
+                        "type": "table",
+                        "text": data.get('text', ''),
+                        "image": data.get('image', ''),
+                        "bbox": data.get('bbox', '{}'),
+                        "element_data": data.get('element_data', '')
+                    }
+
+            # For image/table elements, find associated captions and footnotes
+            elif element_type == "image":
+                # Find image_caption and image_footnote nodes that follow this image
+                query = f"""
+                   MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (img:Region:image {{text: '{text_escaped}'}})
+                   OPTIONAL MATCH (img) -[:ORDER*]-> (cap:Region:image_caption)
+                   OPTIONAL MATCH (img) -[:ORDER*]-> (fn:Region:image_footnote)
+                   RETURN
+                       collect(DISTINCT {{text: cap.text, element_data: cap.element_data}}) as captions,
+                       collect(DISTINCT {{text: fn.text, element_data: fn.element_data}}) as footnotes
+                   """
+                result = self.query(query)
+                if result:
+                    data = result[0].data()
+                    related_context["sibling_captions"] = [
+                        {"text": c.get('text', ''), "element_data": c.get('element_data', '')}
+                        for c in data.get('captions', []) if c.get('text')
+                    ]
+                    related_context["sibling_footnotes"] = [
+                        {"text": f.get('text', ''), "element_data": f.get('element_data', '')}
+                        for f in data.get('footnotes', []) if f.get('text')
+                    ]
+
+            elif element_type == "table":
+                # Find table_caption and table_footnote nodes that follow this table
+                query = f"""
+                   MATCH (d:Document {{name: '{file_hash}'}}) -[:ORDER*]-> (tbl:Region:table {{text: '{text_escaped}'}})
+                   OPTIONAL MATCH (tbl) -[:ORDER*]-> (cap:Region:table_caption)
+                   OPTIONAL MATCH (tbl) -[:ORDER*]-> (fn:Region:table_footnote)
+                   RETURN
+                       collect(DISTINCT {{text: cap.text, element_data: cap.element_data}}) as captions,
+                       collect(DISTINCT {{text: fn.text, element_data: fn.element_data}}) as footnotes
+                   """
+                result = self.query(query)
+                if result:
+                    data = result[0].data()
+                    related_context["sibling_captions"] = [
+                        {"text": c.get('text', ''), "element_data": c.get('element_data', '')}
+                        for c in data.get('captions', []) if c.get('text')
+                    ]
+                    related_context["sibling_footnotes"] = [
+                        {"text": f.get('text', ''), "element_data": f.get('element_data', '')}
+                        for f in data.get('footnotes', []) if f.get('text')
+                    ]
+
+            return related_context
+
+        except Exception as e:
+            logger.error(f"Error getting related context for {element_type}: {e}")
+            return {"parent_element": None, "sibling_captions": [], "sibling_footnotes": []}
+
+    def query(self, query: str, params: Optional[Dict[str, Any]] = None) -> list:
         """Execute a Cypher query on the database.
 
         Args:
             query: Cypher query string
+            params: Optional dictionary of parameters for the query
 
         Returns:
             List of query results
         """
-        return self.conn.query(query, self.name_db)
+        return self.conn.query(query, self.name_db, params)
 
     def status(self) -> dict:
         """Get database status information.
@@ -227,6 +467,216 @@ class Manager:
         except Exception as e:
             logger.error(f"Error getting status: {e}")
             return {"node_count": 0, "error": str(e)}
+
+    def add_semantic_link(self, structural_node_id: str, semantic_node_id: str, relationship_type: str = "SEMANTIC_CONNECTION"):
+        """Add a link between a structural graph node and a semantic graph node.
+
+        Args:
+            structural_node_id: ID of the node in the structural graph
+            semantic_node_id: ID of the node in the semantic graph
+            relationship_type: Type of relationship between the nodes
+        """
+        try:
+            query = """
+            MATCH (sn)
+            WHERE elementId(sn) = $structural_node_id
+            MATCH (en)
+            WHERE elementId(en) = $semantic_node_id
+            MERGE (sn)-[:LINK {relationship_type: $relationship_type, created_at: datetime()}]->(en)
+            """
+            self.query(query, params={
+                "structural_node_id": structural_node_id,
+                "semantic_node_id": semantic_node_id,
+                "relationship_type": relationship_type
+            })
+            logger.info(f"Added semantic link from {structural_node_id} to {semantic_node_id}")
+        except Exception as e:
+            logger.error(f"Error adding semantic link: {e}")
+            raise
+
+    def get_semantic_links(self, structural_node_id: str):
+        """Get semantic graph nodes linked to a structural graph node.
+
+        Args:
+            structural_node_id: ID of the node in the structural graph
+
+        Returns:
+            List of linked semantic graph nodes
+        """
+        try:
+            query = """
+            MATCH (sn)
+            WHERE elementId(sn) = $structural_node_id
+            OPTIONAL MATCH (sn)-[r:LINK]->(en)
+            RETURN elementId(en) AS semantic_node_id, r.relationship_type AS relationship_type, r.created_at AS created_at
+            """
+            result = self.query(query, params={"structural_node_id": structural_node_id})
+            return [record.data() for record in result]
+        except Exception as e:
+            logger.error(f"Error getting semantic links: {e}")
+            return []
+
+    def get_order_neighbors(
+        self,
+        region_ids: List[str],
+        window_size: int = 3,
+        include_parent: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Walk ±K steps in ORDER from matched Regions to gather surrounding context.
+
+        For each region_id, finds all Region nodes in the same Document
+        whose ``order`` falls within ``window_size`` steps.  Returns
+        text/label/order/region_id for every qualifying neighbour.
+
+        When *include_parent* is ``True``, also walks up the ``PARENT``
+        hierarchy (e.g. from a ``text`` region to its containing ``title``
+        Region), including the parent node in the results.
+
+        Args:
+            region_ids:     List of region_id strings (format: '{file_hash}|{region_id}')
+            window_size:    Number of ORDER hops to walk in each direction (default 3)
+            include_parent: If True, include parent Region nodes via PARENT edges
+
+        Returns:
+            List of dicts with keys: region_id, label, text, order,
+            source_region_id, source (``'order'`` or ``'parent'``).
+        """
+        if not region_ids:
+            return []
+
+        # Walk ±K steps along the per-document ORDER chain
+        # (Document → reg0 → reg1 → … → regN).  Forward neighbours are
+        # `(r)-[:ORDER*1..K]->(n)`, backward neighbours are
+        # `(r)<-[:ORDER*1..K]-(n)`.  This is linear in the window size,
+        # whereas matching `(d:Document)-[:ORDER*]->(r)` / `(d)-[:ORDER*]->(n)`
+        # over every region in the graph is O(N²) and times out on large
+        # documents.
+        w = max(1, int(window_size))
+        query = f"""
+            MATCH (r:Region)
+            WHERE r.region_id IN $region_ids
+            WITH r
+            OPTIONAL MATCH (r)-[:ORDER*1..{w}]->(f:Region)
+            WITH r, collect(DISTINCT f) AS fwd
+            OPTIONAL MATCH (r)<-[:ORDER*1..{w}]-(b:Region)
+            WITH r, fwd, collect(DISTINCT b) AS bwd
+            WITH r, fwd + bwd AS nbs
+            UNWIND nbs AS neighbor
+            WITH r, neighbor
+            WHERE neighbor IS NOT NULL AND neighbor.region_id <> r.region_id
+            RETURN DISTINCT
+                neighbor.region_id AS region_id,
+                [l IN labels(neighbor) WHERE l <> 'Region'][0] AS label,
+                neighbor.text     AS text,
+                neighbor.order    AS order,
+                neighbor.page_idx AS page_idx,
+                r.region_id       AS source_region_id,
+                'order'           AS source
+            ORDER BY neighbor.order
+        """
+        try:
+            results = self.query(query, {
+                "region_ids": region_ids,
+            })
+        except Exception as e:
+            logger.error("Error getting order neighbors: %s", e)
+            results = []
+
+        items = [
+            {
+                "region_id": r.get("region_id", ""),
+                "label": r.get("label", ""),
+                "text": r.get("text", ""),
+                "order": r.get("order", 0),
+                "page_idx": r.get("page_idx", 0),
+                "source_region_id": r.get("source_region_id", ""),
+                "source": r.get("source", "order"),
+            }
+            for r in (rec.data() for rec in results)
+        ]
+
+        # --- Optionally walk PARENT edges ---
+        # PARENT edges point from the container (title / image_caption /
+        # table_caption) to its content: `(container)-[:PARENT]->(content)`.
+        # Walking "up" the hierarchy for a matched region means finding the
+        # node that points AT it: `(matched)<-[:PARENT]-(parent)`.
+        if include_parent:
+            parent_query = """
+                MATCH (child:Region)<-[:PARENT]-(parent:Region)
+                WHERE child.region_id IN $region_ids
+                RETURN DISTINCT
+                    parent.region_id AS region_id,
+                    [l IN labels(parent) WHERE l <> 'Region'][0] AS label,
+                    parent.text      AS text,
+                    parent.order     AS order,
+                    parent.page_idx  AS page_idx,
+                    child.region_id  AS source_region_id,
+                    'parent'         AS source
+            """
+            try:
+                parent_results = self.query(
+                    parent_query, {"region_ids": region_ids},
+                )
+                for rec in parent_results:
+                    data = rec.data()
+                    items.append({
+                        "region_id": data.get("region_id", ""),
+                        "label": data.get("label", ""),
+                        "text": data.get("text", ""),
+                        "order": data.get("order", 0),
+                        "page_idx": data.get("page_idx", 0),
+                        "source_region_id": data.get("source_region_id", ""),
+                        "source": "parent",
+                    })
+            except Exception as e:
+                logger.error("Error getting parent neighbors: %s", e)
+
+        return items
+
+    def get_sections_for_regions(
+        self,
+        region_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Map region_id -> its Section title from the structural graph.
+
+        Section nodes were created by :meth:`add_document` via the A3
+        hierarchical structure (``Section -[:SECTION]-> Region``). This
+        method returns a dict keyed by region_id so callers can group
+        regions by section for rendering (see ``<document_context>``).
+
+        Args:
+            region_ids: List of region_id strings (format: '{file_hash}|{element_index}')
+
+        Returns:
+            Dict mapping region_id to {"title": str, "section_id": str}.
+            Regions without a Section are omitted from the dict.
+        """
+        if not region_ids:
+            return {}
+
+        query = """
+            MATCH (s:Section)-[:SECTION]->(r:Region)
+            WHERE r.region_id IN $region_ids
+            RETURN r.region_id AS region_id,
+                   s.title AS title,
+                   s.section_id AS section_id
+        """
+        try:
+            results = self.query(query, {"region_ids": region_ids})
+        except Exception as e:
+            logger.error("Error getting sections for regions: %s", e)
+            return {}
+
+        section_map: Dict[str, Dict[str, Any]] = {}
+        for rec in results:
+            data = rec.data()
+            rid = data.get("region_id", "")
+            if rid:
+                section_map[rid] = {
+                    "title": data.get("title", "Untitled Section"),
+                    "section_id": data.get("section_id", ""),
+                }
+        return section_map
 
     def close(self):
         """Close the database connection."""

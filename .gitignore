@@ -217,6 +217,81 @@ __marimo__/
 
 # MinerU
 mineru/models
+mineru/test/
+
+# ============================================================
+# Project-specific ignores
+# ============================================================
+
+# Virtual environments in project root
+.graph/
+.venv/
+
+# Article — entire directory (LaTeX sources, materials, build artifacts)
+artile/
+
+# Presentation — LaTeX sources and build artifacts
+artile/presentation/
+
+# Agent plans and task descriptions
+plans/
+
+# AI agent workspace/config files (Kilo Code, CodeBuddy, Cursor, etc.)
+.kilocode/
+.kilocodeignore
+.codebuddy/
+.cursor/
+.cursorrules
+.copilot*
+
+# Extraction/generation caches
+semantic_graph/data/extraction_cache/
+
+# Test data — large PDF documents used for evaluation
+app/tests/data/
+app/tests/SmallerDataset/documents/
+
+# Generated test results, answers, and evaluation outputs
+app/tests/answers.json
+app/tests/SmallerDataset_answers*.json
+app/tests/MMLongDoc_answers.json
+app/tests/strategy_grid_results_partial_third/
+app/tests/strategy_grid_results_first/
+app/tests/proceeding_time*.txt
+app/tests/file_hash_comparison.json
+
+# Generated strategy-grid / consistency / structural evaluation artifacts
+# (large HTML reports and JSON result dumps — not source code, not indexed)
+app/tests/strategy_grid_result*/
+app/tests/strategy_grid_results*/
+app/tests/strategy_grid_results_Graph-M-Rag v0.1/
+app/tests/consistency_results*/
+app/tests/structural_graph_results*/
+app/tests/mmlong_strategy_grid_results/
+app/tests/SmallerDataset/
+app/tests/strategy_grid_results+*/
+
+# Test dump files
+documet_index/test_file.json
+
+# Presentations and LaTeX build artifacts
+talk_30min.*
+*.aux
+*.out
+*.pdf
+prez.zip
+
+# Generated JSON results/dumps (none of the JSON in this repo is source code)
+*.json
+# ...except the demo's sample questions, which are source data for the demo app.
+!demo/sample_questions.json
+
+# Datasets — large evaluation corpora, PDFs, samples
+data/
+**/samples.json
+
+# VS Code workspace settings
+.vscode/
 
 #InteliJ IDE
 
@@ -307,3 +382,20 @@ http-client.private.env.json
 
 # Github Copilot persisted session migrations, see: https://github.com/microsoft/copilot-intellij-feedback/issues/712#issuecomment-3322062215
 .idea/**/copilot.data.migration.*.xml
+
+# ---- Local runtime / service files ----
+*.log
+*.bak
+*.tmp
+nohup.out
+*.sqlite3
+.gitmodules.local
+
+# Analysis / research scratch
+analysis/
+analysys/
+
+# Evaluation artifacts
+app/tests/.sentry-native/
+app/tests/SmallerDataset_answers_evaluated*.txt
+app/tests/mmlong_strategy_grid_results_first/

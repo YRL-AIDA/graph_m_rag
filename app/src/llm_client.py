@@ -73,20 +73,33 @@ class LLMClient:
             :param kwargs: Дополнительные параметры для client.chat.completions.create
             :return: Кортеж (успех: bool, результат: List[str] или None)
         '''
+        _client_opts = get_kwargs(self.client_kwargs, OpenAI)
+        # Bound the request so a terminated/overloaded LLM connection cannot
+        # hang a worker thread for the openai SDK's default 10 minutes (which
+        # saturated the threadpool and made the whole service unresponsive).
+        # 300s ≈ max demo proxy wait; long thinking generations still fit.
+        _client_opts.setdefault("timeout", 300.0)
         client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
             max_retries=1,
-            **get_kwargs(self.client_kwargs, OpenAI)
+            **_client_opts
         )
 
         try:
             print(f"Generating content with model: {self.model_name}")
 
+            call_kwargs = get_kwargs(kwargs, client.chat.completions.create)
+            # A caller may override the model via kwargs (e.g. question_decomposer
+            # passes model=model_name). Pull it out of the spread so `model` is
+            # not passed twice to create(), which would raise
+            # "got multiple values for keyword argument 'model'".
+            model = call_kwargs.pop("model", self.model_name)
+
             response = client.chat.completions.create(
                 messages=messages,
-                model=self.model_name,
-                **get_kwargs(kwargs, client.chat.completions.create)
+                model=model,
+                **call_kwargs
             )
 
             return True, [answ.message.content for answ in response.choices]
@@ -94,10 +107,13 @@ class LLMClient:
         except Exception as e:
             print("Failed to call LLM: " + str(e))
             if hasattr(e, 'response'):
-                error_info = e.response.json()
-                code_value = error_info['error']['code']
-                print(code_value)
+                try:
+                    error_info = e.response.json()
+                    code_value = error_info['error']['code']
+                    print(code_value)
+                except Exception:
+                    print("error_code_unknown")
             else:
-                code_value = "context_length_exceeded"
-                print(code_value)
+                # No server response body — do NOT guess "context_length_exceeded".
+                print("no_error_body")
             return False, None

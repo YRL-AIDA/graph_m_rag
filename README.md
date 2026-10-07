@@ -42,9 +42,9 @@ Graph-M-RAG is a production-grade RAG system that combines **structural document
 | **MinIO** | S3-compatible object storage for PDFs, images, results | MinIO |
 | **Qdrant** | Vector database for embedding search (text blocks, entities, communities) | Qdrant |
 | **Neo4j** | Graph database for structural layout graph + semantic knowledge graph | Neo4j 5.x |
-| **Embedding Service** | Text + image embedding generation | Qwen3-Embedding |
-| **Reranker** | Cross-encoder reranking of retrieved blocks | Qwen3-VL-Reranker |
-| **LLM** | Multimodal answer generation (text + images + tables) | Qwen3-VL-32B-Thinking |
+| **Embedding Service** | Text + image embedding generation | [Qwen3-Embedding](https://github.com/YRL-AIDA/qwen-embedding-service) |
+| **Reranker** | Cross-encoder reranking of retrieved blocks | [Qwen3-VL-Reranker](https://github.com/YRL-AIDA/qwen-embedding-service) (same service, `/reranker` endpoint) |
+| **LLM** | Multimodal answer generation (text + images + tables) | Qwen3-VL-32B-Thinking (deployed via VLLM) |
 | **Semantic Graph** | Entity extraction, Leiden clustering, community reports | LLM + graspologic |
 | **Demo App** | Interactive web UI for demonstrations | FastAPI + JS |
 
@@ -88,13 +88,38 @@ Graph-M-RAG is a production-grade RAG system that combines **structural document
 
 ### External Services
 
-These services run outside Docker and must be deployed separately:
+These services run outside Docker and must be deployed separately.
 
-| Service | Purpose | Reference |
-|---------|---------|-----------|
-| **Qwen3-Embedding** | Text/image embedding generation | [qwen-embedding-service](https://github.com/YRL-AIDA/qwen-embedding-service) |
-| **Qwen3-VL-Reranker** | Cross-encoder reranking | Same service, `/reranker` endpoint |
-| **Qwen3-VL-32B** | Multimodal answer generation | VLLM deployment |
+#### Embedding & Reranker Service
+
+The embedding and reranker endpoints are provided by a single service from the [`qwen-embedding-service`](https://github.com/YRL-AIDA/qwen-embedding-service) repository. Deploy it on a GPU server:
+
+```bash
+git clone https://github.com/YRL-AIDA/qwen-embedding-service
+cd qwen-embedding-service
+# Follow the setup instructions in that repository
+```
+
+This service exposes two endpoints:
+- `/embed` — text and image embedding generation
+- `/reranker` — cross-encoder reranking of retrieved blocks
+
+#### LLM (Answer Generation)
+
+For answer generation you need an OpenAI-compatible endpoint serving a **multimodal (VL) model**. The system has been tested with **Qwen3-VL-32B-Thinking** deployed via [VLLM](https://github.com/vllm-project/vllm):
+
+```bash
+vllm serve Qwen/Qwen3-VL-32B-Thinking \
+  --host 0.0.0.0 \
+  --port 8888 \
+  --api-key EMPTY
+```
+
+| Service | Purpose | Endpoint |
+|---------|---------|----------|
+| **Embedding** | Text + image embedding generation | `http://<host>:10115/embed` |
+| **Reranker** | Cross-encoder reranking | `http://<host>:10115/reranker` |
+| **LLM** | Multimodal answer generation | `http://<host>:8888/v1` (OpenAI-compatible) |
 
 ---
 
